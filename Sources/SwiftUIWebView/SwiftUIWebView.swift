@@ -6,6 +6,7 @@ public enum WebViewAction: Equatable {
     case idle,
          load(URLRequest),
          loadHTML(String),
+         loadHTMLWithBaseURL(String, URL),
          reload,
          goBack,
          goForward,
@@ -24,6 +25,10 @@ public enum WebViewAction: Equatable {
         if case let .loadHTML(htmlLHS) = lhs,
            case let .loadHTML(htmlRHS) = rhs {
             return htmlLHS == htmlRHS
+        }
+        if case let .loadHTMLWithBaseURL(htmlLHS, urlLHS) = lhs,
+           case let .loadHTMLWithBaseURL(htmlRHS, urlRHS) = rhs {
+            return htmlLHS == htmlRHS && urlLHS == urlRHS
         }
         if case .reload = lhs,
            case .reload = rhs {
@@ -73,9 +78,24 @@ public struct WebViewState: Equatable {
     }
 }
 
+public struct WebViewMessage: Equatable {
+    fileprivate let uuid: UUID
+    public let name: String
+    public let body: Any
+    
+    public static func == (lhs: WebViewMessage, rhs: WebViewMessage) -> Bool {
+        lhs.uuid == rhs.uuid
+            && lhs.name == rhs.name
+    }
+}
+
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
     var actionInProgress = false
+    
+    var messageHandlerNames: [String] {
+        webView.messageHandlerNames
+    }
     
     init(webView: WebView) {
         self.webView = webView
@@ -99,6 +119,13 @@ public class WebViewCoordinator: NSObject {
         webView.state = newState
         webView.action = .idle
         actionInProgress = false
+    }
+}
+
+extension WebViewCoordinator: WKScriptMessageHandler {
+    public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard webView.messageHandlerNames.contains(message.name) else { return }
+        webView.message = WebViewMessage(uuid: UUID(), name: message.name, body: message.body)
     }
 }
 
@@ -184,6 +211,8 @@ public struct WebViewConfig {
     public let isScrollEnabled: Bool
     public let isOpaque: Bool
     public let backgroundColor: Color
+    public let userScripts: [WKUserScript]
+    public var messageHandlerNames: [String]
     
     public init(javaScriptEnabled: Bool = true,
                 allowsBackForwardNavigationGestures: Bool = true,
@@ -191,7 +220,9 @@ public struct WebViewConfig {
                 mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [],
                 isScrollEnabled: Bool = true,
                 isOpaque: Bool = true,
-                backgroundColor: Color = .clear) {
+                backgroundColor: Color = .clear,
+                userScripts: [WKUserScript] = [],
+                messageHandlerNames: [String] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
@@ -199,21 +230,29 @@ public struct WebViewConfig {
         self.isScrollEnabled = isScrollEnabled
         self.isOpaque = isOpaque
         self.backgroundColor = backgroundColor
+        self.userScripts = userScripts
+        self.messageHandlerNames = messageHandlerNames
     }
 }
 
 #if os(iOS)
 public struct WebView: UIViewRepresentable {
-    let config: WebViewConfig
+    private let config: WebViewConfig
     @Binding var action: WebViewAction
     @Binding var state: WebViewState
+    @Binding var message: WebViewMessage?
     let restrictedPages: [String]?
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     
+    var messageHandlerNames: [String] {
+        config.messageHandlerNames
+    }
+    
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
+                message: Binding<WebViewMessage?>,
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
@@ -223,6 +262,12 @@ public struct WebView: UIViewRepresentable {
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.schemeHandlers = schemeHandlers
+    }
+    
+    fileprivate func setupScripts(webView: WKWebView) {
+        for userScript in userScripts {
+            webView.configuration.userContentController.addUserScript(userScript)
+        }
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -237,6 +282,15 @@ public struct WebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
         configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
         configuration.preferences = preferences
+
+        let userContentController = WKUserContentController()
+        for userScript in config.userScripts {
+            userContentController.addUserScript(userScript)
+        }
+        for messageHandlerName in messageHandlerNames {
+            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+        }
+        configuration.userContentController = userContentController
         
         let webView = WKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -248,6 +302,7 @@ public struct WebView: UIViewRepresentable {
         } else {
             webView.backgroundColor = .clear
         }
+        
         
         return webView
     }
@@ -263,7 +318,9 @@ public struct WebView: UIViewRepresentable {
         case .load(let request):
             uiView.load(request)
         case .loadHTML(let pageHTML):
-            uiView.loadHTMLString(pageHTML, baseURL: nil)
+            uiView.loadHTMLString(pageHTML)
+        case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
+            uiView.loadHTMLString(pageHTML, baseURL: baseURL)
         case .reload:
             uiView.reload()
         case .goBack:
@@ -280,27 +337,40 @@ public struct WebView: UIViewRepresentable {
             }
         }
     }
+    
+    public static func dismantleUIView(_ uiView: WKWebView, coordinator: WebViewCoordinator) {
+        for messageHandlerName in coordinator.messageHandlerNames {
+            uiView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+        }
+    }
 }
 #endif
 
 #if os(macOS)
 public struct WebView: NSViewRepresentable {
-    let config: WebViewConfig
+    private let config: WebViewConfig
     @Binding var action: WebViewAction
     @Binding var state: WebViewState
+    @Binding var message: WebViewMessage?
     let restrictedPages: [String]?
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     
+    var messageHandlerNames: [String] {
+        config.messageHandlerNames
+    }
+    
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
+                message: Binding<WebViewMessage?>,
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
         _state = state
+        _message = message
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.schemeHandlers = schemeHandlers
@@ -312,11 +382,21 @@ public struct WebView: NSViewRepresentable {
     
     public func makeNSView(context: Context) -> WKWebView {
         let preferences = WKPreferences()
-        preferences.javaScriptEnabled = config.javaScriptEnabled
+//        preferences.javaScriptEnabled = config.javaScriptEnabled
+        preferences.javaScriptEnabled = true
         
         let configuration = WKWebViewConfiguration()
         configuration.preferences = preferences
         
+        let userContentController = WKUserContentController()
+        for userScript in config.userScripts {
+            userContentController.addUserScript(userScript)
+        }
+        for messageHandlerName in messageHandlerNames {
+            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+        }
+        configuration.userContentController = userContentController
+
         let webView = WKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
@@ -335,6 +415,8 @@ public struct WebView: NSViewRepresentable {
             uiView.load(request)
         case .loadHTML(let html):
             uiView.loadHTMLString(html, baseURL: nil)
+        case .loadHTMLWithBaseURL(let html, let baseURL):
+            uiView.loadHTMLString(html, baseURL: baseURL)
         case .reload:
             uiView.reload()
         case .goBack:
@@ -354,12 +436,21 @@ public struct WebView: NSViewRepresentable {
             action = .idle
         }
     }
+    
+    public static func dismantleNSView(_ nsView: WKWebView, coordinator: WebViewCoordinator) {
+        for messageHandlerName in coordinator.messageHandlerNames {
+            nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+        }
+    }
 }
 #endif
 
 struct WebViewTest: View {
     @State private var action = WebViewAction.idle
     @State private var state = WebViewState.empty
+    @State private var message: WebViewMessage? = nil
+
+    private var userScripts: [WKUserScript] = []
     @State private var address = "https://www.google.com"
     
     var body: some View {
@@ -370,6 +461,7 @@ struct WebViewTest: View {
             Divider()
             WebView(action: $action,
                     state: $state,
+                    message: $message,
                     restrictedPages: ["apple.com"],
                     htmlInState: true)
             Text(state.pageHTML ?? "")
