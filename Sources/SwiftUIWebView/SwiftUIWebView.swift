@@ -328,6 +328,10 @@ public struct WebView: UIViewRepresentable {
     public func makeUIView(context: Context) -> WKWebView {
         let preferences = WKPreferences()
         preferences.javaScriptEnabled = config.javaScriptEnabled
+                
+        // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
+        preferences.setValue(true, forKey: "developerExtrasEnabled")
+
         
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
@@ -469,6 +473,10 @@ public struct WebView: NSViewRepresentable {
     public func makeNSView(context: Context) -> WKWebView {
         let preferences = WKPreferences()
         preferences.javaScriptEnabled = config.javaScriptEnabled
+        
+        // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
+        preferences.setValue(true, forKey: "developerExtrasEnabled")
+
         
         let configuration = WKWebViewConfiguration()
         configuration.preferences = preferences
