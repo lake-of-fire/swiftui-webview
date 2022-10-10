@@ -205,10 +205,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
 }
 
-public class WebViewScriptCaller {
+public class WebViewScriptCaller: Equatable {
     let uuid = UUID().uuidString
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     
+    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
+        return lhs.uuid == rhs.uuid
+    }
+
     @MainActor public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
         guard let caller = caller else {
             print("No caller set for WebViewScriptCaller \(uuid)") // TODO: Error
