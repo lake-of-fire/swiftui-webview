@@ -205,9 +205,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
 }
 
-public class WebViewScriptCaller: Equatable {
+public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
-    var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.uuid == rhs.uuid
@@ -317,14 +317,6 @@ public struct WebView: UIViewRepresentable {
         self.schemeHandlers = schemeHandlers
     }
     
-    fileprivate func setupScripts(webView: WKWebView) {
-        webView.configuration.userContentController.addUserScript(LocationChangeUserScript().userScript)
-        webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
-        for userScript in userScripts {
-            webView.configuration.userContentController.addUserScript(userScript)
-        }
-    }
-    
     public func makeCoordinator() -> WebViewCoordinator {
         WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
     }
@@ -345,6 +337,13 @@ public struct WebView: UIViewRepresentable {
         for userScript in config.userScripts {
             userContentController.addUserScript(userScript)
         }
+        
+        userContentController.addUserScript(LocationChangeUserScript().userScript)
+        userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
+        for userScript in config.userScripts {
+            userContentController.addUserScript(userScript)
+        }
+
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
@@ -362,7 +361,7 @@ public struct WebView: UIViewRepresentable {
         } else {
             webView.backgroundColor = .clear
         }
-                
+        
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -399,7 +398,7 @@ public struct WebView: UIViewRepresentable {
             case .load(let request):
                 uiView.load(request)
             case .loadHTML(let pageHTML):
-                uiView.loadHTMLString(pageHTML)
+                uiView.loadHTMLString(pageHTML, baseURL: nil)
             case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
                 uiView.loadHTMLString(pageHTML, baseURL: baseURL)
             case .reload:
@@ -422,12 +421,8 @@ public struct WebView: UIViewRepresentable {
     
     public func onMessageReceived(forName name: String, perform: ((WebViewMessage) -> Void)?) -> WebView {
         var copy = self
-        if var handlers = copy.messageHandlers[name], let perform = perform {
-            handlers.append(perform)
-        } else if let perform = perform {
-            copy.messageHandlerNamesToRegister.insert(name)
-            copy.messageHandlers[name] = [perform]
-        }
+        copy.messageHandlerNamesToRegister.insert(name)
+        copy.messageHandlers[name] = perform
         return copy
     }
     
@@ -489,6 +484,7 @@ public struct WebView: NSViewRepresentable {
         for userScript in config.userScripts {
             userContentController.addUserScript(userScript)
         }
+        
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
