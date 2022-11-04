@@ -297,7 +297,7 @@ public struct WebView: UIViewRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    @State private var messageHandlerNamesToRegister = Set<String>()
+    private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
     
@@ -322,8 +322,8 @@ public struct WebView: UIViewRepresentable {
     }
     
     public func makeUIView(context: Context) -> WKWebView {
-        let preferences = WKPreferences()
-        preferences.javaScriptEnabled = config.javaScriptEnabled
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
                 
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -332,14 +332,11 @@ public struct WebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
         configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
         configuration.dataDetectorTypes = [.all]
-        configuration.preferences = preferences
-
-        for userScript in config.userScripts {
-            userContentController.addUserScript(userScript)
-        }
+        configuration.defaultWebpagePreferences = preferences
         
         userContentController.addUserScript(LocationChangeUserScript().userScript)
         userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
+        
         for userScript in config.userScripts {
             userContentController.addUserScript(userScript)
         }
@@ -372,17 +369,20 @@ public struct WebView: UIViewRepresentable {
     
     public func updateUIView(_ uiView: WKWebView, context: Context) {
         for messageHandlerName in messageHandlerNamesToRegister {
+            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        messageHandlerNamesToRegister.removeAll()
         
         if needsHistoryRefresh {
             var newState = state
             newState.isLoading = state.isLoading
             newState.canGoBack = uiView.canGoBack
             newState.canGoForward = uiView.canGoForward
-            state = newState
-            needsHistoryRefresh = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                state = newState
+                needsHistoryRefresh = false
+            }
         }
         
 //        if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
@@ -390,7 +390,8 @@ public struct WebView: UIViewRepresentable {
 //        }
 //        context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         
-        if action != .idle && !context.coordinator.actionInProgress {
+//        if action != .idle && !context.coordinator.actionInProgress {
+        if action != .idle {
             context.coordinator.actionInProgress = true
             switch action {
             case .idle:
@@ -415,6 +416,9 @@ public struct WebView: UIViewRepresentable {
                         callback(.success(result))
                     }
                 }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                action = .idle
             }
         }
     }
@@ -469,15 +473,16 @@ public struct WebView: NSViewRepresentable {
     }
     
     public func makeNSView(context: Context) -> WKWebView {
-        let preferences = WKPreferences()
-        preferences.javaScriptEnabled = config.javaScriptEnabled
+
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
         
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
 
         
         let configuration = WKWebViewConfiguration()
-        configuration.preferences = preferences
+        configuration.defaultWebpagePreferences = preferences
         
         userContentController.addUserScript(LocationChangeUserScript().userScript)
         userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
