@@ -287,6 +287,9 @@ public struct WebViewConfig {
     }
 }
 
+public class EnhancedWKWebView: WKWebView {
+}
+
 #if os(iOS)
 public struct WebView: UIViewRepresentable {
     private let config: WebViewConfig
@@ -321,7 +324,7 @@ public struct WebView: UIViewRepresentable {
         WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
     }
     
-    public func makeUIView(context: Context) -> WKWebView {
+    public func makeUIView(context: Context) -> EnhancedWKWebView {
         let preferences = WKWebpagePreferences()
         preferences.allowsContentJavaScript = config.javaScriptEnabled
                 
@@ -348,7 +351,7 @@ public struct WebView: UIViewRepresentable {
         }
         configuration.userContentController = userContentController
         
-        let webView = WKWebView(frame: CGRect.zero, configuration: configuration)
+        let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
@@ -367,7 +370,7 @@ public struct WebView: UIViewRepresentable {
         return webView
     }
     
-    public func updateUIView(_ uiView: WKWebView, context: Context) {
+    public func updateUIView(_ uiView: EnhancedWKWebView, context: Context) {
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
@@ -417,7 +420,7 @@ public struct WebView: UIViewRepresentable {
                     }
                 }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
                 action = .idle
             }
         }
@@ -430,7 +433,7 @@ public struct WebView: UIViewRepresentable {
         return copy
     }
     
-    public static func dismantleUIView(_ uiView: WKWebView, coordinator: WebViewCoordinator) {
+    public static func dismantleUIView(_ uiView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
         for messageHandlerName in coordinator.messageHandlerNames {
             uiView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
         }
@@ -472,8 +475,7 @@ public struct WebView: NSViewRepresentable {
         return WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
     }
     
-    public func makeNSView(context: Context) -> WKWebView {
-
+    public func makeNSView(context: Context) -> EnhancedWKWebView {
         let preferences = WKWebpagePreferences()
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         
@@ -497,7 +499,7 @@ public struct WebView: NSViewRepresentable {
         }
         configuration.userContentController = userContentController
 
-        let webView = WKWebView(frame: CGRect.zero, configuration: configuration)
+        let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         
@@ -509,7 +511,7 @@ public struct WebView: NSViewRepresentable {
         return webView
     }
 
-    public func updateNSView(_ uiView: WKWebView, context: Context) {
+    public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
@@ -570,7 +572,7 @@ public struct WebView: NSViewRepresentable {
         return copy
     }
     
-    public static func dismantleNSView(_ nsView: WKWebView, coordinator: WebViewCoordinator) {
+    public static func dismantleNSView(_ nsView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
         for messageHandlerName in coordinator.messageHandlerNames {
             nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
         }
