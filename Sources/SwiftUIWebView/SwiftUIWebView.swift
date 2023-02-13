@@ -9,6 +9,7 @@ public enum WebViewAction: Equatable {
          reload,
          goBack,
          goForward,
+         go(WKBackForwardListItem),
          evaluateJS(String, (Result<Any?, Error>) -> Void)
     
     public static func == (lhs: WebViewAction, rhs: WebViewAction) -> Bool {
@@ -27,6 +28,9 @@ public enum WebViewAction: Equatable {
         }
         if case .reload = lhs, case .reload = rhs {
             return true
+        }
+        if case let .go(itemLHS) = lhs, case let .go(itemRHS) = rhs {
+            return itemLHS == itemRHS
         }
         if case .goBack = lhs, case .goBack = rhs {
             return true
@@ -50,14 +54,19 @@ public struct WebViewState: Equatable {
     public internal(set) var error: Error?
     public internal(set) var canGoBack: Bool
     public internal(set) var canGoForward: Bool
+    public internal(set) var backList: [WKBackForwardListItem]
+    public internal(set) var forwardList: [WKBackForwardListItem]
     
-    public static let empty = WebViewState(isLoading: false,
-                                           pageURL: URL(string: "about:blank")!,
-                                           pageTitle: nil,
-                                           pageHTML: nil,
-                                           error: nil,
-                                           canGoBack: false,
-                                           canGoForward: false)
+    public static let empty = WebViewState(
+        isLoading: false,
+        pageURL: URL(string: "about:blank")!,
+        pageTitle: nil,
+        pageHTML: nil,
+        error: nil,
+        canGoBack: false,
+        canGoForward: false,
+        backList: [],
+        forwardList: [])
     
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
@@ -67,6 +76,8 @@ public struct WebViewState: Equatable {
             && lhs.error?.localizedDescription == rhs.error?.localizedDescription
             && lhs.canGoBack == rhs.canGoBack
             && lhs.canGoForward == rhs.canGoForward
+            && lhs.backList == rhs.backList
+            && lhs.forwardList == rhs.forwardList
     }
 }
 
@@ -83,7 +94,6 @@ public struct WebViewMessage: Equatable {
 
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
-    var actionInProgress = false
     
     var scriptCaller: WebViewScriptCaller?
     var registeredMessageHandlerNames = Set<String>()
@@ -100,6 +110,8 @@ public class WebViewCoordinator: NSObject {
     func setLoading(_ isLoading: Bool,
                     canGoBack: Bool? = nil,
                     canGoForward: Bool? = nil,
+                    backList: [WKBackForwardListItem]? = nil,
+                    forwardList: [WKBackForwardListItem]? = nil,
                     error: Error? = nil) {
         var newState = webView.state
         newState.isLoading = isLoading
@@ -109,12 +121,17 @@ public class WebViewCoordinator: NSObject {
         if let canGoForward = canGoForward {
             newState.canGoForward = canGoForward
         }
+        if let backList = backList {
+            newState.backList = backList
+        }
+        if let forwardList = forwardList {
+            newState.forwardList = forwardList
+        }
         if let error = error {
             newState.error = error
         }
         webView.state = newState
         webView.action = .idle
-        actionInProgress = false
     }
 }
 
@@ -135,9 +152,12 @@ extension WebViewCoordinator: WKScriptMessageHandler {
 
 extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        setLoading(false,
-                 canGoBack: webView.canGoBack,
-                 canGoForward: webView.canGoForward)
+        setLoading(
+            false,
+            canGoBack: webView.canGoBack,
+            canGoForward: webView.canGoForward,
+            backList: webView.backForwardList.backList,
+            forwardList: webView.backForwardList.forwardList)
         
         webView.evaluateJavaScript("document.title") { (response, error) in
             if let title = response as? String {
@@ -179,9 +199,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
     
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-      setLoading(true,
-                 canGoBack: webView.canGoBack,
-                 canGoForward: webView.canGoForward)
+        setLoading(
+            true,
+            canGoBack: webView.canGoBack,
+            canGoForward: webView.canGoForward,
+            backList: webView.backForwardList.backList,
+            forwardList: webView.backForwardList.forwardList)
+
     }
     
     public func webView(_ webView: WKWebView,
@@ -382,6 +406,8 @@ public struct WebView: UIViewRepresentable {
             newState.isLoading = state.isLoading
             newState.canGoBack = uiView.canGoBack
             newState.canGoForward = uiView.canGoForward
+            newState.backList = uiView.backForwardList.backList
+            newState.forwardList = uiView.backForwardList.forwardList
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
                 state = newState
                 needsHistoryRefresh = false
@@ -393,9 +419,7 @@ public struct WebView: UIViewRepresentable {
 //        }
 //        context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         
-//        if action != .idle && !context.coordinator.actionInProgress {
         if action != .idle {
-            context.coordinator.actionInProgress = true
             switch action {
             case .idle:
                 break
@@ -411,6 +435,8 @@ public struct WebView: UIViewRepresentable {
                 uiView.goBack()
             case .goForward:
                 uiView.goForward()
+            case .go(let item):
+                uiView.go(to: item)
             case .evaluateJS(let command, let callback):
                 uiView.evaluateJavaScript(command) { result, error in
                     if let error = error {
@@ -523,6 +549,8 @@ public struct WebView: NSViewRepresentable {
             newState.isLoading = state.isLoading
             newState.canGoBack = uiView.canGoBack
             newState.canGoForward = uiView.canGoForward
+            newState.backList = uiView.backForwardList.backList
+            newState.forwardList = uiView.backForwardList.forwardList
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
                 state = newState
                 needsHistoryRefresh = false
@@ -550,6 +578,8 @@ public struct WebView: NSViewRepresentable {
                 uiView.goBack()
             case .goForward:
                 uiView.goForward()
+            case .go(let item):
+                uiView.go(to: item)
             case .evaluateJS(let command, let callback):
                 uiView.evaluateJavaScript(command) { result, error in
                     if let error = error {
