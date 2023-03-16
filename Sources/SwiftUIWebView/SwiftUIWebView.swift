@@ -48,6 +48,7 @@ public enum WebViewAction: Equatable {
 
 public struct WebViewState: Equatable {
     public internal(set) var isLoading: Bool
+    public internal(set) var isProvisionallyNavigating: Bool
     public internal(set) var pageURL: URL
     public internal(set) var pageTitle: String?
     public internal(set) var pageHTML: String?
@@ -59,6 +60,7 @@ public struct WebViewState: Equatable {
     
     public static let empty = WebViewState(
         isLoading: false,
+        isProvisionallyNavigating: false,
         pageURL: URL(string: "about:blank")!,
         pageTitle: nil,
         pageHTML: nil,
@@ -70,6 +72,7 @@ public struct WebViewState: Equatable {
     
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
+            && lhs.isProvisionallyNavigating == rhs.isProvisionallyNavigating
             && lhs.pageURL == rhs.pageURL
             && lhs.pageTitle == rhs.pageTitle
             && lhs.pageHTML == rhs.pageHTML
@@ -108,6 +111,7 @@ public class WebViewCoordinator: NSObject {
     }
     
     func setLoading(_ isLoading: Bool,
+                    isProvisionallyNavigating: Bool? = nil,
                     canGoBack: Bool? = nil,
                     canGoForward: Bool? = nil,
                     backList: [WKBackForwardListItem]? = nil,
@@ -115,6 +119,9 @@ public class WebViewCoordinator: NSObject {
                     error: Error? = nil) {
         var newState = webView.state
         newState.isLoading = isLoading
+        if let isProvisionallyNavigating = isProvisionallyNavigating {
+            newState.isProvisionallyNavigating = isProvisionallyNavigating
+        }
         if let canGoBack = canGoBack {
             newState.canGoBack = canGoBack
         }
@@ -154,6 +161,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         setLoading(
             false,
+            isProvisionallyNavigating: false,
             canGoBack: webView.canGoBack,
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
@@ -187,25 +195,25 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
     
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        setLoading(false)
+        setLoading(false, isProvisionallyNavigating: false)
     }
     
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        setLoading(false, error: error)
+        setLoading(false, isProvisionallyNavigating: false, error: error)
     }
     
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        setLoading(true)
+        setLoading(true, isProvisionallyNavigating: false)
     }
     
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         setLoading(
             true,
+            isProvisionallyNavigating: true,
             canGoBack: webView.canGoBack,
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
-
     }
     
     public func webView(_ webView: WKWebView,
@@ -214,7 +222,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         if let host = navigationAction.request.url?.host {
             if self.webView.restrictedPages?.first(where: { host.contains($0) }) != nil {
                 decisionHandler(.cancel)
-                setLoading(false)
+                setLoading(false, isProvisionallyNavigating: false)
                 return
             }
         }
@@ -315,7 +323,62 @@ public class EnhancedWKWebView: WKWebView {
 }
 
 #if os(iOS)
-public struct WebView: UIViewRepresentable {
+public class WebViewController: UIViewController {
+    let webView: EnhancedWKWebView
+    var additionalObscuredInsets = UIEdgeInsets.zero {
+        didSet {
+//            updateObscuredInsets()
+        }
+    }
+    
+    public init(webView: EnhancedWKWebView) {
+        self.webView = webView
+        super.init(nibName: nil, bundle: nil)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(webView)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: webView.topAnchor),
+            view.leftAnchor.constraint(equalTo: webView.leftAnchor),
+            view.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            view.rightAnchor.constraint(equalTo: webView.rightAnchor)
+        ])
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        updateObscuredInsets()
+    }
+    
+    override public func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        updateObscuredInsets()
+    }
+    
+    private func updateObscuredInsets() {
+        guard let webView = view.subviews.first as? WKWebView else { return }
+        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + additionalObscuredInsets.top, left: view.safeAreaInsets.left + additionalObscuredInsets.left, bottom: view.safeAreaInsets.bottom + additionalObscuredInsets.bottom, right: view.safeAreaInsets.right + additionalObscuredInsets.right)
+//        let insets = UIEdgeInsets(top: view.safeAreaInsets.top, left: view.safeAreaInsets.left, bottom: view.safeAreaInsets.bottom, right: view.safeAreaInsets.right)
+//        let insets = UIEdgeInsets(top: 40, left: 0, bottom: 90, right: 0)
+//        if webView.value(forKey: "_obscuredInsets") as? UIEdgeInsets != insets {
+//            let argument: [Any] = ["_c", "lea", "r"]
+//            let method = argument.compactMap { $0 as? String }.joined()
+//                    let selector: Selector = NSSelectorFromString(method)
+
+            webView.setValue(insets, forKey: "_obscuredInsets")
+//        performSelector(Selector(extendedGraphemeClusterLiteral: "aVeryPrivateFunction"))
+//            webView.perform(NSSelectorFromString("_setObscuredInsets:"), with: insets)
+//            webView.performSelector(onMainThread: Selector("_setObscuredInsets:"), with: insets, waitUntilDone: true)
+            webView.setValue(true, forKey: "_haveSetObscuredInsets")
+//        }
+        // TODO: investigate _isChangingObscuredInsetsInteractively
+    }
+}
+
+public struct WebView: UIViewControllerRepresentable {
     private let config: WebViewConfig
     @Binding var action: WebViewAction
     @Binding var state: WebViewState
@@ -324,6 +387,7 @@ public struct WebView: UIViewRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    var additionalObscuredInsets: EdgeInsets
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
@@ -334,6 +398,7 @@ public struct WebView: UIViewRepresentable {
                 scriptCaller: WebViewScriptCaller? = nil,
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
+                additionalObscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -341,6 +406,7 @@ public struct WebView: UIViewRepresentable {
         self.scriptCaller = scriptCaller
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
+        self.additionalObscuredInsets = additionalObscuredInsets
         self.schemeHandlers = schemeHandlers
     }
     
@@ -348,15 +414,16 @@ public struct WebView: UIViewRepresentable {
         WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
     }
     
-    public func makeUIView(context: Context) -> EnhancedWKWebView {
+    public func makeUIViewController(context: Context) -> WebViewController {
         let preferences = WKWebpagePreferences()
         preferences.allowsContentJavaScript = config.javaScriptEnabled
-                
+        
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
+//        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
         configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
         configuration.dataDetectorTypes = [.all]
         configuration.defaultWebpagePreferences = preferences
@@ -367,7 +434,7 @@ public struct WebView: UIViewRepresentable {
         for userScript in config.userScripts {
             userContentController.addUserScript(userScript)
         }
-
+        
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
@@ -376,8 +443,11 @@ public struct WebView: UIViewRepresentable {
         configuration.userContentController = userContentController
         
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
+        webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+//        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
+        webView.scrollView.contentInsetAdjustmentBehavior = .always
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
@@ -391,10 +461,10 @@ public struct WebView: UIViewRepresentable {
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         
-        return webView
+        return WebViewController(webView: webView)
     }
     
-    public func updateUIView(_ uiView: EnhancedWKWebView, context: Context) {
+    public func updateUIViewController(_ controller: WebViewController, context: Context) {
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
@@ -404,41 +474,37 @@ public struct WebView: UIViewRepresentable {
         if needsHistoryRefresh {
             var newState = state
             newState.isLoading = state.isLoading
-            newState.canGoBack = uiView.canGoBack
-            newState.canGoForward = uiView.canGoForward
-            newState.backList = uiView.backForwardList.backList
-            newState.forwardList = uiView.backForwardList.forwardList
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            newState.isProvisionallyNavigating = state.isProvisionallyNavigating
+            newState.canGoBack = controller.webView.canGoBack
+            newState.canGoForward = controller.webView.canGoForward
+            newState.backList = controller.webView.backForwardList.backList
+            newState.forwardList = controller.webView.backForwardList.forwardList
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) {
                 state = newState
                 needsHistoryRefresh = false
             }
         }
-        
-//        if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
-//            context.coordinator.scriptCaller = scriptCaller
-//        }
-//        context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         
         if action != .idle {
             switch action {
             case .idle:
                 break
             case .load(let request):
-                uiView.load(request)
+                controller.webView.load(request)
             case .loadHTML(let pageHTML):
-                uiView.loadHTMLString(pageHTML, baseURL: nil)
+                controller.webView.loadHTMLString(pageHTML, baseURL: nil)
             case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
-                uiView.loadHTMLString(pageHTML, baseURL: baseURL)
+                controller.webView.loadHTMLString(pageHTML, baseURL: baseURL)
             case .reload:
-                uiView.reload()
+                controller.webView.reload()
             case .goBack:
-                uiView.goBack()
+                controller.webView.goBack()
             case .goForward:
-                uiView.goForward()
+                controller.webView.goForward()
             case .go(let item):
-                uiView.go(to: item)
+                controller.webView.go(to: item)
             case .evaluateJS(let command, let callback):
-                uiView.evaluateJavaScript(command) { result, error in
+                controller.webView.evaluateJavaScript(command) { result, error in
                     if let error = error {
                         callback(.failure(error))
                     } else {
@@ -450,19 +516,26 @@ public struct WebView: UIViewRepresentable {
                 action = .idle
             }
         }
+        
+        // TODO: Fix for RTL languages.
+        controller.additionalObscuredInsets = UIEdgeInsets(top: additionalObscuredInsets.top, left: additionalObscuredInsets.leading, bottom: additionalObscuredInsets.bottom, right: additionalObscuredInsets.trailing)
     }
     
-    public func onMessageReceived(forName name: String, perform: ((WebViewMessage) -> Void)?) -> WebView {
+    public func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
         var copy = self
         copy.messageHandlerNamesToRegister.insert(name)
         copy.messageHandlers[name] = perform
         return copy
     }
-    
-    public static func dismantleUIView(_ uiView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
+        
+    public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         for messageHandlerName in coordinator.messageHandlerNames {
-            uiView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+            controller.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
         }
+        
+        guard let webView = controller.view.subviews.first as? WKWebView else { return }
+        webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        controller.view.subviews.forEach { $0.removeFromSuperview() }
     }
 }
 #endif
@@ -477,6 +550,8 @@ public struct WebView: NSViewRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    /// Unused on macOS (for now).
+    var additionalObscuredInsets: EdgeInsets
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
@@ -487,6 +562,7 @@ public struct WebView: NSViewRepresentable {
                 scriptCaller: WebViewScriptCaller? = nil,
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
+                additionalObscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -494,6 +570,7 @@ public struct WebView: NSViewRepresentable {
         self.scriptCaller = scriptCaller
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
+        self.additionalObscuredInsets = additionalObscuredInsets
         self.schemeHandlers = schemeHandlers
     }
     
@@ -547,6 +624,7 @@ public struct WebView: NSViewRepresentable {
         if needsHistoryRefresh {
             var newState = state
             newState.isLoading = state.isLoading
+            newState.isProvisionallyNavigating = state.isProvisionallyNavigating
             newState.canGoBack = uiView.canGoBack
             newState.canGoForward = uiView.canGoForward
             newState.backList = uiView.backForwardList.backList
