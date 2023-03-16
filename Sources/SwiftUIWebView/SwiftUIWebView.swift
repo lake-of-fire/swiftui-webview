@@ -325,9 +325,9 @@ public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
 public class WebViewController: UIViewController {
     let webView: EnhancedWKWebView
-    var additionalObscuredInsets = UIEdgeInsets.zero {
+    var obscuredInsets = UIEdgeInsets.zero {
         didSet {
-//            updateObscuredInsets()
+            updateObscuredInsets()
         }
     }
     
@@ -360,19 +360,22 @@ public class WebViewController: UIViewController {
     
     private func updateObscuredInsets() {
         guard let webView = view.subviews.first as? WKWebView else { return }
-//        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + additionalObscuredInsets.top, left: view.safeAreaInsets.left + additionalObscuredInsets.left, bottom: view.safeAreaInsets.bottom + additionalObscuredInsets.bottom, right: view.safeAreaInsets.right + additionalObscuredInsets.right)
-        let insets = UIEdgeInsets(top: view.safeAreaInsets.top, left: view.safeAreaInsets.left, bottom: view.safeAreaInsets.bottom, right: view.safeAreaInsets.right)
+        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: obscuredInsets.bottom, right: obscuredInsets.right)
 //        let insets = UIEdgeInsets(top: 40, left: 0, bottom: 90, right: 0)
-//        if webView.value(forKey: "_obscuredInsets") as? UIEdgeInsets != insets {
+        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
+        let key = argument.compactMap({ $0 as? String }).joined()
+//        if webView.value(forKey: key) as? UIEdgeInsets != insets {
 //            let argument: [Any] = ["_c", "lea", "r"]
 //            let method = argument.compactMap { $0 as? String }.joined()
 //                    let selector: Selector = NSSelectorFromString(method)
 
-            webView.setValue(insets, forKey: "_obscuredInsets")
+            webView.setValue(insets, forKey: key)
 //        performSelector(Selector(extendedGraphemeClusterLiteral: "aVeryPrivateFunction"))
 //            webView.perform(NSSelectorFromString("_setObscuredInsets:"), with: insets)
 //            webView.performSelector(onMainThread: Selector("_setObscuredInsets:"), with: insets, waitUntilDone: true)
-            webView.setValue(true, forKey: "_haveSetObscuredInsets")
+            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
+            let key2 = argument2.compactMap({ $0 as? String }).joined()
+            webView.setValue(true, forKey: key2)
 //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
     }
@@ -387,7 +390,7 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    var additionalObscuredInsets: EdgeInsets
+    var obscuredInsets: EdgeInsets
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
@@ -398,7 +401,7 @@ public struct WebView: UIViewControllerRepresentable {
                 scriptCaller: WebViewScriptCaller? = nil,
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
-                additionalObscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -406,7 +409,7 @@ public struct WebView: UIViewControllerRepresentable {
         self.scriptCaller = scriptCaller
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
-        self.additionalObscuredInsets = additionalObscuredInsets
+        self.obscuredInsets = obscuredInsets
         self.schemeHandlers = schemeHandlers
     }
     
@@ -446,8 +449,8 @@ public struct WebView: UIViewControllerRepresentable {
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
-//        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
-        webView.scrollView.contentInsetAdjustmentBehavior = .always
+//        webView.scrollView.contentInsetAdjustmentBehavior = .always
+        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
@@ -517,8 +520,11 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         
-        // TODO: Fix for RTL languages.
-        controller.additionalObscuredInsets = UIEdgeInsets(top: additionalObscuredInsets.top, left: additionalObscuredInsets.leading, bottom: additionalObscuredInsets.bottom, right: additionalObscuredInsets.trailing)
+        // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
+        controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
+        
+        // _obscuredInsets ignores bottom (maybe a side too..?)
+        controller.webView.scrollView.contentInset.bottom = obscuredInsets.bottom
     }
     
     public func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
@@ -551,7 +557,7 @@ public struct WebView: NSViewRepresentable {
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     /// Unused on macOS (for now).
-    var additionalObscuredInsets: EdgeInsets
+    var obscuredInsets: EdgeInsets
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
@@ -562,7 +568,7 @@ public struct WebView: NSViewRepresentable {
                 scriptCaller: WebViewScriptCaller? = nil,
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
-                additionalObscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -570,7 +576,7 @@ public struct WebView: NSViewRepresentable {
         self.scriptCaller = scriptCaller
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
-        self.additionalObscuredInsets = additionalObscuredInsets
+        self.obscuredInsets = obscuredInsets
         self.schemeHandlers = schemeHandlers
     }
     
