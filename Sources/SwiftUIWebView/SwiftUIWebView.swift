@@ -360,8 +360,8 @@ public class WebViewController: UIViewController {
     
     private func updateObscuredInsets() {
         guard let webView = view.subviews.first as? WKWebView else { return }
-        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + additionalObscuredInsets.top, left: view.safeAreaInsets.left + additionalObscuredInsets.left, bottom: view.safeAreaInsets.bottom + additionalObscuredInsets.bottom, right: view.safeAreaInsets.right + additionalObscuredInsets.right)
-//        let insets = UIEdgeInsets(top: view.safeAreaInsets.top, left: view.safeAreaInsets.left, bottom: view.safeAreaInsets.bottom, right: view.safeAreaInsets.right)
+//        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + additionalObscuredInsets.top, left: view.safeAreaInsets.left + additionalObscuredInsets.left, bottom: view.safeAreaInsets.bottom + additionalObscuredInsets.bottom, right: view.safeAreaInsets.right + additionalObscuredInsets.right)
+        let insets = UIEdgeInsets(top: view.safeAreaInsets.top, left: view.safeAreaInsets.left, bottom: view.safeAreaInsets.bottom, right: view.safeAreaInsets.right)
 //        let insets = UIEdgeInsets(top: 40, left: 0, bottom: 90, right: 0)
 //        if webView.value(forKey: "_obscuredInsets") as? UIEdgeInsets != insets {
 //            let argument: [Any] = ["_c", "lea", "r"]
