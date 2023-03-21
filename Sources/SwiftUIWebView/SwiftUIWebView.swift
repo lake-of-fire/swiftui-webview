@@ -364,18 +364,9 @@ public class WebViewController: UIViewController {
     private func updateObscuredInsets() {
         guard let webView = view.subviews.first as? WKWebView else { return }
         let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: obscuredInsets.bottom, right: obscuredInsets.right)
-//        let insets = UIEdgeInsets(top: 40, left: 0, bottom: 90, right: 0)
         let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
-//        if webView.value(forKey: key) as? UIEdgeInsets != insets {
-//            let argument: [Any] = ["_c", "lea", "r"]
-//            let method = argument.compactMap { $0 as? String }.joined()
-//                    let selector: Selector = NSSelectorFromString(method)
-
             webView.setValue(insets, forKey: key)
-//        performSelector(Selector(extendedGraphemeClusterLiteral: "aVeryPrivateFunction"))
-//            webView.perform(NSSelectorFromString("_setObscuredInsets:"), with: insets)
-//            webView.performSelector(onMainThread: Selector("_setObscuredInsets:"), with: insets, waitUntilDone: true)
             let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
             let key2 = argument2.compactMap({ $0 as? String }).joined()
             webView.setValue(true, forKey: key2)
@@ -397,11 +388,12 @@ public struct WebView: UIViewControllerRepresentable {
     let persistantWebViewID: String?
     
     private var messageHandlerNamesToRegister = Set<String>()
-    private var userContentController = WKUserContentController()
+//    private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
     
     private static var webViewCache: [String: EnhancedWKWebView] = [:]
-
+    private static let processPool = WKProcessPool()
+    
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
@@ -426,49 +418,58 @@ public struct WebView: UIViewControllerRepresentable {
         WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
     }
     
-    private static func makeWebView(id: String?, configuration: WKWebViewConfiguration) -> EnhancedWKWebView {
+    private static func makeWebView(id: String?, config: WebViewConfig, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
         if let id = id {
             web = Self.webViewCache[id] // it is UI thread so safe to access static
+            for messageHandlerName in coordinator.messageHandlerNames {
+                web?.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+            }
         }
         if web == nil {
+            let preferences = WKWebpagePreferences()
+            preferences.allowsContentJavaScript = config.javaScriptEnabled
+            
+            let configuration = WKWebViewConfiguration()
+            configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
+    //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
+            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
+            configuration.dataDetectorTypes = [.all]
+            configuration.defaultWebpagePreferences = preferences
+            configuration.processPool = Self.processPool
+            
+            var userContentController = WKUserContentController()
+            userContentController.addUserScript(LocationChangeUserScript().userScript)
+            userContentController.add(coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
+            
+            for userScript in config.userScripts {
+                userContentController.addUserScript(userScript)
+            }
+            
+            configuration.userContentController = userContentController
+            
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
             if let id = id {
                 Self.webViewCache[id] = web
             }
         }
-        return web!
+        if let web = web {
+            for messageHandlerName in messageHandlerNamesToRegister {
+                if coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+                web.configuration.userContentController.add(coordinator, contentWorld: .page, name: messageHandlerName)
+                coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
+            }
+        }
+        guard let web = web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
+        return web
     }
     
     public func makeUIViewController(context: Context) -> WebViewController {
-        let preferences = WKWebpagePreferences()
-        preferences.allowsContentJavaScript = config.javaScriptEnabled
-        
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
+        let webView = Self.makeWebView(id: persistantWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
         
-        let configuration = WKWebViewConfiguration()
-        configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
-//        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
-        configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
-        configuration.dataDetectorTypes = [.all]
-        configuration.defaultWebpagePreferences = preferences
-        
-        userContentController.addUserScript(LocationChangeUserScript().userScript)
-        userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
-        
-        for userScript in config.userScripts {
-            userContentController.addUserScript(userScript)
-        }
-        
-        for messageHandlerName in messageHandlerNamesToRegister {
-            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
-        configuration.userContentController = userContentController
-        
-        let webView = Self.makeWebView(id: persistantWebViewID, configuration: configuration)
+//        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
@@ -482,6 +483,12 @@ public struct WebView: UIViewControllerRepresentable {
             webView.backgroundColor = .clear
         }
         
+//        for messageHandlerName in messageHandlerNamesToRegister {
+//            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+//            webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+//            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
+//        }
+//
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -493,7 +500,7 @@ public struct WebView: UIViewControllerRepresentable {
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+            controller.webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
         
@@ -558,12 +565,11 @@ public struct WebView: UIViewControllerRepresentable {
     }
         
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
-        if controller.persistantWebViewID == nil {
-            for messageHandlerName in coordinator.messageHandlerNames {
-                controller.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
-            }
-        }
-        
+//        for messageHandlerName in coordinator.messageHandlerNames {
+//            controller.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+//                print("REMOVE \(messageHandlerName)")
+//        }
+//
 //        guard let webView = controller.view.subviews.first as? WKWebView else { return }
 //        webView.configuration.userContentController.removeAllScriptMessageHandlers()
         controller.view.subviews.forEach { $0.removeFromSuperview() }
@@ -586,6 +592,8 @@ public struct WebView: NSViewRepresentable {
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
+    
+    private static let processPool = WKProcessPool()
     
     /// `persistantWebViewID` is only used on iOS, not macOS.
     public init(config: WebViewConfig = .default,
@@ -621,6 +629,7 @@ public struct WebView: NSViewRepresentable {
         
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences = preferences
+        configuration.processPool = Self.processPool
         
         userContentController.addUserScript(LocationChangeUserScript().userScript)
         userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
