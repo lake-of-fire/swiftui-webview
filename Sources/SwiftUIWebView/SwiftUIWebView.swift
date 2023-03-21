@@ -239,7 +239,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
 public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
-    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+//    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.uuid == rhs.uuid
@@ -325,14 +326,16 @@ public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
 public class WebViewController: UIViewController {
     let webView: EnhancedWKWebView
+    let persistantWebViewID: String?
     var obscuredInsets = UIEdgeInsets.zero {
         didSet {
             updateObscuredInsets()
         }
     }
     
-    public init(webView: EnhancedWKWebView) {
+    public init(webView: EnhancedWKWebView, persistantWebViewID: String? = nil) {
         self.webView = webView
+        self.persistantWebViewID = persistantWebViewID
         super.init(nibName: nil, bundle: nil)
         webView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webView)
@@ -390,11 +393,15 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    var obscuredInsets: EdgeInsets
+    let obscuredInsets: EdgeInsets
+    let persistantWebViewID: String?
+    
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
     
+    private static var webViewCache: [String: EnhancedWKWebView] = [:]
+
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
@@ -402,6 +409,7 @@ public struct WebView: UIViewControllerRepresentable {
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                persistantWebViewID: String? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -410,11 +418,26 @@ public struct WebView: UIViewControllerRepresentable {
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
+        self.persistantWebViewID = persistantWebViewID
         self.schemeHandlers = schemeHandlers
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
         WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
+    }
+    
+    private static func makeWebView(id: String?, configuration: WKWebViewConfiguration) -> EnhancedWKWebView {
+        var web: EnhancedWKWebView?
+        if let id = id {
+            web = Self.webViewCache[id] // it is UI thread so safe to access static
+        }
+        if web == nil {
+            web = EnhancedWKWebView(frame: .zero, configuration: configuration)
+            if let id = id {
+                Self.webViewCache[id] = web
+            }
+        }
+        return web!
     }
     
     public func makeUIViewController(context: Context) -> WebViewController {
@@ -445,7 +468,7 @@ public struct WebView: UIViewControllerRepresentable {
         }
         configuration.userContentController = userContentController
         
-        let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
+        let webView = Self.makeWebView(id: persistantWebViewID, configuration: configuration)
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
@@ -464,7 +487,7 @@ public struct WebView: UIViewControllerRepresentable {
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         
-        return WebViewController(webView: webView)
+        return WebViewController(webView: webView, persistantWebViewID: persistantWebViewID)
     }
     
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
@@ -535,12 +558,14 @@ public struct WebView: UIViewControllerRepresentable {
     }
         
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
-        for messageHandlerName in coordinator.messageHandlerNames {
-            controller.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+        if controller.persistantWebViewID == nil {
+            for messageHandlerName in coordinator.messageHandlerNames {
+                controller.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+            }
         }
         
-        guard let webView = controller.view.subviews.first as? WKWebView else { return }
-        webView.configuration.userContentController.removeAllScriptMessageHandlers()
+//        guard let webView = controller.view.subviews.first as? WKWebView else { return }
+//        webView.configuration.userContentController.removeAllScriptMessageHandlers()
         controller.view.subviews.forEach { $0.removeFromSuperview() }
     }
 }
@@ -562,6 +587,7 @@ public struct WebView: NSViewRepresentable {
     private var userContentController = WKUserContentController()
     @State fileprivate var needsHistoryRefresh = false
     
+    /// `persistantWebViewID` is only used on iOS, not macOS.
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
@@ -569,6 +595,7 @@ public struct WebView: NSViewRepresentable {
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                persistantWebViewID: String? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
