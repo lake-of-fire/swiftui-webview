@@ -452,6 +452,8 @@ public struct WebView: UIViewControllerRepresentable {
             if let id = id {
                 Self.webViewCache[id] = web
             }
+            
+            web?.backgroundColor = .white
         }
         if let web = web {
             for messageHandlerName in messageHandlerNamesToRegister {
@@ -640,6 +642,8 @@ public struct WebView: NSViewRepresentable {
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        
+        webView.backgroundColor = .white
         
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
