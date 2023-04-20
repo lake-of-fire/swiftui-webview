@@ -302,7 +302,7 @@ public struct WebViewConfig {
     public init(javaScriptEnabled: Bool = true,
                 allowsBackForwardNavigationGestures: Bool = true,
                 allowsInlineMediaPlayback: Bool = true,
-                mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [],
+                mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [WKAudiovisualMediaTypes.all],
                 dataDetectorsEnabled: Bool = true,
                 isScrollEnabled: Bool = true,
                 isOpaque: Bool = true,
@@ -484,6 +484,9 @@ public struct WebView: UIViewControllerRepresentable {
         } else {
             webView.backgroundColor = .clear
         }
+        if #available(iOS 16.4, *) {
+            webView.isInspectable = true
+        }
         
 //        for messageHandlerName in messageHandlerNamesToRegister {
 //            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
@@ -642,8 +645,10 @@ public struct WebView: NSViewRepresentable {
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
-        
         webView.backgroundColor = .white
+        if #available(macOS 13.3, *) {
+            webView.isInspectable = true
+        }
         
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
