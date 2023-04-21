@@ -326,16 +326,16 @@ public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
 public class WebViewController: UIViewController {
     let webView: EnhancedWKWebView
-    let persistantWebViewID: String?
+    let persistentWebViewID: String?
     var obscuredInsets = UIEdgeInsets.zero {
         didSet {
             updateObscuredInsets()
         }
     }
     
-    public init(webView: EnhancedWKWebView, persistantWebViewID: String? = nil) {
+    public init(webView: EnhancedWKWebView, persistentWebViewID: String? = nil) {
         self.webView = webView
-        self.persistantWebViewID = persistantWebViewID
+        self.persistentWebViewID = persistentWebViewID
         super.init(nibName: nil, bundle: nil)
         webView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(webView)
@@ -385,7 +385,7 @@ public struct WebView: UIViewControllerRepresentable {
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let obscuredInsets: EdgeInsets
-    let persistantWebViewID: String?
+    let persistentWebViewID: String?
     
     private var messageHandlerNamesToRegister = Set<String>()
 //    private var userContentController = WKUserContentController()
@@ -401,7 +401,7 @@ public struct WebView: UIViewControllerRepresentable {
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
-                persistantWebViewID: String? = nil,
+                persistentWebViewID: String? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -410,7 +410,7 @@ public struct WebView: UIViewControllerRepresentable {
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
-        self.persistantWebViewID = persistantWebViewID
+        self.persistentWebViewID = persistentWebViewID
         self.schemeHandlers = schemeHandlers
     }
     
@@ -469,7 +469,7 @@ public struct WebView: UIViewControllerRepresentable {
     public func makeUIViewController(context: Context) -> WebViewController {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
-        let webView = Self.makeWebView(id: persistantWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
+        let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
         
 //        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
         webView.allowsLinkPreview = true
@@ -499,7 +499,7 @@ public struct WebView: UIViewControllerRepresentable {
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         
-        return WebViewController(webView: webView, persistantWebViewID: persistantWebViewID)
+        return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
     }
     
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
@@ -523,37 +523,7 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         
-        if action != .idle {
-            switch action {
-            case .idle:
-                break
-            case .load(let request):
-                controller.webView.load(request)
-            case .loadHTML(let pageHTML):
-                controller.webView.loadHTMLString(pageHTML, baseURL: nil)
-            case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
-                controller.webView.loadHTMLString(pageHTML, baseURL: baseURL)
-            case .reload:
-                controller.webView.reload()
-            case .goBack:
-                controller.webView.goBack()
-            case .goForward:
-                controller.webView.goForward()
-            case .go(let item):
-                controller.webView.go(to: item)
-            case .evaluateJS(let command, let callback):
-                controller.webView.evaluateJavaScript(command) { result, error in
-                    if let error = error {
-                        callback(.failure(error))
-                    } else {
-                        callback(.success(result))
-                    }
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-                action = .idle
-            }
-        }
+        processAction(webView: controller.webView)
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
         controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
@@ -571,6 +541,40 @@ public struct WebView: UIViewControllerRepresentable {
         
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         controller.view.subviews.forEach { $0.removeFromSuperview() }
+    }
+    
+    func processAction(webView: EnhancedWKWebView) {
+        if action != .idle {
+            switch action {
+            case .idle:
+                break
+            case .load(let request):
+                webView.load(request)
+            case .loadHTML(let pageHTML):
+                webView.loadHTMLString(pageHTML, baseURL: nil)
+            case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
+                webView.loadHTMLString(pageHTML, baseURL: baseURL)
+            case .reload:
+                webView.reload()
+            case .goBack:
+                webView.goBack()
+            case .goForward:
+                webView.goForward()
+            case .go(let item):
+                webView.go(to: item)
+            case .evaluateJS(let command, let callback):
+                webView.evaluateJavaScript(command) { result, error in
+                    if let error = error {
+                        callback(.failure(error))
+                    } else {
+                        callback(.success(result))
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                action = .idle
+            }
+        }
     }
 }
 #endif
@@ -593,7 +597,7 @@ public struct WebView: NSViewRepresentable {
     
     private static let processPool = WKProcessPool()
     
-    /// `persistantWebViewID` is only used on iOS, not macOS.
+    /// `persistentWebViewID` is only used on iOS, not macOS.
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
@@ -601,7 +605,7 @@ public struct WebView: NSViewRepresentable {
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
-                persistantWebViewID: String? = nil,
+                persistentWebViewID: String? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -684,37 +688,7 @@ public struct WebView: NSViewRepresentable {
 //        }
 //        context.coordinator.scriptCaller?.caller = { uiView.evaluateJavaScript($0, completionHandler: $1) }
         
-        if action != .idle {
-            switch action {
-            case .idle:
-                break
-            case .load(let request):
-                uiView.load(request)
-            case .loadHTML(let html):
-                uiView.loadHTMLString(html, baseURL: nil)
-            case .loadHTMLWithBaseURL(let html, let baseURL):
-                uiView.loadHTMLString(html, baseURL: baseURL)
-            case .reload:
-                uiView.reload()
-            case .goBack:
-                uiView.goBack()
-            case .goForward:
-                uiView.goForward()
-            case .go(let item):
-                uiView.go(to: item)
-            case .evaluateJS(let command, let callback):
-                uiView.evaluateJavaScript(command) { result, error in
-                    if let error = error {
-                        callback(.failure(error))
-                    } else {
-                        callback(.success(result))
-                    }
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                action = .idle
-            }
-        }
+        processAction(webView: uiView)
     }
     
     public func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
@@ -728,6 +702,41 @@ public struct WebView: NSViewRepresentable {
         for messageHandlerName in coordinator.messageHandlerNames {
             nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
         }
+    }
+    
+    func processAction(webView: EnhancedWKWebView) {
+        if action != .idle {
+            switch action {
+            case .idle:
+                break
+            case .load(let request):
+                webView.load(request)
+            case .loadHTML(let html):
+                webView.loadHTMLString(html, baseURL: nil)
+            case .loadHTMLWithBaseURL(let html, let baseURL):
+                webView.loadHTMLString(html, baseURL: baseURL)
+            case .reload:
+                webView.reload()
+            case .goBack:
+                webView.goBack()
+            case .goForward:
+                webView.goForward()
+            case .go(let item):
+                webView.go(to: item)
+            case .evaluateJS(let command, let callback):
+                webView.evaluateJavaScript(command) { result, error in
+                    if let error = error {
+                        callback(.failure(error))
+                    } else {
+                        callback(.success(result))
+                    }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                action = .idle
+            }
+        }
+
     }
 }
 #endif
