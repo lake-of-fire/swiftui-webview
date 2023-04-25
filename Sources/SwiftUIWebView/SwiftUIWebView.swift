@@ -95,19 +95,36 @@ public struct WebViewMessage: Equatable {
     }
 }
 
+public struct WebViewUserScript: Equatable {
+    public let webKitUserScript: WKUserScript
+    public let allowedDomains: Set<String>
+    
+    public static func == (lhs: WebViewUserScript, rhs: WebViewUserScript) -> Bool {
+        lhs.webKitUserScript == rhs.webKitUserScript
+//            && lhs.name == rhs.name
+    }
+    
+    public init(webKitUserScript: WKUserScript, allowedDomains: Set<String>) {
+        self.webKitUserScript = webKitUserScript
+        self.allowedDomains = allowedDomains
+    }
+}
+
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
     
     var scriptCaller: WebViewScriptCaller?
+    var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
 
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
     }
     
-    init(webView: WebView, scriptCaller: WebViewScriptCaller? = nil) {
+    init(webView: WebView, scriptCaller: WebViewScriptCaller? = nil, config: WebViewConfig) {
         self.webView = webView
         self.scriptCaller = scriptCaller
+        self.config = config
     }
     
     func setLoading(_ isLoading: Bool,
@@ -216,24 +233,29 @@ extension WebViewCoordinator: WKNavigationDelegate {
             forwardList: webView.backForwardList.forwardList)
     }
     
-    public func webView(_ webView: WKWebView,
-                        decidePolicyFor navigationAction: WKNavigationAction,
-                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         if let host = navigationAction.request.url?.host {
             if self.webView.restrictedPages?.first(where: { host.contains($0) }) != nil {
-                decisionHandler(.cancel)
                 setLoading(false, isProvisionallyNavigating: false)
-                return
+                return (.cancel, preferences)
             }
         }
         if let url = navigationAction.request.url,
            let scheme = url.scheme,
            let schemeHandler = self.webView.schemeHandlers[scheme] {
             schemeHandler(url)
-            decisionHandler(.cancel)
-            return
+            return (.cancel, preferences)
         }
-        decisionHandler(.allow)
+        if navigationAction.targetFrame?.isMainFrame == true {
+            let domain = navigationAction.request.url?.baseDomain
+            WebView.updateUserScripts(inWebView: webView, forDomain: domain, config: config)
+        }
+        return (.allow, preferences)
+    }
+
+    public func webView(_ webView: WKWebView,
+                        decidePolicyFor navigationAction: WKNavigationAction,
+                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
     }
 }
 
@@ -241,12 +263,14 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
 //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) -> Void)?) -> Void)? = nil
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.uuid == rhs.uuid
     }
 
-    @MainActor public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
+    @MainActor
+    public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
         guard let caller = caller else {
             print("No caller set for WebViewScriptCaller \(uuid)") // TODO: Error
             return
@@ -254,6 +278,15 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
         caller(js, completionHandler)
     }
     
+    @MainActor
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, in world: WKContentWorld? = nil, completionHandler: ((Result<Any, any Error>) -> Void)? = nil) async {
+        guard let asyncCaller = asyncCaller else {
+            print("No asyncCaller set for WebViewScriptCaller \(uuid)") // TODO: Error
+            return
+        }
+        await asyncCaller(js, arguments, frame, world, completionHandler)
+    }
+   
     public init() {
     }
 }
@@ -297,7 +330,7 @@ public struct WebViewConfig {
     public let isScrollEnabled: Bool
     public let isOpaque: Bool
     public let backgroundColor: Color
-    public let userScripts: [WKUserScript]
+    public let userScripts: [WebViewUserScript]
     
     public init(javaScriptEnabled: Bool = true,
                 allowsBackForwardNavigationGestures: Bool = true,
@@ -307,7 +340,7 @@ public struct WebViewConfig {
                 isScrollEnabled: Bool = true,
                 isOpaque: Bool = true,
                 backgroundColor: Color = .clear,
-                userScripts: [WKUserScript] = []) {
+                userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
@@ -415,7 +448,7 @@ public struct WebView: UIViewControllerRepresentable {
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
-        WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
+        WebViewCoordinator(webView: self, scriptCaller: scriptCaller, config: config)
     }
     
     private static func makeWebView(id: String?, config: WebViewConfig, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> EnhancedWKWebView {
@@ -442,13 +475,13 @@ public struct WebView: UIViewControllerRepresentable {
             userContentController.addUserScript(LocationChangeUserScript().userScript)
             userContentController.add(coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
             
-            for userScript in config.userScripts {
-                userContentController.addUserScript(userScript)
+            configuration.userContentController = userContentController
+            web = EnhancedWKWebView(frame: .zero, configuration: configuration)
+            
+            if let web = web {
+                Self.updateUserScripts(inWebView: web, forDomain: nil, config: config)
             }
             
-            configuration.userContentController = userContentController
-            
-            web = EnhancedWKWebView(frame: .zero, configuration: configuration)
             if let id = id {
                 Self.webViewCache[id] = web
             }
@@ -498,6 +531,14 @@ public struct WebView: UIViewControllerRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
+        context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
+            let world = world ?? .defaultClient
+            if let args = args {
+                webView.callAsyncJavaScript(js, arguments: args, in: frame, in: world, completionHandler: callback)
+            } else {
+                webView.callAsyncJavaScript(js, in: frame, in: world, completionHandler: callback)
+            }
+        }
         
         return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
     }
@@ -618,7 +659,7 @@ public struct WebView: NSViewRepresentable {
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
-        return WebViewCoordinator(webView: self, scriptCaller: scriptCaller)
+        return WebViewCoordinator(webView: self, scriptCaller: scriptCaller, config: config)
     }
     
     public func makeNSView(context: Context) -> EnhancedWKWebView {
@@ -627,7 +668,6 @@ public struct WebView: NSViewRepresentable {
         
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
-
         
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences = preferences
@@ -635,9 +675,6 @@ public struct WebView: NSViewRepresentable {
         
         userContentController.addUserScript(LocationChangeUserScript().userScript)
         userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
-        for userScript in config.userScripts {
-            userContentController.addUserScript(userScript)
-        }
         
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
@@ -658,6 +695,16 @@ public struct WebView: NSViewRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
+        context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
+            let world = world ?? .defaultClient
+            if let args = args {
+                webView.callAsyncJavaScript(js, arguments: args, in: frame, in: world, completionHandler: callback)
+            } else {
+                webView.callAsyncJavaScript(js, in: frame, in: world, completionHandler: callback)
+            }
+        }
+        
+        Self.updateUserScripts(inWebView: webView, forDomain: nil, config: config)
         
         return webView
     }
@@ -682,11 +729,6 @@ public struct WebView: NSViewRepresentable {
                 needsHistoryRefresh = false
             }
         }
-        
-//        if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
-//            context.coordinator.scriptCaller = scriptCaller
-//        }
-//        context.coordinator.scriptCaller?.caller = { uiView.evaluateJavaScript($0, completionHandler: $1) }
         
         processAction(webView: uiView)
     }
@@ -740,6 +782,24 @@ public struct WebView: NSViewRepresentable {
     }
 }
 #endif
+
+extension WebView {
+    static func updateUserScripts(inWebView webView: WKWebView, forDomain domain: String?, config: WebViewConfig) {
+        var scripts = config.userScripts
+        if let domain = domain {
+            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
+        } else {
+            scripts = scripts.filter { $0.allowedDomains.isEmpty }
+        }
+        let webKitScripts = scripts.map { $0.webKitUserScript }
+        if webView.configuration.userContentController.userScripts != webKitScripts {
+            webView.configuration.userContentController.removeAllUserScripts()
+            for script in webKitScripts {
+                webView.configuration.userContentController.addUserScript(script)
+            }
+        }
+    }
+}
 
 struct WebViewTest: View {
     @State private var action = WebViewAction.idle
