@@ -164,6 +164,14 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         if message.name == "swiftUIWebViewLocationChanged" {
             webView.needsHistoryRefresh = true
             return
+        } else if message.name == "swiftUIWebViewIsWarm" {
+            if !webView.isWarm, let onWarm = webView.onWarm {
+                Task { @MainActor in
+                    webView.isWarm = true
+                    await onWarm()
+                }
+            }
+            return
         }
         
         guard let messageHandler = webView.messageHandlers[message.name] else { return }
@@ -254,14 +262,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         if navigationAction.targetFrame?.isMainFrame == true {
             let domain = navigationAction.request.url?.baseDomain
-            WebView.updateUserScripts(inWebView: webView, forDomain: domain, config: config)
+            Task { @MainActor in
+                WebView.updateUserScripts(inWebView: webView, forDomain: domain, config: config)
+            }
         }
         return (.allow, preferences)
-    }
-
-    public func webView(_ webView: WKWebView,
-                        decidePolicyFor navigationAction: WKNavigationAction,
-                        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
     }
 }
 
@@ -425,9 +430,11 @@ public struct WebView: UIViewControllerRepresentable {
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let obscuredInsets: EdgeInsets
     let persistentWebViewID: String?
+    let onWarm: (() async -> Void)?
     
     private var messageHandlerNamesToRegister = Set<String>()
 //    private var userContentController = WKUserContentController()
+    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
     
     private static var webViewCache: [String: EnhancedWKWebView] = [:]
@@ -441,6 +448,7 @@ public struct WebView: UIViewControllerRepresentable {
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 persistentWebViewID: String? = nil,
+                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -450,6 +458,7 @@ public struct WebView: UIViewControllerRepresentable {
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
         self.persistentWebViewID = persistentWebViewID
+        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
     }
     
@@ -471,15 +480,16 @@ public struct WebView: UIViewControllerRepresentable {
             
             let configuration = WKWebViewConfiguration()
             configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
-    //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
+            //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
             configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
             configuration.dataDetectorTypes = [.all]
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
             
             var userContentController = WKUserContentController()
-            userContentController.addUserScript(LocationChangeUserScript().userScript)
-            userContentController.add(coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
+            for name in systemMessageHandlers {
+                userContentController.add(coordinator, contentWorld: .page, name: name)
+            }
             
             configuration.userContentController = userContentController
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
@@ -546,6 +556,9 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         
+        // In case we retrieved a cached web view that is already warm but we don't know it.
+        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
+
         return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
     }
     
@@ -555,6 +568,8 @@ public struct WebView: UIViewControllerRepresentable {
             controller.webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
+        
+        Self.updateUserScripts(inWebView: controller.webView, forDomain: nil, config: config)
         
         if needsHistoryRefresh {
             var newState = state
@@ -618,7 +633,7 @@ public struct WebView: UIViewControllerRepresentable {
                     }
                 }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
                 action = .idle
             }
         }
@@ -634,12 +649,15 @@ public struct WebView: NSViewRepresentable {
     var scriptCaller: WebViewScriptCaller?
     let restrictedPages: [String]?
     let htmlInState: Bool
+    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     /// Unused on macOS (for now).
     var obscuredInsets: EdgeInsets
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
+    
+    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
     
     private static let processPool = WKProcessPool()
@@ -653,6 +671,7 @@ public struct WebView: NSViewRepresentable {
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 persistentWebViewID: String? = nil,
+                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -661,6 +680,7 @@ public struct WebView: NSViewRepresentable {
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
+        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
     }
     
@@ -679,8 +699,9 @@ public struct WebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = Self.processPool
         
-        userContentController.addUserScript(LocationChangeUserScript().userScript)
-        userContentController.add(context.coordinator, contentWorld: .page, name: "swiftUIWebViewLocationChanged")
+        for name in systemMessageHandlers {
+            userContentController.add(context.coordinator, contentWorld: .page, name: name)
+        }
         
         for messageHandlerName in messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
@@ -696,6 +717,8 @@ public struct WebView: NSViewRepresentable {
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
+        
+        Self.updateUserScripts(inWebView: webView, forDomain: nil, config: config)
         
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
@@ -722,6 +745,8 @@ public struct WebView: NSViewRepresentable {
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
         
+        Self.updateUserScripts(inWebView: uiView, forDomain: nil, config: config)
+
         if needsHistoryRefresh {
             var newState = state
             newState.isLoading = state.isLoading
@@ -804,6 +829,17 @@ extension WebView {
                 webView.configuration.userContentController.addUserScript(script)
             }
         }
+    }
+        
+    fileprivate static var systemScripts: [WKUserScript] {
+        [
+            WKUserScript(source: "window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})", injectionTime: .atDocumentStart, forMainFrameOnly: true),
+            LocationChangeUserScript().userScript,
+        ]
+    }
+    
+    fileprivate static var systemMessageHandlers: [String] {
+        ["swiftUIWebViewLocationChanged", "swiftUIWebViewIsWarm"]
     }
 }
 
