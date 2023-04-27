@@ -184,6 +184,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
         
+        extractPageState(webView: webView)
+    }
+    
+    private func extractPageState(webView: WKWebView) {
         webView.evaluateJavaScript("document.title") { (response, error) in
             if let title = response as? String {
                 var newState = self.webView.state
@@ -191,7 +195,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 self.webView.state = newState
             }
         }
-      
+        
         webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
             if let url = response as? String, let newURL = URL(string: url) {
                 var newState = self.webView.state
@@ -217,6 +221,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         setLoading(false, isProvisionallyNavigating: false, error: error)
+        
+        extractPageState(webView: webView)
     }
     
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
