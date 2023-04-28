@@ -487,7 +487,7 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.processPool = Self.processPool
             
             var userContentController = WKUserContentController()
-            for name in systemMessageHandlers {
+            for name in Self.systemMessageHandlers {
                 userContentController.add(coordinator, contentWorld: .page, name: name)
             }
             
@@ -699,7 +699,7 @@ public struct WebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = Self.processPool
         
-        for name in systemMessageHandlers {
+        for name in Self.systemMessageHandlers {
             userContentController.add(context.coordinator, contentWorld: .page, name: name)
         }
         
@@ -713,7 +713,7 @@ public struct WebView: NSViewRepresentable {
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
-        webView.backgroundColor = .white
+        webView.layer?.backgroundColor = .white
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
