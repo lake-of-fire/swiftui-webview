@@ -205,7 +205,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         
         webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
-            if let url = response as? String, let newURL = URL(string: url) {
+            if let url = response as? String, let newURL = URL(string: url), self.webView.state.pageURL != newURL {
                 var newState = self.webView.state
                 newState.pageURL = newURL
                 self.webView.state = newState
@@ -247,6 +247,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             forwardList: webView.backForwardList.forwardList)
     }
     
+    @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         if let host = navigationAction.request.url?.host {
             if self.webView.restrictedPages?.first(where: { host.contains($0) }) != nil {
@@ -260,13 +261,31 @@ extension WebViewCoordinator: WKNavigationDelegate {
             schemeHandler(url)
             return (.cancel, preferences)
         }
-        if navigationAction.targetFrame?.isMainFrame == true {
-            let domain = navigationAction.request.url?.baseDomain
-            Task { @MainActor in
-                WebView.updateUserScripts(inWebView: webView, forDomain: domain, config: config)
-            }
+        
+//        if navigationAction.targetFrame?.isMainFrame == true, let mainDocumentURL = navigationAction.request.mainDocumentURL {
+//            let domain = mainDocumentURL.domainURL
+//            print(mainDocumentURL)
+//            print(domain)
+//            #warning("This shouldn't be a task to ensure it finishes first if possible. Check Brave behavior too.")
+//            Task { @MainActor in
+//            WebView.updateUserScripts(inWebView: webView, forDomain: domain, config: config, mainFrameOnly: true)
+//            }
+//        }
+        
+        if let mainDocumentURL = navigationAction.request.mainDocumentURL {
+            WebView.updateUserScripts(inWebView: webView, forDomain: mainDocumentURL.domainURL, config: config)
         }
+        
         return (.allow, preferences)
+    }
+    
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
+        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url {
+            var newState = self.webView.state
+            newState.pageURL = url
+            self.webView.state = newState
+        }
+        return .allow
     }
 }
 
@@ -274,7 +293,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
 //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) -> Void)?) -> Void)? = nil
+    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) -> Void)?) async -> Void)? = nil
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.uuid == rhs.uuid
@@ -693,7 +712,7 @@ public struct WebView: NSViewRepresentable {
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
-//        preferences.setValue(true, forKey: "developerExtrasEnabled")
+//        preferences.setValue(true, forKey: "developerExtrasEnabled") // Wasn't working - revisit, because it would be great to have.
         
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences = preferences
@@ -815,22 +834,21 @@ public struct WebView: NSViewRepresentable {
 #endif
 
 extension WebView {
-    static func updateUserScripts(inWebView webView: WKWebView, forDomain domain: String?, config: WebViewConfig) {
+    @MainActor
+    static func updateUserScripts(inWebView webView: WKWebView, forDomain domain: URL?, config: WebViewConfig, mainFrameOnly: Bool = false) {
         var scripts = config.userScripts
         if let domain = domain {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
+            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain.absoluteString) }
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
         let webKitScripts = scripts.map { $0.webKitUserScript }
-        if webView.configuration.userContentController.userScripts != webKitScripts {
-            webView.configuration.userContentController.removeAllUserScripts()
-            for script in webKitScripts {
-                webView.configuration.userContentController.addUserScript(script)
-            }
+        webView.configuration.userContentController.removeAllUserScripts()
+        for script in webKitScripts {
+            webView.configuration.userContentController.addUserScript(script)
         }
     }
-        
+    
     fileprivate static var systemScripts: [WKUserScript] {
         [
             WKUserScript(source: "window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})", injectionTime: .atDocumentStart, forMainFrameOnly: true),
