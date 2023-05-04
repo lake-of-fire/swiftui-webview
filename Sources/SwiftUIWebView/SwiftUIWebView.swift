@@ -283,6 +283,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url {
             var newState = self.webView.state
             newState.pageURL = url
+            newState.pageTitle = nil
+            newState.pageHTML = nil
+            newState.error = nil
             self.webView.state = newState
         }
         return .allow
@@ -448,6 +451,7 @@ public struct WebView: UIViewControllerRepresentable {
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let obscuredInsets: EdgeInsets
+    let bounces = true
     let persistentWebViewID: String?
     let onWarm: (() async -> Void)?
     
@@ -466,6 +470,7 @@ public struct WebView: UIViewControllerRepresentable {
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                bounces: Bool = true,
                 persistentWebViewID: String? = nil,
                 onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
@@ -476,6 +481,7 @@ public struct WebView: UIViewControllerRepresentable {
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
+        self.bounces = bounces
         self.persistentWebViewID = persistentWebViewID
         self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
@@ -504,11 +510,6 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.dataDetectorTypes = [.all]
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
-            
-            var userContentController = WKUserContentController()
-            for name in Self.systemMessageHandlers {
-                userContentController.add(coordinator, contentWorld: .page, name: name)
-            }
             
             configuration.userContentController = userContentController
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
@@ -556,6 +557,8 @@ public struct WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
         
+        refreshMessageHandlers(context: context)
+        
 //        for messageHandlerName in messageHandlerNamesToRegister {
 //            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
 //            webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
@@ -582,13 +585,7 @@ public struct WebView: UIViewControllerRepresentable {
     }
     
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
-        for messageHandlerName in messageHandlerNamesToRegister {
-            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            controller.webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
-        
-        Self.updateUserScripts(inWebView: controller.webView, forDomain: nil, config: config)
+        refreshMessageHandlers(context: context)
         
         if needsHistoryRefresh {
             var newState = state
@@ -605,6 +602,9 @@ public struct WebView: UIViewControllerRepresentable {
         }
         
         processAction(webView: controller.webView)
+        
+        controller.webView.scrollView.bounces = bounces
+        controller.webView.scrollView.alwaysBounceVertical = bounces
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
         controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
@@ -673,6 +673,7 @@ public struct WebView: NSViewRepresentable {
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     /// Unused on macOS (for now).
     var obscuredInsets: EdgeInsets
+    var bounces = true
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     
@@ -689,6 +690,7 @@ public struct WebView: NSViewRepresentable {
                 restrictedPages: [String]? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                bounces: Bool = true,
                 persistentWebViewID: String? = nil,
                 onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
@@ -699,6 +701,7 @@ public struct WebView: NSViewRepresentable {
         self.restrictedPages = restrictedPages
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
+        self.bounces = bounces
         self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
     }
@@ -718,15 +721,6 @@ public struct WebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = Self.processPool
         
-        for name in Self.systemMessageHandlers {
-            userContentController.add(context.coordinator, contentWorld: .page, name: name)
-        }
-        
-        for messageHandlerName in messageHandlerNamesToRegister {
-            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
         configuration.userContentController = userContentController
 
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
@@ -736,8 +730,6 @@ public struct WebView: NSViewRepresentable {
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
-        
-        Self.updateUserScripts(inWebView: webView, forDomain: nil, config: config)
         
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
@@ -752,20 +744,19 @@ public struct WebView: NSViewRepresentable {
             }
         }
         
+        refreshMessageHandlers(context: context)
         Self.updateUserScripts(inWebView: webView, forDomain: nil, config: config)
         
         return webView
     }
 
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
-        for messageHandlerName in messageHandlerNamesToRegister {
-            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
+        refreshMessageHandlers(context: context)
         
-        Self.updateUserScripts(inWebView: uiView, forDomain: nil, config: config)
-
+        // Can't disable on macOS.
+//        uiView.scrollView.bounces = bounces
+//        uiView.scrollView.alwaysBounceVertical = bounces
+        
         if needsHistoryRefresh {
             var newState = state
             newState.isLoading = state.isLoading
@@ -835,14 +826,23 @@ public struct WebView: NSViewRepresentable {
 
 extension WebView {
     @MainActor
-    static func updateUserScripts(inWebView webView: WKWebView, forDomain domain: URL?, config: WebViewConfig, mainFrameOnly: Bool = false) {
-        var scripts = config.userScripts
-        if let domain = domain {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain.absoluteString) }
+    func refreshMessageHandlers(context: Context) {
+        for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
+            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
+        }
+    }
+    
+    @MainActor
+    static func updateUserScripts(inWebView webView: WKWebView, forDomain domain: URL?, config: WebViewConfig) {
+        var scripts =  config.userScripts
+        if let domain = domain?.host {
+            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
-        let webKitScripts = scripts.map { $0.webKitUserScript }
+        let webKitScripts = Self.systemScripts + scripts.map { $0.webKitUserScript }
         webView.configuration.userContentController.removeAllUserScripts()
         for script in webKitScripts {
             webView.configuration.userContentController.addUserScript(script)
