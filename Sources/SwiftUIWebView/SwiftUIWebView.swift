@@ -262,17 +262,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return (.cancel, preferences)
         }
         
-//        if navigationAction.targetFrame?.isMainFrame == true, let mainDocumentURL = navigationAction.request.mainDocumentURL {
-//            let domain = mainDocumentURL.domainURL
-//            print(mainDocumentURL)
-//            print(domain)
-//            #warning("This shouldn't be a task to ensure it finishes first if possible. Check Brave behavior too.")
-//            Task { @MainActor in
-//            WebView.updateUserScripts(inWebView: webView, forDomain: domain, config: config, mainFrameOnly: true)
-//            }
-//        }
-        
-        if let mainDocumentURL = navigationAction.request.mainDocumentURL {
+        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
+        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
             WebView.updateUserScripts(inWebView: webView, forDomain: mainDocumentURL.domainURL, config: config)
         }
         
@@ -451,12 +442,12 @@ public struct WebView: UIViewControllerRepresentable {
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let obscuredInsets: EdgeInsets
-    let bounces = true
+    var bounces = true
     let persistentWebViewID: String?
     let onWarm: (() async -> Void)?
     
     private var messageHandlerNamesToRegister = Set<String>()
-//    private var userContentController = WKUserContentController()
+    private var userContentController = WKUserContentController()
     @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
     
@@ -491,6 +482,7 @@ public struct WebView: UIViewControllerRepresentable {
         WebViewCoordinator(webView: self, scriptCaller: scriptCaller, config: config)
     }
     
+    @MainActor
     private static func makeWebView(id: String?, config: WebViewConfig, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
         if let id = id {
@@ -511,7 +503,6 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
             
-            configuration.userContentController = userContentController
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
             
             if let web = web {
@@ -539,7 +530,7 @@ public struct WebView: UIViewControllerRepresentable {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
-        
+        webView.configuration.userContentController = userContentController
 //        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
