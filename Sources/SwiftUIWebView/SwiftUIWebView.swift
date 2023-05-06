@@ -95,18 +95,25 @@ public struct WebViewMessage: Equatable {
     }
 }
 
-public struct WebViewUserScript: Equatable {
+public struct WebViewUserScript: Equatable, Hashable {
+    public let source: String
     public let webKitUserScript: WKUserScript
     public let allowedDomains: Set<String>
     
     public static func == (lhs: WebViewUserScript, rhs: WebViewUserScript) -> Bool {
-        lhs.webKitUserScript == rhs.webKitUserScript
-//            && lhs.name == rhs.name
+        lhs.source == rhs.source
+        && lhs.allowedDomains == rhs.allowedDomains
     }
     
-    public init(webKitUserScript: WKUserScript, allowedDomains: Set<String>) {
-        self.webKitUserScript = webKitUserScript
+    public init(source: String, injectionTime: WKUserScriptInjectionTime, forMainFrameOnly: Bool, in world: WKContentWorld = .defaultClient, allowedDomains: Set<String> = Set()) {
+        self.source = source
+        self.webKitUserScript = WKUserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
         self.allowedDomains = allowedDomains
+    }
+    
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(source)
+        hasher.combine(allowedDomains)
     }
 }
 
@@ -116,6 +123,7 @@ public class WebViewCoordinator: NSObject {
     var scriptCaller: WebViewScriptCaller?
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
+    var lastInstalledScriptsHash = -1
 
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
@@ -164,7 +172,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         if message.name == "swiftUIWebViewLocationChanged" {
             webView.needsHistoryRefresh = true
             return
-        } else if message.name == "swiftUIWebViewIsWarm" {
+        }/* else if message.name == "swiftUIWebViewIsWarm" {
             if !webView.isWarm, let onWarm = webView.onWarm {
                 Task { @MainActor in
                     webView.isWarm = true
@@ -172,7 +180,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
             return
-        }
+        }*/
         
         guard let messageHandler = webView.messageHandlers[message.name] else { return }
         let message = WebViewMessage(uuid: UUID(), name: message.name, body: message.body)
@@ -233,8 +241,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
         extractPageState(webView: webView)
     }
     
+    @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         setLoading(true, isProvisionallyNavigating: false)
+        self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: webView.url, config: config)
     }
     
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -262,14 +272,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return (.cancel, preferences)
         }
         
-        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
-            WebView.updateUserScripts(inWebView: webView, forDomain: mainDocumentURL.domainURL, config: config)
-        }
+//        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
+//        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
+//            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
+//        }
         
         return (.allow, preferences)
     }
     
+    @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url {
             var newState = self.webView.state
@@ -279,6 +290,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
             newState.error = nil
             self.webView.state = newState
         }
+        
+        //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
+        if navigationResponse.isForMainFrame {
+            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: navigationResponse.response.url, config: config)
+        }
+
+
         return .allow
     }
 }
@@ -316,7 +334,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
 }
 
 fileprivate struct LocationChangeUserScript {
-    let userScript: WKUserScript
+    let userScript: WebViewUserScript
     
     init() {
         let contents = """
@@ -339,7 +357,7 @@ window.addEventListener('swiftUIWebViewLocationChanged', function () {
     webkit.messageHandlers.swiftUIWebViewLocationChanged.postMessage(window.location.href);
 });
 """
-        userScript = WKUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
 }
 
@@ -444,15 +462,17 @@ public struct WebView: UIViewControllerRepresentable {
     let obscuredInsets: EdgeInsets
     var bounces = true
     let persistentWebViewID: String?
-    let onWarm: (() async -> Void)?
+//    let onWarm: (() async -> Void)?
     
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
-    @State fileprivate var isWarm = false
+//    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
+    @State private var lastInstalledScripts = [WebViewUserScript]()
     
     private static var webViewCache: [String: EnhancedWKWebView] = [:]
     private static let processPool = WKProcessPool()
+    
     
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
@@ -463,7 +483,7 @@ public struct WebView: UIViewControllerRepresentable {
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
-                onWarm: (() async -> Void)? = nil,
+//                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -474,7 +494,7 @@ public struct WebView: UIViewControllerRepresentable {
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
         self.persistentWebViewID = persistentWebViewID
-        self.onWarm = onWarm
+//        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
     }
     
@@ -505,10 +525,6 @@ public struct WebView: UIViewControllerRepresentable {
             
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
             
-            if let web = web {
-                Self.updateUserScripts(inWebView: web, forDomain: nil, config: config)
-            }
-            
             if let id = id {
                 Self.webViewCache[id] = web
             }
@@ -529,9 +545,12 @@ public struct WebView: UIViewControllerRepresentable {
     public func makeUIViewController(context: Context) -> WebViewController {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
+        
         let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
+        refreshMessageHandlers(context: context)
+        updateUserScripts(userContentController: userContentController, coordinator: context.coordinator, forDomain: state.pageURL, config: config)
+
         webView.configuration.userContentController = userContentController
-//        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
@@ -548,14 +567,6 @@ public struct WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
         
-        refreshMessageHandlers(context: context)
-        
-//        for messageHandlerName in messageHandlerNamesToRegister {
-//            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-//            webView.configuration.userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-//            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-//        }
-//
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -570,13 +581,14 @@ public struct WebView: UIViewControllerRepresentable {
         }
         
         // In case we retrieved a cached web view that is already warm but we don't know it.
-        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
+//        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
 
         return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
     }
     
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
-        refreshMessageHandlers(context: context)
+//        refreshMessageHandlers(context: context)
+        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
         if needsHistoryRefresh {
             var newState = state
@@ -659,7 +671,7 @@ public struct WebView: NSViewRepresentable {
     var scriptCaller: WebViewScriptCaller?
     let restrictedPages: [String]?
     let htmlInState: Bool
-    let onWarm: (() -> Void)?
+//    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     /// Unused on macOS (for now).
@@ -668,9 +680,10 @@ public struct WebView: NSViewRepresentable {
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
     
-    @State fileprivate var isWarm = false
+//    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
-    
+    @State private var lastInstalledScripts = [WebViewUserScript]()
+
     private static let processPool = WKProcessPool()
     
     /// `persistentWebViewID` is only used on iOS, not macOS.
@@ -683,7 +696,7 @@ public struct WebView: NSViewRepresentable {
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
-                onWarm: (() -> Void)? = nil,
+//                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:]) {
         self.config = config
         _action = action
@@ -693,7 +706,7 @@ public struct WebView: NSViewRepresentable {
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
-        self.onWarm = onWarm
+//        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
     }
     
@@ -711,8 +724,9 @@ public struct WebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = Self.processPool
-        
         configuration.userContentController = userContentController
+        refreshMessageHandlers(context: context)
+        updateUserScripts(userContentController: userContentController, coordinator: context.coordinator, forDomain: state.pageURL, config: config)
 
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -735,14 +749,12 @@ public struct WebView: NSViewRepresentable {
             }
         }
         
-        refreshMessageHandlers(context: context)
-        Self.updateUserScripts(inWebView: webView, forDomain: nil, config: config)
-        
         return webView
     }
 
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
-        refreshMessageHandlers(context: context)
+//        refreshMessageHandlers(context: context)
+        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
         // Can't disable on macOS.
 //        uiView.scrollView.bounces = bounces
@@ -826,29 +838,29 @@ extension WebView {
     }
     
     @MainActor
-    static func updateUserScripts(inWebView webView: WKWebView, forDomain domain: URL?, config: WebViewConfig) {
+    func updateUserScripts(userContentController: WKUserContentController, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebViewConfig) {
         var scripts =  config.userScripts
-        if let domain = domain?.host {
+        if let domain = domain?.domainURL.host {
             scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
-        let webKitScripts = Self.systemScripts + scripts.map { $0.webKitUserScript }
-        webView.configuration.userContentController.removeAllUserScripts()
-        for script in webKitScripts {
-            webView.configuration.userContentController.addUserScript(script)
+        var allScripts = Self.systemScripts + scripts
+        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
+        userContentController.removeAllUserScripts()
+        for script in allScripts {
+            userContentController.addUserScript(script.webKitUserScript)
         }
+        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
     
-    fileprivate static var systemScripts: [WKUserScript] {
-        [
-            WKUserScript(source: "window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})", injectionTime: .atDocumentStart, forMainFrameOnly: true),
-            LocationChangeUserScript().userScript,
-        ]
-    }
+    fileprivate static let systemScripts = [
+//        WebViewUserScript(source: "(function() { window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({}) })()", injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient, allowedDomains: Set()),
+        LocationChangeUserScript().userScript,
+    ]
     
     fileprivate static var systemMessageHandlers: [String] {
-        ["swiftUIWebViewLocationChanged", "swiftUIWebViewIsWarm"]
+        ["swiftUIWebViewLocationChanged"]
     }
 }
 
