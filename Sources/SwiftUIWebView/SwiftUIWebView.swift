@@ -244,7 +244,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         setLoading(true, isProvisionallyNavigating: false)
-        self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: webView.url, config: config)
     }
     
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -273,9 +272,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         
 //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-//        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
-//            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
-//        }
+        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
+            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
+        }
         
         return (.allow, preferences)
     }
@@ -290,13 +289,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             newState.error = nil
             self.webView.state = newState
         }
-        
-        //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-        if navigationResponse.isForMainFrame {
-            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: navigationResponse.response.url, config: config)
-        }
-
-
         return .allow
     }
 }
@@ -548,7 +540,6 @@ public struct WebView: UIViewControllerRepresentable {
         
         let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
         refreshMessageHandlers(context: context)
-        updateUserScripts(userContentController: userContentController, coordinator: context.coordinator, forDomain: state.pageURL, config: config)
 
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
@@ -626,40 +617,6 @@ public struct WebView: UIViewControllerRepresentable {
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         controller.view.subviews.forEach { $0.removeFromSuperview() }
     }
-    
-    func processAction(webView: EnhancedWKWebView) {
-        if action != .idle {
-            switch action {
-            case .idle:
-                break
-            case .load(let request):
-                webView.load(request)
-            case .loadHTML(let pageHTML):
-                webView.loadHTMLString(pageHTML, baseURL: nil)
-            case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
-                webView.loadHTMLString(pageHTML, baseURL: baseURL)
-            case .reload:
-                webView.reload()
-            case .goBack:
-                webView.goBack()
-            case .goForward:
-                webView.goForward()
-            case .go(let item):
-                webView.go(to: item)
-            case .evaluateJS(let command, let callback):
-                webView.evaluateJavaScript(command) { result, error in
-                    if let error = error {
-                        callback(.failure(error))
-                    } else {
-                        callback(.success(result))
-                    }
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
-                action = .idle
-            }
-        }
-    }
 }
 #endif
 
@@ -726,7 +683,6 @@ public struct WebView: NSViewRepresentable {
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(context: context)
-        updateUserScripts(userContentController: userContentController, coordinator: context.coordinator, forDomain: state.pageURL, config: config)
 
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -789,45 +745,47 @@ public struct WebView: NSViewRepresentable {
             nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
         }
     }
-    
-    func processAction(webView: EnhancedWKWebView) {
-        if action != .idle {
-            switch action {
-            case .idle:
-                break
-            case .load(let request):
-                webView.load(request)
-            case .loadHTML(let html):
-                webView.loadHTMLString(html, baseURL: nil)
-            case .loadHTMLWithBaseURL(let html, let baseURL):
-                webView.loadHTMLString(html, baseURL: baseURL)
-            case .reload:
-                webView.reload()
-            case .goBack:
-                webView.goBack()
-            case .goForward:
-                webView.goForward()
-            case .go(let item):
-                webView.go(to: item)
-            case .evaluateJS(let command, let callback):
-                webView.evaluateJavaScript(command) { result, error in
-                    if let error = error {
-                        callback(.failure(error))
-                    } else {
-                        callback(.success(result))
-                    }
-                }
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                action = .idle
-            }
-        }
-
-    }
 }
 #endif
 
 extension WebView {
+    func processAction(webView: EnhancedWKWebView) {
+        guard action != .idle else { return }
+        switch action {
+        case .idle:
+            break
+        case .load(let request):
+            if let url = request.url, url.isFileURL {
+                webView.loadFileURL(url, allowingReadAccessTo: url)
+            } else {
+                webView.load(request)
+            }
+        case .loadHTML(let pageHTML):
+            webView.loadHTMLString(pageHTML, baseURL: nil)
+        case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
+            webView.loadHTMLString(pageHTML, baseURL: baseURL)
+        case .reload:
+            webView.reload()
+        case .goBack:
+            webView.goBack()
+        case .goForward:
+            webView.goForward()
+        case .go(let item):
+            webView.go(to: item)
+        case .evaluateJS(let command, let callback):
+            webView.evaluateJavaScript(command) { result, error in
+                if let error = error {
+                    callback(.failure(error))
+                } else {
+                    callback(.success(result))
+                }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
+            action = .idle
+        }
+    }
+
     @MainActor
     func refreshMessageHandlers(context: Context) {
         for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
@@ -855,7 +813,6 @@ extension WebView {
     }
     
     fileprivate static let systemScripts = [
-//        WebViewUserScript(source: "(function() { window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({}) })()", injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient, allowedDomains: Set()),
         LocationChangeUserScript().userScript,
     ]
     
