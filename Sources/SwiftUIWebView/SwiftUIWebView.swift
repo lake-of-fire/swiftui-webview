@@ -362,6 +362,7 @@ public struct WebViewConfig {
     public let mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes
     public let dataDetectorsEnabled: Bool
     public let isScrollEnabled: Bool
+    public let pageZoom: CGFloat
     public let isOpaque: Bool
     public let backgroundColor: Color
     public let userScripts: [WebViewUserScript]
@@ -372,6 +373,7 @@ public struct WebViewConfig {
                 mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [WKAudiovisualMediaTypes.all],
                 dataDetectorsEnabled: Bool = true,
                 isScrollEnabled: Bool = true,
+                pageZoom: CGFloat = 1,
                 isOpaque: Bool = true,
                 backgroundColor: Color = .clear,
                 userScripts: [WebViewUserScript] = []) {
@@ -381,6 +383,7 @@ public struct WebViewConfig {
         self.mediaTypesRequiringUserActionForPlayback = mediaTypesRequiringUserActionForPlayback
         self.dataDetectorsEnabled = dataDetectorsEnabled
         self.isScrollEnabled = isScrollEnabled
+        self.pageZoom = pageZoom
         self.isOpaque = isOpaque
         self.backgroundColor = backgroundColor
         self.userScripts = userScripts
@@ -548,6 +551,7 @@ public struct WebView: UIViewControllerRepresentable {
 //        webView.scrollView.contentInsetAdjustmentBehavior = .always
         webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        webView.pageZoom = config.pageZoom
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             webView.backgroundColor = UIColor(config.backgroundColor)
@@ -686,6 +690,7 @@ public struct WebView: NSViewRepresentable {
 
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.pageZoom = config.pageZoom
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         webView.layer?.backgroundColor = .white
         if #available(macOS 13.3, *) {
