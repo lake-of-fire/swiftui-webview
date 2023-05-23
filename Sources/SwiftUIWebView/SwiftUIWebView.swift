@@ -1,5 +1,12 @@
 import SwiftUI
 import WebKit
+import UniformTypeIdentifiers
+
+public extension URL {
+    var isEPUBURL: Bool {
+        return (isFileURL || scheme == "https") && pathExtension.lowercased() == "epub"
+    }
+}
 
 public enum WebViewAction: Equatable {
     case idle,
@@ -51,6 +58,7 @@ public struct WebViewState: Equatable {
     public internal(set) var isProvisionallyNavigating: Bool
     public internal(set) var pageURL: URL
     public internal(set) var pageTitle: String?
+    public internal(set) var pageImageURL: URL?
     public internal(set) var pageHTML: String?
     public internal(set) var error: Error?
     public internal(set) var canGoBack: Bool
@@ -63,6 +71,7 @@ public struct WebViewState: Equatable {
         isProvisionallyNavigating: false,
         pageURL: URL(string: "about:blank")!,
         pageTitle: nil,
+        pageImageURL: nil,
         pageHTML: nil,
         error: nil,
         canGoBack: false,
@@ -75,6 +84,7 @@ public struct WebViewState: Equatable {
             && lhs.isProvisionallyNavigating == rhs.isProvisionallyNavigating
             && lhs.pageURL == rhs.pageURL
             && lhs.pageTitle == rhs.pageTitle
+            && lhs.pageImageURL == rhs.pageImageURL
             && lhs.pageHTML == rhs.pageHTML
             && lhs.error?.localizedDescription == rhs.error?.localizedDescription
             && lhs.canGoBack == rhs.canGoBack
@@ -124,7 +134,7 @@ public class WebViewCoordinator: NSObject {
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
     var lastInstalledScriptsHash = -1
-
+    
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
     }
@@ -133,6 +143,11 @@ public class WebViewCoordinator: NSObject {
         self.webView = webView
         self.scriptCaller = scriptCaller
         self.config = config
+        
+        // TODO: Make about:blank history initialization optional via configuration.
+        if webView.action == .idle && webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
+            webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
+        }
     }
     
     func setLoading(_ isLoading: Bool,
@@ -172,7 +187,30 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         if message.name == "swiftUIWebViewLocationChanged" {
             webView.needsHistoryRefresh = true
             return
-        }/* else if message.name == "swiftUIWebViewIsWarm" {
+        } else if message.name == "swiftUIWebViewEPUBJSInitialized" {
+            if let url = message.webView?.url, let scheme = url.scheme, scheme == "epub" || scheme == "epub-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "epub", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
+                Task { @MainActor in
+                    do {
+                        try await _ = message.webView?.callAsyncJavaScript("window.loadEPUB(url)", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
+                    } catch {
+                        print("Failed to initialize ePUB: \(error.localizedDescription)")
+                        if let message = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String {
+                            print(message)
+                        }
+                    }
+                }
+            }
+        } else if message.name == "swiftUIWebViewImageUpdated" {
+            guard let body = message.body as? [String: Any] else { return }
+            if let imageURLRaw = body["imageURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
+                var newState = webView.state
+                newState.pageImageURL = imageURL
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
+                    webView.state = newState
+                }
+            }
+        }
+        /* else if message.name == "swiftUIWebViewIsWarm" {
             if !webView.isWarm, let onWarm = webView.onWarm {
                 Task { @MainActor in
                     webView.isWarm = true
@@ -200,10 +238,27 @@ extension WebViewCoordinator: WKNavigationDelegate {
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
         
+        // TODO: Move to an init postMessage callback
+        /*
+        if let url = webView.url, let scheme = url.scheme, scheme == "pdf" || scheme == "pdf-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "pdf", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
+            // TODO: Escaping? Use async eval for passing object data.
+            let jsString = "pdfjsLib.getDocument('\(loaderURL.absoluteString)').promise.then(doc => { PDFViewerApplication.load(doc); });"
+            webView.evaluateJavaScript(jsString, completionHandler: nil)
+        }
+         */
+        
         extractPageState(webView: webView)
     }
     
     private func extractPageState(webView: WKWebView) {
+        webView.evaluateJavaScript("document.title") { (response, error) in
+            if let title = response as? String {
+                var newState = self.webView.state
+                newState.pageTitle = title
+                self.webView.state = newState
+            }
+        }
+        
         webView.evaluateJavaScript("document.title") { (response, error) in
             if let title = response as? String {
                 var newState = self.webView.state
@@ -264,6 +319,37 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 return (.cancel, preferences)
             }
         }
+        
+        // ePub loader
+        if let url = navigationAction.request.url,
+           navigationAction.targetFrame?.isMainFrame ?? false,
+           url.isFileURL || url.absoluteString.hasPrefix("https://") || url.absoluteString.hasPrefix("http://"),
+           navigationAction.request.url?.pathExtension.lowercased() == "epub",
+           let htmlPath = Bundle.module.path(forResource: "epub-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
+            do {
+                let html = try String(contentsOfFile: htmlPath)
+                webView.loadHTMLString(html, baseURL: epubURL)
+            } catch { }
+            return (.cancel, preferences)
+        }
+        
+        // PDF.js loader
+        if
+            false,
+                let url = navigationAction.request.url,
+            navigationAction.targetFrame?.isMainFrame ?? false,
+            url.isFileURL || url.absoluteString.hasPrefix("https://"),
+            navigationAction.request.url?.pathExtension.lowercased() == "pdf",
+            //           navigationAction.request.mainDocumentURL?.scheme != "pdf",
+            let pdfJSPath = Bundle.module.path(forResource: "viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let pdfURL = URL(string: url.isFileURL ? "pdf://\(path)" : "pdf-url://\(url.absoluteString.dropFirst("https://".count))") {
+            do {
+                let pdfJSHTML = try String(contentsOfFile: pdfJSPath)
+                webView.loadHTMLString(pdfJSHTML, baseURL: pdfURL)
+            } catch { }
+        return (.allow, preferences)
+            return (.cancel, preferences)
+        }
+        
         if let url = navigationAction.request.url,
            let scheme = url.scheme,
            let schemeHandler = self.webView.schemeHandlers[scheme] {
@@ -350,6 +436,26 @@ window.addEventListener('swiftUIWebViewLocationChanged', function () {
 });
 """
         userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+}
+
+fileprivate struct ImageChangeUserScript {
+    let userScript: WebViewUserScript
+    init() {
+        let contents = """
+var lastURL;
+new MutationObserver(function(mutations) {
+    let node = document.querySelector('head meta[property="og:image"]')
+    if (node) {
+        let url = node.getAttribute('content')
+        if (lastURL === url) { return }
+        webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
+            imageURL: url, url: window.location.href})
+        lastURL = url
+    }
+}).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
+"""
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient)
     }
 }
 
@@ -518,6 +624,15 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
             
+            // For private mode later:
+            //            let dataStore = WKWebsiteDataStore.nonPersistent()
+            //            configuration.websiteDataStore = dataStore
+            
+            for scheme in ["pdf", "epub"] {
+                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: scheme)
+                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
+            }
+            
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
             
             if let id = id {
@@ -537,6 +652,7 @@ public struct WebView: UIViewControllerRepresentable {
         return web
     }
     
+    @MainActor
     public func makeUIViewController(context: Context) -> WebViewController {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -581,6 +697,7 @@ public struct WebView: UIViewControllerRepresentable {
         return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
     }
     
+    @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
@@ -675,6 +792,7 @@ public struct WebView: NSViewRepresentable {
         return WebViewCoordinator(webView: self, scriptCaller: scriptCaller, config: config)
     }
     
+    @MainActor
     public func makeNSView(context: Context) -> EnhancedWKWebView {
         let preferences = WKWebpagePreferences()
         preferences.allowsContentJavaScript = config.javaScriptEnabled
@@ -687,6 +805,15 @@ public struct WebView: NSViewRepresentable {
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(context: context)
+        
+        // For private mode later:
+        //        let dataStore = WKWebsiteDataStore.nonPersistent()
+        //        configuration.websiteDataStore = dataStore
+        
+        for scheme in ["pdf", "epub"] {
+            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: scheme)
+            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
+        }
 
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -713,6 +840,7 @@ public struct WebView: NSViewRepresentable {
         return webView
     }
 
+    @MainActor
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
@@ -808,7 +936,7 @@ extension WebView {
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
-        var allScripts = Self.systemScripts + scripts
+        let allScripts = Self.systemScripts + scripts
         guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
         userContentController.removeAllUserScripts()
         for script in allScripts {
@@ -819,10 +947,78 @@ extension WebView {
     
     fileprivate static let systemScripts = [
         LocationChangeUserScript().userScript,
+        ImageChangeUserScript().userScript,
     ]
     
     fileprivate static var systemMessageHandlers: [String] {
-        ["swiftUIWebViewLocationChanged"]
+        [
+            "swiftUIWebViewLocationChanged",
+            "swiftUIWebViewImageUpdated",
+            "swiftUIWebViewEPUBJSInitialized",
+        ]
+    }
+}
+
+final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+    
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else { return }
+        for fileType in ["epub"] { // TODO: "pdf"
+            if url.absoluteString.hasPrefix("\(fileType)-url://"),
+               let remoteURL = URL(string: "https://\(url.absoluteString.dropFirst("\(fileType)-url://".count))"),
+               urlSchemeTask.request.mainDocumentURL == url,
+               let mimeType = mimeType(ofFileAtUrl: remoteURL) {
+                do {
+                    let data = try Data(contentsOf: remoteURL)
+                    let response = HTTPURLResponse(
+                        url: url,
+                        mimeType: mimeType,
+                        expectedContentLength: data.count, textEncodingName: nil)
+                    urlSchemeTask.didReceive(response)
+                    urlSchemeTask.didReceive(data)
+                    urlSchemeTask.didFinish()
+                } catch { }
+            } else if
+                let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                let fileUrl = URL(string: "file://\(path)"),
+                let currentURL = URL(string: "\(fileType)://\(path)"),
+                urlSchemeTask.request.mainDocumentURL == currentURL, // Security check.
+                let mimeType = mimeType(ofFileAtUrl: fileUrl),
+                let data = try? Data(contentsOf: fileUrl) {
+                let response = HTTPURLResponse(
+                    url: url,
+                    mimeType: mimeType,
+                    expectedContentLength: data.count, textEncodingName: nil)
+                urlSchemeTask.didReceive(response)
+                urlSchemeTask.didReceive(data)
+                urlSchemeTask.didFinish()
+            } else if let fileUrl = fileUrlFromUrl(url),
+                      let mimeType = mimeType(ofFileAtUrl: fileUrl),
+                      let data = try? Data(contentsOf: fileUrl) {
+                let response = HTTPURLResponse(
+                    url: url,
+                    mimeType: mimeType,
+                    expectedContentLength: data.count, textEncodingName: nil)
+                urlSchemeTask.didReceive(response)
+                urlSchemeTask.didReceive(data)
+                urlSchemeTask.didFinish()
+            }
+        }
+    }
+    
+    private func fileUrlFromUrl(_ url: URL) -> URL? {
+        let assetName = url.deletingPathExtension().lastPathComponent
+        let assetExtension = url.pathExtension
+        return Bundle.module.url(forResource: assetName, withExtension: assetExtension)
+//        return Bundle.module.url(
+//            forResource: assetName,
+//            withExtension: assetExtension,
+//            subdirectory: "Resources")
+    }
+
+    private func mimeType(ofFileAtUrl url: URL) -> String? {
+        return UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
     }
 }
 
