@@ -24,9 +24,9 @@
                 var coverURL;
                 
                 window.loadEPUB = function (url) {
-                    console.log("load")
-                    console.log(url)
-                    var book = ePub(url)
+                    var book = ePub(url, {
+                        openAs: "epub",
+                    })
                     
                     book.loaded.metadata.then(function (meta) {
                         document.title = meta.title
@@ -113,8 +113,7 @@
                             var section = book.spine.get(hash)
                             if (section) {
                                 currentSection = section
-                                section.render().then(function (html) {
-                                    // viewer.srcdoc = html
+                                section.render(book.request).then(function (html) {
                                     viewer.innerHTML = ""
                                     window.location.hash = "#" + section.href
                                     viewer.innerHTML = html
