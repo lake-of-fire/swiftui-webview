@@ -35,21 +35,26 @@
                     book.loaded.metadata.then(function (meta) {
                         document.title = meta.title
                         
-                        function display() {
-                            viewer.innerHTML = ""
-                            let coverImage = document.createElement('img')
-                            coverImage.src = coverURL
-                            viewer.appendChild(coverImage)
+                        function displayIfNeeded() {
+                            book.loaded.navigation.then(function (toc) {
+                                var hash = window.location.hash.slice(2)
+                                if (!hash) {
+                                    viewer.innerHTML = ""
+                                    let coverImage = document.createElement('img')
+                                    coverImage.src = coverURL
+                                    viewer.appendChild(coverImage)
+                                }
+                            })
                         }
                         
                         function wireHash() {
                             var hash = window.location.hash.slice(2)
                             if (!hash) {
-                                display()
+                                displayIfNeeded()
                             }
                             window.addEventListener('hashchange', () => {
                                 if (!hash) {
-                                    display()
+                                    displayIfNeeded()
                                 }
                             }, false)
                         }

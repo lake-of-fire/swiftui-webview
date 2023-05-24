@@ -5,7 +5,7 @@ import ZIPFoundation
 
 public extension URL {
     var isEPUBURL: Bool {
-        return (isFileURL || scheme == "https") && pathExtension.lowercased() == "epub"
+        return (isFileURL || scheme == "https" || scheme == "http") && pathExtension.lowercased() == "epub"
     }
 }
 
