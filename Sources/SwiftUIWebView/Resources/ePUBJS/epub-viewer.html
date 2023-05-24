@@ -23,9 +23,13 @@
                 var currentSection;
                 var coverURL;
                 
+                const isFloat = v => Math.floor(v) !== Math.ceil(v);
+                
                 window.loadEPUB = function (url) {
+                    var url = "https://s3.amazonaws.com/moby-dick/moby-dick.epub"
                     var book = ePub(url, {
-                        openAs: "epub",
+                        /*openAs: "epub",
+                        allowScriptedContent: true,*/
                     })
                     
                     book.loaded.metadata.then(function (meta) {
@@ -90,7 +94,7 @@
                         
                         select.onchange = function () {
                             var index = select.selectedIndex,
-                            hash = select.options[index].ref
+                                hash = select.options[index].ref
                             display(hash)
                             return false
                         }
@@ -109,8 +113,13 @@
                          if(displayed) currentSectionIndex--;
                          }, false);*/
                         
-                        function display(hash) {
-                            var section = book.spine.get(hash)
+                        function display(target) {
+                            // Check if this is a book percentage
+                            if (book.locations.length() && isFloat(target)) {
+                                target = book.locations.cfiFromPercentage(parseFloat(target))
+                            }
+                            
+                            var section = book.spine.get(target)
                             if (section) {
                                 currentSection = section
                                 section.render(book.request).then(function (html) {

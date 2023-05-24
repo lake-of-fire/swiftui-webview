@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
+import ZIPFoundation
 
 public extension URL {
     var isEPUBURL: Bool {
@@ -325,9 +326,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
            navigationAction.targetFrame?.isMainFrame ?? false,
            url.isFileURL || url.absoluteString.hasPrefix("https://") || url.absoluteString.hasPrefix("http://"),
            navigationAction.request.url?.pathExtension.lowercased() == "epub",
-           let htmlPath = Bundle.module.path(forResource: "epub-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
+           let viewerHtmlPath = Bundle.module.path(forResource: "epub-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
             do {
-                let html = try String(contentsOfFile: htmlPath)
+                let html = try String(contentsOfFile: viewerHtmlPath)
                 webView.loadHTMLString(html, baseURL: epubURL)
             } catch { }
             return (.cancel, preferences)
@@ -346,7 +347,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 let pdfJSHTML = try String(contentsOfFile: pdfJSPath)
                 webView.loadHTMLString(pdfJSHTML, baseURL: pdfURL)
             } catch { }
-        return (.allow, preferences)
             return (.cancel, preferences)
         }
         
@@ -1003,6 +1003,35 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 urlSchemeTask.didReceive(response)
                 urlSchemeTask.didReceive(data)
                 urlSchemeTask.didFinish()
+            } else /*if
+                let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+                let fileUrl = URL(string: "file://\(path)"),
+                let currentURL = URL(string: "\(fileType)://\(path)"),
+                urlSchemeTask.request.mainDocumentURL == currentURL, // Security check.
+                let mimeType = mimeType(ofFileAtUrl: fileUrl),
+                let data = try? Data(contentsOf: fileUrl) {
+                let response = HTTPURLResponse(
+                    url: url,
+                    mimeType: mimeType,
+                    expectedContentLength: data.count, textEncodingName: nil)
+                urlSchemeTask.didReceive(response)
+                urlSchemeTask.didReceive(data)
+                    urlSchemeTask.didFinish()*/ {
+                print(url)
+                print("UHHHHHHHHHHHHHHH")
+//
+//                let currentWorkingPath = FileManager().currentDirectoryPath
+//                var sourceURL = URL(fileURLWithPath: currentWorkingPath)
+//                sourceURL.appendPathComponent("archive.zip")
+//                var destinationURL = URL(fileURLWithPath: currentWorkingPath)
+//                destinationURL.appendPathComponent("directory")
+//                do {
+//                    try FileManager().createDirectory(at: destinationURL, withIntermediateDirectories: true, attributes: nil)
+//                    try FileManager().unzipItem(at: sourceURL, to: destinationURL)
+//                } catch {
+//                    print("Extraction of ZIP archive failed with error:\(error)")
+//                }
+                
             }
         }
     }

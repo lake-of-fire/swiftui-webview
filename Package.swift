@@ -14,11 +14,14 @@ let package = Package(
             targets: ["SwiftUIWebView"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", .upToNextMajor(from: "0.9.0")),
     ],
     targets: [
         .target(
             name: "SwiftUIWebView",
-            dependencies: [],
+            dependencies: [
+                .product(name: "ZIPFoundation", package: "ZipFoundation"),
+            ],
             resources: [
 //                .copy("Resources"), // CodeSign errors...
                 .process("Resources"),
