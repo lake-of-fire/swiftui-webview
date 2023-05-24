@@ -432,7 +432,9 @@ fileprivate struct LocationChangeUserScript {
     });
 })();
 window.addEventListener('swiftUIWebViewLocationChanged', function () {
-    webkit.messageHandlers.swiftUIWebViewLocationChanged.postMessage(window.location.href);
+    if (window.webkit) {
+        window.webkit.messageHandlers.swiftUIWebViewLocationChanged.postMessage(window.location.href);
+    }
 });
 """
         userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true)
@@ -449,7 +451,7 @@ new MutationObserver(function(mutations) {
     if (node) {
         let url = node.getAttribute('content')
         if (lastURL === url) { return }
-        webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
+        window.webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
             imageURL: url, url: window.location.href})
         lastURL = url
     }
@@ -993,7 +995,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 urlSchemeTask.didReceive(response)
                 urlSchemeTask.didReceive(data)
                 urlSchemeTask.didFinish()
-            } else if let fileUrl = fileUrlFromUrl(url),
+            } else if let fileUrl = bundleURLFromWebURL(url),
                       let mimeType = mimeType(ofFileAtUrl: fileUrl),
                       let data = try? Data(contentsOf: fileUrl) {
                 let response = HTTPURLResponse(
@@ -1003,40 +1005,26 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 urlSchemeTask.didReceive(response)
                 urlSchemeTask.didReceive(data)
                 urlSchemeTask.didFinish()
-            } else /*if
-                let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-                let fileUrl = URL(string: "file://\(path)"),
-                let currentURL = URL(string: "\(fileType)://\(path)"),
-                urlSchemeTask.request.mainDocumentURL == currentURL, // Security check.
-                let mimeType = mimeType(ofFileAtUrl: fileUrl),
-                let data = try? Data(contentsOf: fileUrl) {
-                let response = HTTPURLResponse(
-                    url: url,
-                    mimeType: mimeType,
-                    expectedContentLength: data.count, textEncodingName: nil)
-                urlSchemeTask.didReceive(response)
-                urlSchemeTask.didReceive(data)
-                    urlSchemeTask.didFinish()*/ {
-                print(url)
-                print("UHHHHHHHHHHHHHHH")
-//
-//                let currentWorkingPath = FileManager().currentDirectoryPath
-//                var sourceURL = URL(fileURLWithPath: currentWorkingPath)
-//                sourceURL.appendPathComponent("archive.zip")
-//                var destinationURL = URL(fileURLWithPath: currentWorkingPath)
-//                destinationURL.appendPathComponent("directory")
-//                do {
-//                    try FileManager().createDirectory(at: destinationURL, withIntermediateDirectories: true, attributes: nil)
-//                    try FileManager().unzipItem(at: sourceURL, to: destinationURL)
-//                } catch {
-//                    print("Extraction of ZIP archive failed with error:\(error)")
-//                }
-                
+            } else if webView.url?.scheme == "epub", let webURL = webView.url, let epubURL = URL(string: "file://" + webURL.path), let archive = Archive(url: epubURL, accessMode: .read), let entry = archive[String(url.path.dropFirst())] {
+                var data = Data()
+                do {
+                    let _ = try archive.extract(entry) { chunk in
+                        data.append(chunk)
+                    }
+                    let mimeType = mimeType(ofFileAtUrl: url)
+                    let response = HTTPURLResponse(
+                        url: url,
+                        mimeType: mimeType,
+                        expectedContentLength: data.count, textEncodingName: nil)
+                    urlSchemeTask.didReceive(response)
+                    urlSchemeTask.didReceive(data)
+                    urlSchemeTask.didFinish()
+                } catch { print("Failed to extract: \(error.localizedDescription)") }
             }
         }
     }
     
-    private func fileUrlFromUrl(_ url: URL) -> URL? {
+    private func bundleURLFromWebURL(_ url: URL) -> URL? {
         let assetName = url.deletingPathExtension().lastPathComponent
         let assetExtension = url.pathExtension
         return Bundle.module.url(forResource: assetName, withExtension: assetExtension)
