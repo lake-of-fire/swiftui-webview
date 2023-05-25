@@ -322,10 +322,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         
         // ePub loader
+        // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         if let url = navigationAction.request.url,
            navigationAction.targetFrame?.isMainFrame ?? false,
-           url.isFileURL || url.absoluteString.hasPrefix("https://") || url.absoluteString.hasPrefix("http://"),
-           navigationAction.request.url?.pathExtension.lowercased() == "epub",
+           url.isEPUBURL,
            let viewerHtmlPath = Bundle.module.path(forResource: "epub-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
             do {
                 let html = try String(contentsOfFile: viewerHtmlPath)
@@ -967,7 +967,22 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         guard let url = urlSchemeTask.request.url else { return }
         for fileType in ["epub"] { // TODO: "pdf"
-            if url.absoluteString.hasPrefix("\(fileType)-url://"),
+            if urlSchemeTask.request.value(forHTTPHeaderField: "IS_SWIFTUIWEBVIEW_VIEWER_FILE_REQUEST")?.lowercased() != "true", url.pathExtension.lowercased() == fileType.lowercased(),
+               let viewerHtmlPath = Bundle.module.path(forResource: "\(fileType)-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: (url.isFileURL || url.scheme == "epub") ? "\(fileType)://\(path)" : "\(fileType)-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))"), let mimeType = mimeType(ofFileAtUrl: url) {
+                do {
+                    let html = try String(contentsOfFile: viewerHtmlPath)
+                    webView.loadHTMLString(html, baseURL: epubURL)
+                    if let data = html.data(using: .utf8) {
+                        let response = HTTPURLResponse(
+                            url: url,
+                            mimeType: mimeType,
+                            expectedContentLength: data.count, textEncodingName: nil)
+                        urlSchemeTask.didReceive(response)
+                        urlSchemeTask.didReceive(data)
+                        urlSchemeTask.didFinish()
+                    }
+                } catch { }
+            } else if url.absoluteString.hasPrefix("\(fileType)-url://"),
                let remoteURL = URL(string: "https://\(url.absoluteString.dropFirst("\(fileType)-url://".count))"),
                urlSchemeTask.request.mainDocumentURL == url,
                let mimeType = mimeType(ofFileAtUrl: remoteURL) {

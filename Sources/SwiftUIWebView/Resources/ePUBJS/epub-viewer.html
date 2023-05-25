@@ -27,9 +27,12 @@
                 
                 window.loadEPUB = function (url) {
                     //var url = "https://s3.amazonaws.com/moby-dick/moby-dick.epub"
+                    // TODO: Synced UUID key here to auth requests for files
                     var book = ePub(url, {
-                        /*openAs: "epub",
-                        allowScriptedContent: true,*/
+                        requestHeaders: {
+                            'IS_SWIFTUIWEBVIEW_VIEWER_FILE_REQUEST': 'true',
+                        },
+                        // allowScriptedContent: true,
                     })
                     
                     book.loaded.metadata.then(function (meta) {
@@ -74,67 +77,87 @@
                         
                     })
                     
-                    book.loaded.navigation.then(function (toc) {
-                        var select = document.getElementById("toc"),
-                        docfrag = document.createDocumentFragment()
-                        
-                        var hash = window.location.hash.slice(2)
-                        if (hash) {
-                            display(hash)
-                        }
-                        window.addEventListener('hashchange', () => {
+                    book.loaded.metadata.then(function (meta) {
+                        //book.loaded.navigation.then(function (toc) {
+                        book.loaded.spine.then(function (spine) {
+                            //let toc = packaging.spine
+                            let toc = spine.items
+                            var select = document.getElementById("toc"),
+                            docfrag = document.createDocumentFragment()
+                            
+                            var hash = window.location.hash.slice(2)
                             if (hash) {
-                                display(window.location.hash)
+                                display(hash)
                             }
-                        }, false)
-                        
-                        toc.forEach(function (chapter) {
+                            window.addEventListener('hashchange', () => {
+                                if (hash) {
+                                    display(window.location.hash)
+                                }
+                            }, false)
+                            
+                            // Cover page
                             var option = document.createElement('option')
-                            option.textContent = chapter.label
-                            option.ref = chapter.href
+                            option.textContent = meta.title
+                            option.value = ""
                             docfrag.appendChild(option)
-                        })
-                        
-                        select.appendChild(docfrag)
-                        
-                        select.onchange = function () {
-                            var index = select.selectedIndex,
-                                hash = select.options[index].ref
-                            display(hash)
-                            return false
-                        }
-                        
-                        /*book.opened.then(function () {
-                         display(currentSectionIndex);
-                         })*/
-                        
-                        /*next.addEventListener("click", function () {
-                         var displayed = display(currentSectionIndex+1);
-                         if(displayed) currentSectionIndex++;
-                         }, false);
-                         
-                         prev.addEventListener("click", function () {
-                         var displayed = display(currentSectionIndex-1);
-                         if(displayed) currentSectionIndex--;
-                         }, false);*/
-                        
-                        function display(target) {
-                            // Check if this is a book percentage
-                            if (book.locations.length() && isFloat(target)) {
-                                target = book.locations.cfiFromPercentage(parseFloat(target))
+                            
+                            // Sections
+                            toc.forEach(function (chapter) {
+                                var option = document.createElement('option')
+                                option.textContent = chapter.label || chapter.id || chapter.href
+                                option.id = 'swiftuiwebview-epubjs-' + chapter.id
+                                option.value = chapter.href || chapter.id
+                                docfrag.appendChild(option)
+                            })
+                            select.appendChild(docfrag)
+                            select.onchange = function () {
+                                var index = select.selectedIndex,
+                                    hash = select.options[index].value
+                                display(hash)
+                                return false
                             }
                             
-                            var section = book.spine.get(target)
-                            if (section) {
-                                currentSection = section
-                                section.render(book.request).then(function (html) {
-                                    viewer.innerHTML = ""
-                                    window.location.hash = "#" + section.href
-                                    viewer.innerHTML = html
-                                })
+                            /*book.opened.then(function () {
+                             display(currentSectionIndex);
+                             })*/
+                            
+                            /*next.addEventListener("click", function () {
+                             var displayed = display(currentSectionIndex+1);
+                             if(displayed) currentSectionIndex++;
+                             }, false);
+                             
+                             prev.addEventListener("click", function () {
+                             var displayed = display(currentSectionIndex-1);
+                             if(displayed) currentSectionIndex--;
+                             }, false);*/
+                            
+                            function display(target) {
+                                // Check if this is a book percentage
+                                if (book.locations.length() && isFloat(target)) {
+                                    target = book.locations.cfiFromPercentage(parseFloat(target))
+                                }
+                                
+                                /*toc.forEach(function (section) {
+                                    if (section.id === target && section.textContent) {
+                                        viewer.innerHTML = ""
+                                        window.location.hash = "#" + section.id
+                                        viewer.innerHTML = section.textContent
+                                        return
+                                    }
+                                })*/
+                                
+                                var section = book.spine.get(target)
+                                if (section) {
+                                    currentSection = section
+                                    section.render(book.request).then(function (html) {
+                                        viewer.innerHTML = ""
+                                        window.location.hash = "#" + section.href
+                                        viewer.innerHTML = html
+                                    });
+                                }
+                                return
                             }
-                            return section;
-                        }
+                        });
                     });
                 }
                 
