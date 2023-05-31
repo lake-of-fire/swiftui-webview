@@ -136,6 +136,8 @@ public class WebViewCoordinator: NSObject {
     var registeredMessageHandlerNames = Set<String>()
     var lastInstalledScriptsHash = -1
     
+    var compiledContentRules = [String: WKContentRuleList]()
+    
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
     }
@@ -147,7 +149,9 @@ public class WebViewCoordinator: NSObject {
         
         // TODO: Make about:blank history initialization optional via configuration.
         if webView.action == .idle && webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
-            webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
+            Task { @MainActor in
+                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
+            }
         }
     }
     
@@ -314,8 +318,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
-        if let host = navigationAction.request.url?.host {
-            if self.webView.restrictedPages?.first(where: { host.contains($0) }) != nil {
+        if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
+            if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)
                 return (.cancel, preferences)
             }
@@ -360,6 +364,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
 //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
         if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
             self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
+            
+            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
         }
         
         return (.allow, preferences)
@@ -465,6 +471,7 @@ public struct WebViewConfig {
     public static let `default` = WebViewConfig()
     
     public let javaScriptEnabled: Bool
+    public let contentRules: String?
     public let allowsBackForwardNavigationGestures: Bool
     public let allowsInlineMediaPlayback: Bool
     public let mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes
@@ -476,6 +483,7 @@ public struct WebViewConfig {
     public let userScripts: [WebViewUserScript]
     
     public init(javaScriptEnabled: Bool = true,
+                contentRules: String? = nil,
                 allowsBackForwardNavigationGestures: Bool = true,
                 allowsInlineMediaPlayback: Bool = true,
                 mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [WKAudiovisualMediaTypes.all],
@@ -486,6 +494,7 @@ public struct WebViewConfig {
                 backgroundColor: Color = .clear,
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
+        self.contentRules = contentRules
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
         self.mediaTypesRequiringUserActionForPlayback = mediaTypesRequiringUserActionForPlayback
@@ -558,7 +567,7 @@ public struct WebView: UIViewControllerRepresentable {
     @Binding var action: WebViewAction
     @Binding var state: WebViewState
     var scriptCaller: WebViewScriptCaller?
-    let restrictedPages: [String]?
+    let blockedHosts: Set<String>?
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
@@ -581,7 +590,7 @@ public struct WebView: UIViewControllerRepresentable {
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
                 scriptCaller: WebViewScriptCaller? = nil,
-                restrictedPages: [String]? = nil,
+                blockedHosts: Set<String>? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
@@ -592,7 +601,7 @@ public struct WebView: UIViewControllerRepresentable {
         _action = action
         _state = state
         self.scriptCaller = scriptCaller
-        self.restrictedPages = restrictedPages
+        self.blockedHosts = blockedHosts
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
@@ -661,6 +670,8 @@ public struct WebView: UIViewControllerRepresentable {
         
         let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
         refreshMessageHandlers(context: context)
+        
+        refreshContentRules(userContentController: configuration.userContentController, coordinator: context.coordinator)
 
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
@@ -703,6 +714,8 @@ public struct WebView: UIViewControllerRepresentable {
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
+        
+        refreshContentRules(userContentController: controller.configuration.userContentController, coordinator: context.coordinator)
         
         if needsHistoryRefresh {
             var newState = state
@@ -749,7 +762,7 @@ public struct WebView: NSViewRepresentable {
     @Binding var action: WebViewAction
     @Binding var state: WebViewState
     var scriptCaller: WebViewScriptCaller?
-    let restrictedPages: [String]?
+    let blockedHosts: Set<String>?
     let htmlInState: Bool
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
@@ -771,7 +784,7 @@ public struct WebView: NSViewRepresentable {
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
                 scriptCaller: WebViewScriptCaller? = nil,
-                restrictedPages: [String]? = nil,
+                blockedHosts: Set<String>? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
@@ -782,7 +795,7 @@ public struct WebView: NSViewRepresentable {
         _action = action
         _state = state
         self.scriptCaller = scriptCaller
-        self.restrictedPages = restrictedPages
+        self.blockedHosts = blockedHosts
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
@@ -847,6 +860,8 @@ public struct WebView: NSViewRepresentable {
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
+        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
+
         // Can't disable on macOS.
 //        uiView.scrollView.bounces = bounces
 //        uiView.scrollView.alwaysBounceVertical = bounces
@@ -921,6 +936,28 @@ extension WebView {
         }
     }
 
+    @MainActor
+    func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
+        userContentController.removeAllContentRuleLists()
+        guard let contentRules = config.contentRules else { return }
+        if let ruleList = coordinator.compiledContentRules[contentRules] {
+            userContentController.add(ruleList)
+        } else {
+            WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: "ContentBlockingRules",
+                encodedContentRuleList: contentRules) { (ruleList, error) in
+                    guard let ruleList = ruleList else {
+                        if let error = error {
+                            print(error.localizedDescription)
+                        }
+                        return
+                    }
+                    userContentController.add(ruleList)
+                    coordinator.compiledContentRules[contentRules] = ruleList
+                }
+        }
+    }
+    
     @MainActor
     func refreshMessageHandlers(context: Context) {
         for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
@@ -1069,7 +1106,7 @@ struct WebViewTest: View {
             Divider()
             WebView(action: $action,
                     state: $state,
-                    restrictedPages: ["apple.com"],
+                    blockedHosts: Set(["apple.com"]),
                     htmlInState: true)
             Text(state.pageHTML ?? "")
                 .lineLimit(nil)
