@@ -454,7 +454,7 @@ fileprivate struct ImageChangeUserScript {
 var lastURL;
 new MutationObserver(function(mutations) {
     let node = document.querySelector('head meta[property="og:image"]')
-    if (node) {
+    if (node && window.webkit) {
         let url = node.getAttribute('content')
         if (lastURL === url) { return }
         window.webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
@@ -671,7 +671,7 @@ public struct WebView: UIViewControllerRepresentable {
         let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
         refreshMessageHandlers(context: context)
         
-        refreshContentRules(userContentController: configuration.userContentController, coordinator: context.coordinator)
+        refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
 
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
@@ -715,7 +715,7 @@ public struct WebView: UIViewControllerRepresentable {
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
-        refreshContentRules(userContentController: controller.configuration.userContentController, coordinator: context.coordinator)
+        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
         if needsHistoryRefresh {
             var newState = state
