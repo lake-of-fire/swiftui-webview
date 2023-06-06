@@ -5,7 +5,7 @@ import ZIPFoundation
 
 public extension URL {
     var isEPUBURL: Bool {
-        return (isFileURL || scheme == "https" || scheme == "http") && pathExtension.lowercased() == "epub"
+        return (isFileURL || scheme == "https" || scheme == "http" || scheme == "epub" || scheme == "epub-url") && pathExtension.lowercased() == "epub"
     }
 }
 
@@ -329,7 +329,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         if let url = navigationAction.request.url,
            navigationAction.targetFrame?.isMainFrame ?? false,
-           url.isEPUBURL,
+           url.isEPUBURL, !["epub", "epub-url"].contains(url.scheme),
            let viewerHtmlPath = Bundle.module.path(forResource: "epub-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
             do {
                 let html = try String(contentsOfFile: viewerHtmlPath)
