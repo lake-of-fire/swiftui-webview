@@ -554,8 +554,11 @@ public class WebViewController: UIViewController {
         let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
             webView.setValue(insets, forKey: key)
+//        webView.safeAreaInsetsDidChange()
             let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
             let key2 = argument2.compactMap({ $0 as? String }).joined()
+//        print(key)
+//        print(key2)
             webView.setValue(true, forKey: key2)
 //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
