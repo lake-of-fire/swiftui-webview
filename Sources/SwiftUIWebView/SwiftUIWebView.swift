@@ -588,7 +588,6 @@ public struct WebView: UIViewControllerRepresentable {
     private static var webViewCache: [String: EnhancedWKWebView] = [:]
     private static let processPool = WKProcessPool()
     
-    
     public init(config: WebViewConfig = .default,
                 action: Binding<WebViewAction>,
                 state: Binding<WebViewState>,
@@ -599,7 +598,8 @@ public struct WebView: UIViewControllerRepresentable {
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
 //                onWarm: (() async -> Void)? = nil,
-                schemeHandlers: [String: (URL) -> Void] = [:]) {
+                schemeHandlers: [String: (URL) -> Void] = [:],
+                messageHandlers: [String: (WebViewMessage) async -> Void] = [:]) {
         self.config = config
         _action = action
         _state = state
@@ -611,6 +611,10 @@ public struct WebView: UIViewControllerRepresentable {
         self.persistentWebViewID = persistentWebViewID
 //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
+        for name in messageHandlers.keys.map({ $0 }) {
+            self.messageHandlerNamesToRegister.insert(name)
+        }
+        self.messageHandlers = messageHandlers
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -746,13 +750,6 @@ public struct WebView: UIViewControllerRepresentable {
         controller.webView.scrollView.contentInset.bottom = obscuredInsets.bottom
     }
     
-    public func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
-        var copy = self
-        copy.messageHandlerNamesToRegister.insert(name)
-        copy.messageHandlers[name] = perform
-        return copy
-    }
-        
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         controller.view.subviews.forEach { $0.removeFromSuperview() }
     }
@@ -793,7 +790,8 @@ public struct WebView: NSViewRepresentable {
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
 //                onWarm: (() -> Void)? = nil,
-                schemeHandlers: [String: (URL) -> Void] = [:]) {
+                schemeHandlers: [String: (URL) -> Void] = [:],
+                messageHandlers: [String: (WebViewMessage) async -> Void] = [:]) {
         self.config = config
         _action = action
         _state = state
@@ -804,6 +802,10 @@ public struct WebView: NSViewRepresentable {
         self.bounces = bounces
 //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
+        for name in messageHandlers.keys.map({ $0 }) {
+            self.messageHandlerNamesToRegister.insert(name)
+        }
+        self.messageHandlers = messageHandlers
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -886,13 +888,6 @@ public struct WebView: NSViewRepresentable {
         processAction(webView: uiView)
     }
     
-    public func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
-        var copy = self
-        copy.messageHandlerNamesToRegister.insert(name)
-        copy.messageHandlers[name] = perform
-        return copy
-    }
-    
     public static func dismantleNSView(_ nsView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
         for messageHandlerName in coordinator.messageHandlerNames {
             nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
@@ -901,6 +896,28 @@ public struct WebView: NSViewRepresentable {
 }
 #endif
 
+//public struct OnMessageReceivedModifier: ViewModifier {
+//    var name: String
+//    var perform: @escaping ((WebViewMessage) async -> Void)
+//
+//    public init(name: String, perform: ((WebViewMessage) async -> Void)) {
+//        self.name = name
+//        self.perform = perform
+//    }
+//
+//    public func body(content: WebView) -> some View {
+//        content
+//    }
+//}
+//public extension WebView {
+//    func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
+//        var copy = self
+//        copy.messageHandlerNamesToRegister.insert(name)
+//        copy.messageHandlers[name] = perform
+//        return copy
+//    }
+//}
+    
 extension WebView {
     func processAction(webView: EnhancedWKWebView) {
         guard action != .idle else { return }
