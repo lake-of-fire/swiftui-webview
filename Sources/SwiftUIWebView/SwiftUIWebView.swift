@@ -155,13 +155,13 @@ public class WebViewCoordinator: NSObject {
         }
     }
     
-    func setLoading(_ isLoading: Bool,
+    @discardableResult func setLoading(_ isLoading: Bool,
                     isProvisionallyNavigating: Bool? = nil,
                     canGoBack: Bool? = nil,
                     canGoForward: Bool? = nil,
                     backList: [WKBackForwardListItem]? = nil,
                     forwardList: [WKBackForwardListItem]? = nil,
-                    error: Error? = nil) {
+                    error: Error? = nil) -> WebViewState {
         var newState = webView.state
         newState.isLoading = isLoading
         if let isProvisionallyNavigating = isProvisionallyNavigating {
@@ -184,6 +184,7 @@ public class WebViewCoordinator: NSObject {
         }
         webView.state = newState
         webView.action = .idle
+        return newState
     }
 }
 
@@ -235,7 +236,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
 
 extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        setLoading(
+        let newState = setLoading(
             false,
             isProvisionallyNavigating: false,
             canGoBack: webView.canGoBack,
@@ -252,18 +253,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
          */
         
+        if let onNavigationFinished = self.webView.onNavigationFinished {
+            onNavigationFinished(newState)
+        }
+        
         extractPageState(webView: webView)
     }
     
     private func extractPageState(webView: WKWebView) {
-        webView.evaluateJavaScript("document.title") { (response, error) in
-            if let title = response as? String {
-                var newState = self.webView.state
-                newState.pageTitle = title
-                self.webView.state = newState
-            }
-        }
-        
         webView.evaluateJavaScript("document.title") { (response, error) in
             if let title = response as? String {
                 var newState = self.webView.state
@@ -574,6 +571,7 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    let onNavigationFinished: ((WebViewState) -> Void)?
     let obscuredInsets: EdgeInsets
     var bounces = true
     let persistentWebViewID: String?
@@ -599,7 +597,8 @@ public struct WebView: UIViewControllerRepresentable {
                 persistentWebViewID: String? = nil,
 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
-                messageHandlers: [String: (WebViewMessage) async -> Void] = [:]) {
+                messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
+                onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
         _action = action
         _state = state
@@ -615,6 +614,7 @@ public struct WebView: UIViewControllerRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
+        self.onNavigationFinished = onNavigationFinished
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -699,7 +699,7 @@ public struct WebView: UIViewControllerRepresentable {
         }
         
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
-            context.coordinator.scriptCaller = scriptCaller
+          context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
@@ -767,6 +767,7 @@ public struct WebView: NSViewRepresentable {
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    let onNavigationFinished: ((WebViewState) -> Void)?
     /// Unused on macOS (for now).
     var obscuredInsets: EdgeInsets
     var bounces = true
@@ -791,7 +792,8 @@ public struct WebView: NSViewRepresentable {
                 persistentWebViewID: String? = nil,
 //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
-                messageHandlers: [String: (WebViewMessage) async -> Void] = [:]) {
+                messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
+                onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
         _action = action
         _state = state
@@ -806,6 +808,7 @@ public struct WebView: NSViewRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
+        self.onNavigationFinished = onNavigationFinished
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -930,6 +933,16 @@ extension WebView {
             } else {
                 webView.load(request)
             }
+            if let url = request.url {
+                Task { @MainActor in
+                    var newState = state
+                    newState.pageURL = url
+                    newState.pageTitle = nil
+                    newState.pageHTML = nil
+                    newState.error = nil
+                    state = newState
+                }
+            }
         case .loadHTML(let pageHTML):
             webView.loadHTMLString(pageHTML, baseURL: nil)
         case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
@@ -951,7 +964,8 @@ extension WebView {
                 }
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
+        //DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
+        Task { @MainActor in
             action = .idle
         }
     }
