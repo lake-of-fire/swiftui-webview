@@ -9,51 +9,6 @@ public extension URL {
     }
 }
 
-public enum WebViewAction: Equatable {
-    case idle,
-         load(URLRequest),
-         loadHTML(String),
-         loadHTMLWithBaseURL(String, URL),
-         reload,
-         goBack,
-         goForward,
-         go(WKBackForwardListItem),
-         evaluateJS(String, (Result<Any?, Error>) -> Void)
-    
-    public static func == (lhs: WebViewAction, rhs: WebViewAction) -> Bool {
-        if case .idle = lhs, case .idle = rhs {
-            return true
-        }
-        if case let .load(requestLHS) = lhs, case let .load(requestRHS) = rhs {
-            return requestLHS == requestRHS
-        }
-        if case let .loadHTML(htmlLHS) = lhs, case let .loadHTML(htmlRHS) = rhs {
-            return htmlLHS == htmlRHS
-        }
-        if case let .loadHTMLWithBaseURL(htmlLHS, urlLHS) = lhs,
-           case let .loadHTMLWithBaseURL(htmlRHS, urlRHS) = rhs {
-            return htmlLHS == htmlRHS && urlLHS == urlRHS
-        }
-        if case .reload = lhs, case .reload = rhs {
-            return true
-        }
-        if case let .go(itemLHS) = lhs, case let .go(itemRHS) = rhs {
-            return itemLHS == itemRHS
-        }
-        if case .goBack = lhs, case .goBack = rhs {
-            return true
-        }
-        if case .goForward = lhs, case .goForward = rhs {
-            return true
-        }
-        if case let .evaluateJS(commandLHS, _) = lhs,
-           case let .evaluateJS(commandRHS, _) = rhs {
-            return commandLHS == commandRHS
-        }
-        return false
-    }
-}
-
 public struct WebViewState: Equatable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -131,6 +86,7 @@ public struct WebViewUserScript: Equatable, Hashable {
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
     
+    var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
@@ -142,17 +98,19 @@ public class WebViewCoordinator: NSObject {
         webView.messageHandlers.keys.map { $0 }
     }
     
-    init(webView: WebView, scriptCaller: WebViewScriptCaller? = nil, config: WebViewConfig) {
+    init(webView: WebView, navigator: WebViewNavigator, scriptCaller: WebViewScriptCaller? = nil, config: WebViewConfig) {
         self.webView = webView
+        self.navigator = navigator
         self.scriptCaller = scriptCaller
         self.config = config
         
         // TODO: Make about:blank history initialization optional via configuration.
-        if webView.action == .idle && webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
-            Task { @MainActor in
-                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
-            }
-        }
+        #warning("confirm this sitll works")
+//        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
+//            Task { @MainActor in
+//                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
+//            }
+//        }
     }
     
     @discardableResult func setLoading(_ isLoading: Bool,
@@ -183,7 +141,6 @@ public class WebViewCoordinator: NSObject {
             newState.error = error
         }
         webView.state = newState
-        webView.action = .idle
         return newState
     }
 }
@@ -211,8 +168,10 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             if let imageURLRaw = body["imageURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
                 var newState = webView.state
                 newState.pageImageURL = imageURL
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
-                    webView.state = newState
+                let targetState = newState
+                Task { @MainActor in
+                //                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
+                    webView.state = targetState
                 }
             }
         }
@@ -235,6 +194,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
 }
 
 extension WebViewCoordinator: WKNavigationDelegate {
+    @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let newState = setLoading(
             false,
@@ -292,6 +252,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         setLoading(false, isProvisionallyNavigating: false)
     }
     
+    @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         setLoading(false, isProvisionallyNavigating: false, error: error)
         
@@ -303,7 +264,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         setLoading(true, isProvisionallyNavigating: false)
     }
     
+    @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        print("!!!!! STRAT PROVISIONAL NAV \(navigation)")
         setLoading(
             true,
             isProvisionallyNavigating: true,
@@ -380,6 +343,50 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         return .allow
     }
+}
+
+public class WebViewNavigator {
+    weak var webView: WKWebView? {
+        didSet {
+            guard let webView = webView else { return }
+            // TODO: Make about:blank history initialization optional via configuration.
+            if !webView.canGoBack && !webView.canGoForward && (webView.url == nil || webView.url?.absoluteString == "about:blank") {
+                load(URLRequest(url: URL(string: "about:blank")!))
+            }
+        }
+    }
+    
+    public func load(_ request: URLRequest) {
+        guard let webView = webView else { return }
+        if let url = request.url, url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url)
+        } else {
+            webView.load(request)
+        }
+    }
+    
+    public func loadHTML(_ html: String, baseURL: URL? = nil) {
+        guard let webView = webView else { return }
+        webView.loadHTMLString(html, baseURL: baseURL)
+    }
+    
+    public func reload() {
+        webView?.reload()
+    }
+    
+    public func go(_ item: WKBackForwardListItem) {
+        webView?.go(to: item)
+    }
+    
+    public func goBack() {
+        webView?.goBack()
+    }
+    
+    public func goForward() {
+        webView?.goForward()
+    }
+    
+    public init() { }
 }
 
 public class WebViewScriptCaller: Equatable, ObservableObject {
@@ -564,7 +571,7 @@ public class WebViewController: UIViewController {
 
 public struct WebView: UIViewControllerRepresentable {
     private let config: WebViewConfig
-    @Binding var action: WebViewAction
+    var navigator: WebViewNavigator
     @Binding var state: WebViewState
     var scriptCaller: WebViewScriptCaller?
     let blockedHosts: Set<String>?
@@ -587,7 +594,7 @@ public struct WebView: UIViewControllerRepresentable {
     private static let processPool = WKProcessPool()
     
     public init(config: WebViewConfig = .default,
-                action: Binding<WebViewAction>,
+                navigator: WebViewNavigator,
                 state: Binding<WebViewState>,
                 scriptCaller: WebViewScriptCaller? = nil,
                 blockedHosts: Set<String>? = nil,
@@ -600,8 +607,8 @@ public struct WebView: UIViewControllerRepresentable {
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
-        _action = action
         _state = state
+        self.navigator = navigator
         self.scriptCaller = scriptCaller
         self.blockedHosts = blockedHosts
         self.htmlInState = htmlInState
@@ -618,7 +625,7 @@ public struct WebView: UIViewControllerRepresentable {
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
-        WebViewCoordinator(webView: self, scriptCaller: scriptCaller, config: config)
+        WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
     }
     
     @MainActor
@@ -698,8 +705,9 @@ public struct WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
         
+        context.coordinator.navigator.webView = webView
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
-          context.coordinator.scriptCaller = scriptCaller
+            context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
@@ -732,13 +740,12 @@ public struct WebView: UIViewControllerRepresentable {
             newState.canGoForward = controller.webView.canGoForward
             newState.backList = controller.webView.backForwardList.backList
             newState.forwardList = controller.webView.backForwardList.forwardList
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) {
+//            DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) {
+            Task { @MainActor in
                 state = newState
                 needsHistoryRefresh = false
             }
         }
-        
-        processAction(webView: controller.webView)
         
         controller.webView.scrollView.bounces = bounces
         controller.webView.scrollView.alwaysBounceVertical = bounces
@@ -759,7 +766,7 @@ public struct WebView: UIViewControllerRepresentable {
 #if os(macOS)
 public struct WebView: NSViewRepresentable {
     private let config: WebViewConfig
-    @Binding var action: WebViewAction
+    var navigator: WebViewNavigator
     @Binding var state: WebViewState
     var scriptCaller: WebViewScriptCaller?
     let blockedHosts: Set<String>?
@@ -782,7 +789,7 @@ public struct WebView: NSViewRepresentable {
     
     /// `persistentWebViewID` is only used on iOS, not macOS.
     public init(config: WebViewConfig = .default,
-                action: Binding<WebViewAction>,
+                navigator: WebViewNavigator,
                 state: Binding<WebViewState>,
                 scriptCaller: WebViewScriptCaller? = nil,
                 blockedHosts: Set<String>? = nil,
@@ -795,7 +802,7 @@ public struct WebView: NSViewRepresentable {
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
-        _action = action
+        self.navigator = navigator
         _state = state
         self.scriptCaller = scriptCaller
         self.blockedHosts = blockedHosts
@@ -812,7 +819,7 @@ public struct WebView: NSViewRepresentable {
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
-        return WebViewCoordinator(webView: self, scriptCaller: scriptCaller, config: config)
+        return WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
     }
     
     @MainActor
@@ -847,6 +854,7 @@ public struct WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
+        context.coordinator.navigator.webView = webView
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -882,13 +890,12 @@ public struct WebView: NSViewRepresentable {
             newState.canGoForward = uiView.canGoForward
             newState.backList = uiView.backForwardList.backList
             newState.forwardList = uiView.backForwardList.forwardList
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            Task { @MainActor in
+//            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
                 state = newState
                 needsHistoryRefresh = false
             }
         }
-        
-        processAction(webView: uiView)
     }
     
     public static func dismantleNSView(_ nsView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
@@ -922,53 +929,56 @@ public struct WebView: NSViewRepresentable {
 //}
     
 extension WebView {
-    func processAction(webView: EnhancedWKWebView) {
-        guard action != .idle else { return }
-        switch action {
-        case .idle:
-            break
-        case .load(let request):
-            if let url = request.url, url.isFileURL {
-                webView.loadFileURL(url, allowingReadAccessTo: url)
-            } else {
-                webView.load(request)
-            }
-            if let url = request.url {
-                Task { @MainActor in
-                    var newState = state
-                    newState.pageURL = url
-                    newState.pageTitle = nil
-                    newState.pageHTML = nil
-                    newState.error = nil
-                    state = newState
-                }
-            }
-        case .loadHTML(let pageHTML):
-            webView.loadHTMLString(pageHTML, baseURL: nil)
-        case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
-            webView.loadHTMLString(pageHTML, baseURL: baseURL)
-        case .reload:
-            webView.reload()
-        case .goBack:
-            webView.goBack()
-        case .goForward:
-            webView.goForward()
-        case .go(let item):
-            webView.go(to: item)
-        case .evaluateJS(let command, let callback):
-            webView.evaluateJavaScript(command) { result, error in
-                if let error = error {
-                    callback(.failure(error))
-                } else {
-                    callback(.success(result))
-                }
-            }
-        }
-        //DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
-        Task { @MainActor in
-            action = .idle
-        }
-    }
+//    @MainActor
+//    func processAction(webView: EnhancedWKWebView) {
+//        guard action != .idle else { return }
+//        switch action {
+//        case .idle:
+//            break
+//        case .load(let request):
+//            if let url = request.url, url.isFileURL {
+//                webView.loadFileURL(url, allowingReadAccessTo: url)
+//            } else {
+//                webView.load(request)
+//            }
+//            if let url = request.url {
+//                Task { @MainActor in
+//                    var newState = state
+//                    newState.pageURL = url
+//                    newState.pageTitle = nil
+//                    newState.pageHTML = nil
+//                    newState.error = nil
+//                    state = newState
+//                }
+//            }
+//        case .loadHTML(let pageHTML):
+//            webView.loadHTMLString(pageHTML, baseURL: nil)
+//        case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
+//            webView.loadHTMLString(pageHTML, baseURL: baseURL)
+//        case .reload:
+//            webView.reload()
+//        case .goBack:
+//            webView.goBack()
+//        case .goForward:
+//            webView.goForward()
+//        case .go(let item):
+//            webView.go(to: item)
+//        case .evaluateJS(let command, let callback):
+//            webView.evaluateJavaScript(command) { result, error in
+//                if let error = error {
+//                    callback(.failure(error))
+//                } else {
+//                    callback(.success(result))
+//                }
+//            }
+//        }
+//        //DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
+//        if action != .idle {
+//            Task { @MainActor in
+//                action = .idle
+//            }
+//        }
+//    }
 
     @MainActor
     func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
@@ -1125,6 +1135,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
+/*
 struct WebViewTest: View {
     @State private var action = WebViewAction.idle
     @State private var state = WebViewState.empty
@@ -1225,3 +1236,4 @@ struct WebView_Previews: PreviewProvider {
         WebViewTest()
     }
 }
+*/
