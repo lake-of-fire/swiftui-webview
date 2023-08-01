@@ -114,14 +114,18 @@ public class WebViewCoordinator: NSObject {
     }
     
     @discardableResult func setLoading(_ isLoading: Bool,
-                    isProvisionallyNavigating: Bool? = nil,
-                    canGoBack: Bool? = nil,
-                    canGoForward: Bool? = nil,
-                    backList: [WKBackForwardListItem]? = nil,
-                    forwardList: [WKBackForwardListItem]? = nil,
-                    error: Error? = nil) -> WebViewState {
+                                       pageURL: URL? = nil,
+                                       isProvisionallyNavigating: Bool? = nil,
+                                       canGoBack: Bool? = nil,
+                                       canGoForward: Bool? = nil,
+                                       backList: [WKBackForwardListItem]? = nil,
+                                       forwardList: [WKBackForwardListItem]? = nil,
+                                       error: Error? = nil) -> WebViewState {
         var newState = webView.state
         newState.isLoading = isLoading
+        if let pageURL = pageURL {
+            newState.pageURL = pageURL
+        }
         if let isProvisionallyNavigating = isProvisionallyNavigating {
             newState.isProvisionallyNavigating = isProvisionallyNavigating
         }
@@ -198,12 +202,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         let newState = setLoading(
             false,
+            pageURL: webView.url,
             isProvisionallyNavigating: false,
             canGoBack: webView.canGoBack,
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
-        
         // TODO: Move to an init postMessage callback
         /*
         if let url = webView.url, let scheme = url.scheme, scheme == "pdf" || scheme == "pdf-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "pdf", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
@@ -261,12 +265,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        setLoading(true, isProvisionallyNavigating: false)
+        let newState = setLoading(true, pageURL: webView.url, isProvisionallyNavigating: false)
+        if let onNavigationCommitted = self.webView.onNavigationCommitted {
+            onNavigationCommitted(newState)
+        }
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        print("!!!!! STRAT PROVISIONAL NAV \(navigation)")
         setLoading(
             true,
             isProvisionallyNavigating: true,
@@ -345,7 +351,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
 }
 
-public class WebViewNavigator {
+public class WebViewNavigator: NSObject, ObservableObject {
     weak var webView: WKWebView? {
         didSet {
             guard let webView = webView else { return }
@@ -386,7 +392,9 @@ public class WebViewNavigator {
         webView?.goForward()
     }
     
-    public init() { }
+    public override init() {
+        super.init()
+    }
 }
 
 public class WebViewScriptCaller: Equatable, ObservableObject {
@@ -561,8 +569,6 @@ public class WebViewController: UIViewController {
 //        webView.safeAreaInsetsDidChange()
             let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
             let key2 = argument2.compactMap({ $0 as? String }).joined()
-//        print(key)
-//        print(key2)
             webView.setValue(true, forKey: key2)
 //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
@@ -578,6 +584,7 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let obscuredInsets: EdgeInsets
     var bounces = true
@@ -605,6 +612,7 @@ public struct WebView: UIViewControllerRepresentable {
 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
+                onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
         _state = state
@@ -621,6 +629,7 @@ public struct WebView: UIViewControllerRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
+        self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
     
@@ -774,6 +783,7 @@ public struct WebView: NSViewRepresentable {
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     /// Unused on macOS (for now).
     var obscuredInsets: EdgeInsets
@@ -800,6 +810,7 @@ public struct WebView: NSViewRepresentable {
 //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
+                onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
         self.navigator = navigator
@@ -815,6 +826,7 @@ public struct WebView: NSViewRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
+        self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
     
