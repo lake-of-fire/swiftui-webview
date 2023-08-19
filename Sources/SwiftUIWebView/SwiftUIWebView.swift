@@ -4,8 +4,8 @@ import UniformTypeIdentifiers
 import ZIPFoundation
 
 public extension URL {
-    var isEPUBURL: Bool {
-        return (isFileURL || scheme == "https" || scheme == "http" || scheme == "epub" || scheme == "epub-url") && pathExtension.lowercased() == "epub"
+    var isEBookURL: Bool {
+        return (isFileURL || scheme == "https" || scheme == "http" || scheme == "ebook" || scheme == "ebook-url") && pathExtension.lowercased() == "epub"
     }
 }
 
@@ -90,7 +90,7 @@ public class WebViewCoordinator: NSObject {
     var scriptCaller: WebViewScriptCaller?
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
-    var lastInstalledScriptsHash = -1
+//    var lastInstalledScriptsHash = -1
     
     var compiledContentRules = [String: WKContentRuleList]()
     
@@ -155,10 +155,10 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             webView.needsHistoryRefresh = true
             return
         } else if message.name == "swiftUIWebViewEPUBJSInitialized" {
-            if let url = message.webView?.url, let scheme = url.scheme, scheme == "epub" || scheme == "epub-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "epub", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
+            if let url = message.webView?.url, let scheme = url.scheme, scheme == "ebook" || scheme == "ebook-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.isEBookURL, let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
                 Task { @MainActor in
                     do {
-                        try await _ = message.webView?.callAsyncJavaScript("window.loadEPUB(url)", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
+                        try await _ = message.webView?.callAsyncJavaScript("window.loadEBook(url)", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
                     } catch {
                         print("Failed to initialize ePUB: \(error.localizedDescription)")
                         if let message = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String {
@@ -293,16 +293,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         // ePub loader
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
-        if let url = navigationAction.request.url,
+        /*if let url = navigationAction.request.url,
            navigationAction.targetFrame?.isMainFrame ?? false,
-           url.isEPUBURL, !["epub", "epub-url"].contains(url.scheme),
-           let viewerHtmlPath = Bundle.module.path(forResource: "epub-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
+           url.isEBookURL, !["ebook", "ebook-url"].contains(url.scheme),
+           let viewerHtmlPath = Bundle.module.path(forResource: "ebook-reader", ofType: "html", inDirectory: "Foliate"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
             do {
-                let html = try String(contentsOfFile: viewerHtmlPath)
+                let html = try String(contentsOfFile: viewerHtmlPath, encoding: .utf8)
                 webView.loadHTMLString(html, baseURL: epubURL)
             } catch { }
             return (.cancel, preferences)
-        }
+        }*/
         
         // PDF.js loader
         if
@@ -662,7 +662,7 @@ public struct WebView: UIViewControllerRepresentable {
             //            let dataStore = WKWebsiteDataStore.nonPersistent()
             //            configuration.websiteDataStore = dataStore
             
-            for scheme in ["pdf", "epub"] {
+            for scheme in ["pdf", "ebook"] {
                 configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: scheme)
                 configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
             }
@@ -852,7 +852,7 @@ public struct WebView: NSViewRepresentable {
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
         //        configuration.websiteDataStore = dataStore
         
-        for scheme in ["pdf", "epub"] {
+        for scheme in ["pdf", "ebook"] {
             configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: scheme)
             configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
         }
@@ -1032,12 +1032,12 @@ extension WebView {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
         let allScripts = Self.systemScripts + scripts
-        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
+//        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
         userContentController.removeAllUserScripts()
         for script in allScripts {
             userContentController.addUserScript(script.webKitUserScript)
         }
-        coordinator.lastInstalledScriptsHash = allScripts.hashValue
+//        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
     
     fileprivate static let systemScripts = [
@@ -1059,12 +1059,27 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
     
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         guard let url = urlSchemeTask.request.url else { return }
-        for fileType in ["epub"] { // TODO: "pdf"
-            if urlSchemeTask.request.value(forHTTPHeaderField: "IS_SWIFTUIWEBVIEW_VIEWER_FILE_REQUEST")?.lowercased() != "true", url.pathExtension.lowercased() == fileType.lowercased(),
-               let viewerHtmlPath = Bundle.module.path(forResource: "\(fileType)-viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: (url.isFileURL || url.scheme == "epub") ? "\(fileType)://\(path)" : "\(fileType)-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))"), let mimeType = mimeType(ofFileAtUrl: url) {
+        for (scheme, srcName) in [("ebook", "foliate-js")] { // TODO: "pdf"
+            guard url.scheme?.lowercased() == scheme else { continue }
+            
+            if url.host == nil,
+               let fileUrl = bundleURLFromWebURL(url),
+               let mimeType = mimeType(ofFileAtUrl: fileUrl),
+               let data = try? Data(contentsOf: fileUrl) {
+                // Viewer asset.
+                let response = HTTPURLResponse(
+                    url: url,
+                    mimeType: mimeType,
+                    expectedContentLength: data.count, textEncodingName: nil)
+                urlSchemeTask.didReceive(response)
+                urlSchemeTask.didReceive(data)
+                urlSchemeTask.didFinish()
+            } else if url.host == nil,
+                      urlSchemeTask.request.value(forHTTPHeaderField: "IS-SWIFTUIWEBVIEW-VIEWER-FILE-REQUEST")?.lowercased() != "true",
+                      let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let ebookURL = URL(string: url.scheme == scheme ? "\(scheme)://\(path)" : "\(scheme)-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))"), let mimeType = mimeType(ofFileAtUrl: url) {
                 do {
                     let html = try String(contentsOfFile: viewerHtmlPath)
-                    webView.loadHTMLString(html, baseURL: epubURL)
+                    webView.loadHTMLString(html, baseURL: ebookURL)
                     if let data = html.data(using: .utf8) {
                         let response = HTTPURLResponse(
                             url: url,
@@ -1075,8 +1090,8 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                         urlSchemeTask.didFinish()
                     }
                 } catch { }
-            } else if url.absoluteString.hasPrefix("\(fileType)-url://"),
-               let remoteURL = URL(string: "https://\(url.absoluteString.dropFirst("\(fileType)-url://".count))"),
+            }/* else if url.absoluteString.hasPrefix("\(scheme)-url://"),
+               let remoteURL = URL(string: "https://\(url.absoluteString.dropFirst("\(scheme)-url://".count))"),
                urlSchemeTask.request.mainDocumentURL == url,
                let mimeType = mimeType(ofFileAtUrl: remoteURL) {
                 do {
@@ -1089,13 +1104,14 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     urlSchemeTask.didReceive(data)
                     urlSchemeTask.didFinish()
                 } catch { }
-            } else if
+            }*/ else if
                 let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
                 let fileUrl = URL(string: "file://\(path)"),
-                let currentURL = URL(string: "\(fileType)://\(path)"),
+                let currentURL = URL(string: "\(scheme)://\(path)"),
                 urlSchemeTask.request.mainDocumentURL == currentURL, // Security check.
                 let mimeType = mimeType(ofFileAtUrl: fileUrl),
                 let data = try? Data(contentsOf: fileUrl) {
+                // User file.
                 let response = HTTPURLResponse(
                     url: url,
                     mimeType: mimeType,
@@ -1103,17 +1119,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 urlSchemeTask.didReceive(response)
                 urlSchemeTask.didReceive(data)
                 urlSchemeTask.didFinish()
-            } else if let fileUrl = bundleURLFromWebURL(url),
-                      let mimeType = mimeType(ofFileAtUrl: fileUrl),
-                      let data = try? Data(contentsOf: fileUrl) {
-                let response = HTTPURLResponse(
-                    url: url,
-                    mimeType: mimeType,
-                    expectedContentLength: data.count, textEncodingName: nil)
-                urlSchemeTask.didReceive(response)
-                urlSchemeTask.didReceive(data)
-                urlSchemeTask.didFinish()
-            } else if webView.url?.scheme == "epub", let webURL = webView.url, let epubURL = URL(string: "file://" + webURL.path), let archive = Archive(url: epubURL, accessMode: .read), let entry = archive[String(url.path.dropFirst())] {
+            }/* else if webView.url?.scheme == scheme, let webURL = webView.url, let epubURL = URL(string: "file://" + webURL.path), let archive = Archive(url: epubURL, accessMode: .read), let entry = archive[String(url.path.dropFirst())] {
                 var data = Data()
                 do {
                     let _ = try archive.extract(entry) { chunk in
@@ -1128,14 +1134,16 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     urlSchemeTask.didReceive(data)
                     urlSchemeTask.didFinish()
                 } catch { print("Failed to extract: \(error.localizedDescription)") }
-            }
+            }*/
         }
     }
     
     private func bundleURLFromWebURL(_ url: URL) -> URL? {
+        guard url.path.hasPrefix("/viewer-assets/") else { return nil }
         let assetName = url.deletingPathExtension().lastPathComponent
         let assetExtension = url.pathExtension
-        return Bundle.module.url(forResource: assetName, withExtension: assetExtension)
+        let assetDirectory = url.deletingLastPathComponent().path.deletingPrefix("/viewer-assets/")
+        return Bundle.module.url(forResource: assetName, withExtension: assetExtension, subdirectory: assetDirectory)
 //        return Bundle.module.url(
 //            forResource: assetName,
 //            withExtension: assetExtension,
@@ -1249,3 +1257,10 @@ struct WebView_Previews: PreviewProvider {
     }
 }
 */
+
+fileprivate extension String {
+    func deletingPrefix(_ prefix: String) -> String {
+        guard self.hasPrefix(prefix) else { return self }
+        return String(self.dropFirst(prefix.count))
+    }
+}

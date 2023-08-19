@@ -23,8 +23,8 @@ let package = Package(
                 .product(name: "ZIPFoundation", package: "ZipFoundation"),
             ],
             resources: [
-//                .copy("Resources"), // CodeSign errors...
-                .process("Resources"),
+                .copy("Resources/foliate-js/"), // CodeSign errors...
+//                .process("Resources"),
             ]),
     ]
 )
