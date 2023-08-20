@@ -519,7 +519,25 @@ public struct WebViewConfig {
     }
 }
 
+fileprivate let kLeftArrowKeyCode:  UInt16  = 123
+fileprivate let kRightArrowKeyCode: UInt16  = 124
+fileprivate let kDownArrowKeyCode:  UInt16  = 125
+fileprivate let kUpArrowKeyCode:    UInt16  = 126
+
 public class EnhancedWKWebView: WKWebView {
+    public override var isOpaque: Bool {
+        return true
+    }
+    
+    public override func keyDown(with event: NSEvent) {
+    //                    print(">> key \(event.keyCode)")
+        switch event.keyCode {
+        case kLeftArrowKeyCode, kRightArrowKeyCode, kDownArrowKeyCode, kUpArrowKeyCode:
+            return
+        default:
+            super.keyDown(with: event)
+        }
+    }
 }
 
 #if os(iOS)
