@@ -51,13 +51,14 @@ public struct WebViewState: Equatable {
 }
 
 public struct WebViewMessage: Equatable {
+    public let frameInfo: WKFrameInfo
     fileprivate let uuid: UUID
     public let name: String
     public let body: Any
     
     public static func == (lhs: WebViewMessage, rhs: WebViewMessage) -> Bool {
         lhs.uuid == rhs.uuid
-            && lhs.name == rhs.name
+        && lhs.name == rhs.name && lhs.frameInfo == rhs.frameInfo
     }
 }
 
@@ -190,7 +191,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         }*/
         
         guard let messageHandler = webView.messageHandlers[message.name] else { return }
-        let message = WebViewMessage(uuid: UUID(), name: message.name, body: message.body)
+        let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
         Task {
             await messageHandler(message)
         }
