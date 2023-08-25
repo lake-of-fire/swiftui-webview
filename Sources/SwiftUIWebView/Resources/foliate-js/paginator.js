@@ -151,7 +151,16 @@ const makeMarginals = (length, part) => Array.from({ length }, () => {
 })
 
 class View {
-    #observer = new ResizeObserver(() => this.expand())
+    #wait = ms => new Promise(resolve => setTimeout(resolve, ms))
+    #resizeObserver = new ResizeObserver(async () => {
+        this.expand()
+    })
+    #mutationObserver = new MutationObserver(async () => {
+        if (this.#column) {
+            this.needsRenderForMutation = true
+        }
+    })
+    needsRenderForMutation = false
     #element = document.createElement('div')
     #iframe = document.createElement('iframe')
     #contentRange = document.createRange()
@@ -213,7 +222,8 @@ class View {
                 const layout = beforeRender?.({ vertical, rtl, background })
                 this.#iframe.style.display = 'block'
                 this.render(layout)
-                this.#observer.observe(doc.body)
+                this.#resizeObserver.observe(doc.body)
+                this.#mutationObserver.observe(doc.body, { childList: true, subtree: true, attributes: true })
 
                 // the resize observer above doesn't work in Firefox
                 // (see https://bugzilla.mozilla.org/show_bug.cgi?id=1832939)
@@ -279,7 +289,10 @@ class View {
             margin: '0',
         })
         this.setImageSize()
-        this.expand()
+        // Don't infinite loop.
+        if (!this.needsRenderForMutation) {
+            this.expand()
+        }
     }
     setImageSize() {
         const { width, height, margin } = this.#layout
@@ -302,7 +315,7 @@ class View {
             })
         }
     }
-    expand() {
+    async expand() {
         if (this.#column) {
             const side = this.#vertical ? 'height' : 'width'
             const otherSide = this.#vertical ? 'width' : 'height'
@@ -344,7 +357,7 @@ class View {
                 this.#overlayer.redraw()
             }
         }
-        this.onExpand()
+        await this.onExpand()
     }
     set overlayer(overlayer) {
         this.#overlayer = overlayer
@@ -354,7 +367,8 @@ class View {
         return this.#overlayer
     }
     destroy() {
-        if (this.document) this.#observer.unobserve(this.document.body)
+        if (this.document) this.#resizeObserver.unobserve(this.document.body)
+        if (this.document) this.#mutationObserver.unobserve(this.document.body)
     }
 }
 
@@ -365,7 +379,9 @@ export class Paginator extends HTMLElement {
         'max-inline-size', 'max-block-size', 'max-column-count',
     ]
     #root = this.attachShadow({ mode: 'closed' })
-    #observer = new ResizeObserver(() => this.render())
+    #resizeObserver = new ResizeObserver(() => {
+        this.render()
+    })
     #background
     #container
     #header
@@ -474,9 +490,11 @@ export class Paginator extends HTMLElement {
         this.#header = this.#root.getElementById('header')
         this.#footer = this.#root.getElementById('footer')
 
-        this.#observer.observe(this.#container)
+        this.#resizeObserver.observe(this.#container)
         this.#container.addEventListener('scroll', debounce(() => {
-            if (this.scrolled) this.#afterScroll('scroll')
+            if (this.scrolled) {
+                this.#afterScroll('scroll')
+            }
         }, 250))
 
         const opts = { passive: false }
@@ -515,10 +533,21 @@ export class Paginator extends HTMLElement {
         if (this.#view) this.#container.removeChild(this.#view.element)
         this.#view = new View({
             container: this,
-            onExpand: this.#scrollToAnchor.bind(this),
+            onExpand: this.#onExpand.bind(this),
         })
         this.#container.append(this.#view.element)
         return this.#view
+    }
+    async #onExpand() {
+        //                this.#scrollToAnchor.bind(this),
+        await this.#scrollToAnchor();
+        if (this.#view.needsRenderForMutation) {
+            this.#view.render(this.#beforeRender({
+                vertical: this.#vertical,
+                rtl: this.#rtl,
+            }))
+            this.#view.needsRenderForMutation = false
+        }
     }
     #beforeRender({ vertical, rtl, background }) {
         this.#vertical = vertical
@@ -960,7 +989,7 @@ export class Paginator extends HTMLElement {
         this.#view?.document?.fonts?.ready?.then(() => this.#view.expand())
     }
     destroy() {
-        this.#observer.unobserve(this)
+        this.#resizeObserver.unobserve(this)
         this.#view.destroy()
         this.#view = null
         this.sections[this.#index]?.unload?.()
