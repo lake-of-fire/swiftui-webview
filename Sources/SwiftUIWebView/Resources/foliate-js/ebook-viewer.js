@@ -3,6 +3,27 @@ import { createTOCView } from './ui/tree.js'
 import { createMenu } from './ui/menu.js'
 import { Overlayer } from '../foliate-js/overlayer.js'
 
+const replaceText = async (text, mediaType) => {
+    console.log('text replacer')
+    console.log(text)
+    return await fetch('ebook://ebook/process-text', {
+        method: "POST", // *GET, POST, PUT, DELETE, etc.
+        mode: "cors", // no-cors, *cors, same-origin
+        cache: "no-cache", // *default, no-cache, reload, force-cache, only-if-cached
+        headers: {
+            "Content-Type": mediaType,
+        },
+        body: text,
+    }).then((response) => {
+        console.log('text repl resp')
+        console.log(response)
+        if (!response.ok) {
+            throw new Error(`HTTP error, status = ${response.status}`)
+        }
+        return response.text()
+    })
+}
+
 const isZip = async file => {
     const arr = new Uint8Array(await file.slice(0, 4).arrayBuffer())
     return arr[0] === 0x50 && arr[1] === 0x4b && arr[2] === 0x03 && arr[3] === 0x04
@@ -20,7 +41,7 @@ const makeZipLoader = async file => {
     const loadText = load(entry => entry.getData(new TextWriter()))
     const loadBlob = load((entry, type) => entry.getData(new BlobWriter(type)))
     const getSize = name => map.get(name)?.uncompressedSize ?? 0
-    return { entries, loadText, loadBlob, getSize }
+    return { entries, loadText, loadBlob, getSize, replaceText }
 }
 
 const getFileEntries = async entry => entry.isFile ? entry
@@ -43,7 +64,7 @@ const makeDirectoryLoader = async entry => {
     const loadText = async name => decode(await getBuffer(name))
     const loadBlob = name => map.get(name)
     const getSize = name => map.get(name)?.size ?? 0
-    return { loadText, loadBlob, getSize }
+    return { loadText, loadBlob, getSize, replaceText }
 }
 
 const isCBZ = ({ name, type }) =>
@@ -67,27 +88,30 @@ const getView = async file => {
     else if (await isZip(file)) {
         const loader = await makeZipLoader(file)
         if (isCBZ(file)) {
-            const { makeComicBook } = await import('./comic-book.js')
-            book = makeComicBook(loader, file)
+            throw new Error('File format not yet supported')
+//            const { makeComicBook } = await import('./comic-book.js')
+//            book = makeComicBook(loader, file)
         } else if (isFBZ(file)) {
-            const { makeFB2 } = await import('./fb2.js')
-            const { entries } = loader
-            const entry = entries.find(entry => entry.filename.endsWith('.fb2'))
-            const blob = await loader.loadBlob((entry ?? entries[0]).filename)
-            book = await makeFB2(blob)
+            throw new Error('File format not yet supported')
+//            const { makeFB2 } = await import('./fb2.js')
+//            const { entries } = loader
+//            const entry = entries.find(entry => entry.filename.endsWith('.fb2'))
+//            const blob = await loader.loadBlob((entry ?? entries[0]).filename)
+//            book = await makeFB2(blob)
         } else {
             const { EPUB } = await import('./epub.js')
             book = await new EPUB(loader).init()
         }
     } else {
-        const { isMOBI, MOBI } = await import('./mobi.js')
-        if (await isMOBI(file)) {
-            const fflate = await import('./vendor/fflate.js')
-            book = await new MOBI({ unzlib: fflate.unzlibSync }).open(file)
-        } else if (isFB2(file)) {
-            const { makeFB2 } = await import('./fb2.js')
-            book = await makeFB2(file)
-        }
+        throw new Error('File format not yet supported')
+//        const { isMOBI, MOBI } = await import('./mobi.js')
+//        if (await isMOBI(file)) {
+//            const fflate = await import('./vendor/fflate.js')
+//            book = await new MOBI({ unzlib: fflate.unzlibSync }).open(file)
+//        } else if (isFB2(file)) {
+//            const { makeFB2 } = await import('./fb2.js')
+//            book = await makeFB2(file)
+//        }
     }
     if (!book) throw new Error('File type not supported')
     const view = document.createElement('foliate-view')
@@ -160,7 +184,6 @@ class Reader {
         })
         $('#dimming-overlay').addEventListener('click', () => this.closeSideBar())
 
-        /*
         const menu = createMenu([
             {
                 name: 'layout',
@@ -181,8 +204,7 @@ class Reader {
         $('#menu-button > button').addEventListener('click', () =>
             menu.element.classList.toggle('show'))
         
-        menu.groups.layout.select('scrolled')
-         */
+        menu.groups.layout.select('paginated')
     }
     async open(file) {
         this.view = await getView(file)
@@ -190,11 +212,12 @@ class Reader {
         this.view.addEventListener('relocate', this.#onRelocate.bind(this))
 
         const { book } = this.view
-        this.view.renderer.setAttribute('flow', 'scrolled')
-//        this.view.renderer.setAttribute('flow', 'paginated')
+//        this.view.renderer.setAttribute('flow', 'scrolled')
+        this.view.renderer.setAttribute('flow', 'paginated')
         this.view.renderer.setStyles?.(getCSS(this.style))
         this.view.renderer.next()
 
+        
         $('#header-bar').style.visibility = 'visible'
         $('#nav-bar').style.visibility = 'visible'
         $('#left-button').addEventListener('click', () => this.view.goLeft())
