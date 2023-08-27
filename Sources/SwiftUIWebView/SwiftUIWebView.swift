@@ -156,7 +156,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             webView.needsHistoryRefresh = true
             return
         } else if message.name == "swiftUIWebViewEPUBJSInitialized" {
-            if let url = message.webView?.url, let scheme = url.scheme, scheme == "ebook" || scheme == "ebook-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.isEBookURL, let loaderURL = URL(string: "\(scheme)://\(scheme)/load\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
+            if let url = message.webView?.url, let scheme = url.scheme, scheme == "ebook" || scheme == "ebook-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.isEBookURL, let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
                 Task { @MainActor in
                     do {
                         try await _ = message.webView?.callAsyncJavaScript("window.loadEBook(url)", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
@@ -603,6 +603,7 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    let ebookTextProcessor: ((String) -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let obscuredInsets: EdgeInsets
@@ -631,6 +632,7 @@ public struct WebView: UIViewControllerRepresentable {
 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
+                ebookTextProcessor: ((String) -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
@@ -648,6 +650,7 @@ public struct WebView: UIViewControllerRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
+        self.ebookTextProcessor = ebookTextProcessor
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
@@ -682,8 +685,8 @@ public struct WebView: UIViewControllerRepresentable {
             //            configuration.websiteDataStore = dataStore
             
             for scheme in ["pdf", "ebook"] {
-                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: scheme)
-                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
+                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(ebookTextProcessor: ebookTextProcessor), forURLScheme: scheme)
+//                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
             }
             
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
@@ -802,6 +805,7 @@ public struct WebView: NSViewRepresentable {
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
+    let ebookTextProcessor: ((String) -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     /// Unused on macOS (for now).
@@ -829,6 +833,7 @@ public struct WebView: NSViewRepresentable {
 //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
+                ebookTextProcessor: ((String) -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
@@ -845,6 +850,7 @@ public struct WebView: NSViewRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
+        self.ebookTextProcessor = ebookTextProcessor
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
@@ -872,7 +878,7 @@ public struct WebView: NSViewRepresentable {
         //        configuration.websiteDataStore = dataStore
         
         for scheme in ["pdf", "ebook"] {
-            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: scheme)
+            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(ebookTextProcessor: ebookTextProcessor), forURLScheme: scheme)
 //            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
         }
 
@@ -1074,10 +1080,17 @@ extension WebView {
 }
 
 final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
+    var ebookTextProcessor: ((String) -> String)? = nil
+    
     enum CustomSchemeHandlerError: Error {
         case fileNotFound
     }
 
+    init(ebookTextProcessor: ((String) -> String)? = nil) {
+        self.ebookTextProcessor = ebookTextProcessor
+        super.init()
+    }
+    
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
     
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
@@ -1087,8 +1100,11 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
             
             if url.path == "/process-text" {
                 if urlSchemeTask.request.httpMethod == "POST", let payload = urlSchemeTask.request.httpBody, let text = String(data: payload, encoding: .utf8) {
-                    print(text)
-                    if let respData = text.data(using: .utf8) {
+                    var respText = text
+                    if let ebookTextProcessor = ebookTextProcessor {
+                        respText = ebookTextProcessor(text)
+                    }
+                    if let respData = respText.data(using: .utf8) {
                         let resp = HTTPURLResponse(
                             url: url, mimeType: nil, expectedContentLength: respData.count, textEncodingName: "utf-8")
                         urlSchemeTask.didReceive(resp)
@@ -1098,7 +1114,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     }
                 }
             } else if url.pathComponents.starts(with: ["/", "load"]) {
-                let loadPath = url.pathComponents.dropFirst(2).joined(separator: "/")
+                let loadPath = "/" + url.pathComponents.dropFirst(2).joined(separator: "/")
                 
                 if let fileUrl = bundleURLFromWebURL(url),
                    let mimeType = mimeType(ofFileAtUrl: fileUrl),
@@ -1113,15 +1129,19 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     urlSchemeTask.didFinish()
                     return
                 } else if urlSchemeTask.request.value(forHTTPHeaderField: "IS-SWIFTUIWEBVIEW-VIEWER-FILE-REQUEST")?.lowercased() != "true",
-                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let ebookURL = URL(string: url.scheme == scheme ? "\(scheme)://\(path)" : "\(scheme)-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))"), let mimeType = mimeType(ofFileAtUrl: url) {
+                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let ebookURL = URL(string: url.scheme == scheme ? "\(scheme)://ebook/load\(path)" : "\(scheme)-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))"), let mimeType = mimeType(ofFileAtUrl: url) {
+                    print("swift viewer file request")
                     do {
                         let html = try String(contentsOfFile: viewerHtmlPath)
-                        webView.loadHTMLString(html, baseURL: ebookURL)
+                        print("html")
+//                        webView.loadHTMLString(html, baseURL: ebookURL)
                         if let data = html.data(using: .utf8) {
+                            print("resp.....")
                             let response = HTTPURLResponse(
                                 url: url,
                                 mimeType: mimeType,
                                 expectedContentLength: data.count, textEncodingName: nil)
+                            print(response)
                             urlSchemeTask.didReceive(response)
                             urlSchemeTask.didReceive(data)
                             urlSchemeTask.didFinish()
@@ -1145,7 +1165,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                   }*/ else if
                     let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
                     let fileUrl = URL(string: "file://\(path)"),
-                    let currentURL = URL(string: "\(scheme)://\(scheme)/load/\(path)"),
+                    let currentURL = URL(string: "\(scheme)://\(scheme)/load\(path)"),
                     urlSchemeTask.request.mainDocumentURL == currentURL, // Security check.
                     let mimeType = mimeType(ofFileAtUrl: fileUrl),
                     let data = try? Data(contentsOf: fileUrl) {
