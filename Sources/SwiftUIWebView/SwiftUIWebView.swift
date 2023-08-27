@@ -1102,7 +1102,9 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 if urlSchemeTask.request.httpMethod == "POST", let payload = urlSchemeTask.request.httpBody, let text = String(data: payload, encoding: .utf8) {
                     var respText = text
                     if let ebookTextProcessor = ebookTextProcessor {
+                        print(respText)
                         respText = ebookTextProcessor(text)
+                        print(respText)
                     }
                     if let respData = respText.data(using: .utf8) {
                         let resp = HTTPURLResponse(
