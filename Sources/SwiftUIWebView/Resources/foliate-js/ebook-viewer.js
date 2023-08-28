@@ -4,8 +4,6 @@ import { createMenu } from './ui/menu.js'
 import { Overlayer } from '../foliate-js/overlayer.js'
 
 const replaceText = async (text, mediaType) => {
-    console.log('text replacer')
-    console.log(text)
     return await fetch('ebook://ebook/process-text', {
         method: "POST", // *GET, POST, PUT, DELETE, etc.
         mode: "cors", // no-cors, *cors, same-origin
