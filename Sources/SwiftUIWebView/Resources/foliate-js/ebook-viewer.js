@@ -15,8 +15,6 @@ const replaceText = async (text, mediaType) => {
         },
         body: text,
     }).then((response) => {
-        console.log('text repl resp')
-        console.log(response)
         if (!response.ok) {
             throw new Error(`HTTP error, status = ${response.status}`)
         }

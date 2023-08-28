@@ -558,10 +558,7 @@ class Loader {
                     await this.replaceCSS(el.getAttribute('style'), href, parents))
             // TODO: replace inline scripts? probably not worth the trouble
             const textResult = new XMLSerializer().serializeToString(doc)
-            console.log('text result...')
-            console.log(textResult)
             if (this.replaceText) {
-                console.log('gonna rep text')
                 const replacedText = await this.replaceText(textResult, mediaType)
                 return this.createURL(href, replacedText, item.mediaType, parent)
             }
