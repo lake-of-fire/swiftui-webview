@@ -1102,9 +1102,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 if urlSchemeTask.request.httpMethod == "POST", let payload = urlSchemeTask.request.httpBody, let text = String(data: payload, encoding: .utf8) {
                     var respText = text
                     if let ebookTextProcessor = ebookTextProcessor {
-                        print(respText)
                         respText = ebookTextProcessor(text)
-                        print(respText)
                     }
                     if let respData = respText.data(using: .utf8) {
                         let resp = HTTPURLResponse(
@@ -1131,19 +1129,14 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     urlSchemeTask.didFinish()
                     return
                 } else if urlSchemeTask.request.value(forHTTPHeaderField: "IS-SWIFTUIWEBVIEW-VIEWER-FILE-REQUEST")?.lowercased() != "true",
-                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let ebookURL = URL(string: url.scheme == scheme ? "\(scheme)://ebook/load\(path)" : "\(scheme)-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))"), let mimeType = mimeType(ofFileAtUrl: url) {
-                    print("swift viewer file request")
+                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let mimeType = mimeType(ofFileAtUrl: url) {
                     do {
                         let html = try String(contentsOfFile: viewerHtmlPath)
-                        print("html")
-//                        webView.loadHTMLString(html, baseURL: ebookURL)
                         if let data = html.data(using: .utf8) {
-                            print("resp.....")
                             let response = HTTPURLResponse(
                                 url: url,
                                 mimeType: mimeType,
                                 expectedContentLength: data.count, textEncodingName: nil)
-                            print(response)
                             urlSchemeTask.didReceive(response)
                             urlSchemeTask.didReceive(data)
                             urlSchemeTask.didFinish()
