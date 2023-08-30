@@ -259,6 +259,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        scriptCaller?.removeAllMultiTargetFrames()
         setLoading(false, isProvisionallyNavigating: false, error: error)
         
         extractPageState(webView: webView)
@@ -266,6 +267,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        scriptCaller?.removeAllMultiTargetFrames()
         let newState = setLoading(true, pageURL: webView.url, isProvisionallyNavigating: false)
         if let onNavigationCommitted = self.webView.onNavigationCommitted {
             onNavigationCommitted(newState)
@@ -341,6 +343,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url {
+            scriptCaller?.removeAllMultiTargetFrames()
             var newState = self.webView.state
             newState.pageURL = url
             newState.pageTitle = nil
@@ -402,7 +405,9 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
 //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) -> Void)?) async -> Void)? = nil
+    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) async -> Void)?) async -> Void)? = nil
+    
+    private var multiTargetFrames = Set<WKFrameInfo>()
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.uuid == rhs.uuid
@@ -418,14 +423,30 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
     
     @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, in world: WKContentWorld? = nil, completionHandler: ((Result<Any, any Error>) -> Void)? = nil) async {
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = nil, completionHandler: ((Result<Any, any Error>) async -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(uuid)") // TODO: Error
             return
         }
         await asyncCaller(js, arguments, frame, world, completionHandler)
+        if duplicateInMultiTargetFrames {
+            for targetFrame in multiTargetFrames {
+                if targetFrame == frame { continue }
+                await asyncCaller(js, arguments, targetFrame, world, completionHandler)
+            }
+        }
     }
    
+    @MainActor
+    public func addMultiTargetFrame(_ frame: WKFrameInfo) {
+        multiTargetFrames.insert(frame)
+    }
+    
+    @MainActor
+    public func removeAllMultiTargetFrames() {
+        multiTargetFrames.removeAll()
+    }
+    
     public init() {
     }
 }
@@ -899,15 +920,24 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
             let world = world ?? .defaultClient
             if let args = args {
-                webView.callAsyncJavaScript(js, arguments: args, in: frame, in: world, completionHandler: callback)
+                webView.callAsyncJavaScript(js, arguments: args, in: frame, in: world, completionHandler: { result in
+                    guard let callback = callback else { return }
+                    Task { @MainActor in
+                        await callback(result)
+                    }
+                })
             } else {
-                webView.callAsyncJavaScript(js, in: frame, in: world, completionHandler: callback)
+                webView.callAsyncJavaScript(js, in: frame, in: world, completionHandler: { result in
+                    guard let callback = callback else { return }
+                    Task { @MainActor in
+                        await callback(result)
+                    }
+                })
             }
         }
-        
         return webView
     }
-
+    
     @MainActor
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
 //        refreshMessageHandlers(context: context)
@@ -943,80 +973,7 @@ public struct WebView: NSViewRepresentable {
 }
 #endif
 
-//public struct OnMessageReceivedModifier: ViewModifier {
-//    var name: String
-//    var perform: @escaping ((WebViewMessage) async -> Void)
-//
-//    public init(name: String, perform: ((WebViewMessage) async -> Void)) {
-//        self.name = name
-//        self.perform = perform
-//    }
-//
-//    public func body(content: WebView) -> some View {
-//        content
-//    }
-//}
-//public extension WebView {
-//    func onMessageReceived(forName name: String, perform: @escaping ((WebViewMessage) async -> Void)) -> WebView {
-//        var copy = self
-//        copy.messageHandlerNamesToRegister.insert(name)
-//        copy.messageHandlers[name] = perform
-//        return copy
-//    }
-//}
-    
 extension WebView {
-//    @MainActor
-//    func processAction(webView: EnhancedWKWebView) {
-//        guard action != .idle else { return }
-//        switch action {
-//        case .idle:
-//            break
-//        case .load(let request):
-//            if let url = request.url, url.isFileURL {
-//                webView.loadFileURL(url, allowingReadAccessTo: url)
-//            } else {
-//                webView.load(request)
-//            }
-//            if let url = request.url {
-//                Task { @MainActor in
-//                    var newState = state
-//                    newState.pageURL = url
-//                    newState.pageTitle = nil
-//                    newState.pageHTML = nil
-//                    newState.error = nil
-//                    state = newState
-//                }
-//            }
-//        case .loadHTML(let pageHTML):
-//            webView.loadHTMLString(pageHTML, baseURL: nil)
-//        case .loadHTMLWithBaseURL(let pageHTML, let baseURL):
-//            webView.loadHTMLString(pageHTML, baseURL: baseURL)
-//        case .reload:
-//            webView.reload()
-//        case .goBack:
-//            webView.goBack()
-//        case .goForward:
-//            webView.goForward()
-//        case .go(let item):
-//            webView.go(to: item)
-//        case .evaluateJS(let command, let callback):
-//            webView.evaluateJavaScript(command) { result, error in
-//                if let error = error {
-//                    callback(.failure(error))
-//                } else {
-//                    callback(.success(result))
-//                }
-//            }
-//        }
-//        //DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) {
-//        if action != .idle {
-//            Task { @MainActor in
-//                action = .idle
-//            }
-//        }
-//    }
-
     @MainActor
     func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
         userContentController.removeAllContentRuleLists()
@@ -1129,7 +1086,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     urlSchemeTask.didFinish()
                     return
                 } else if urlSchemeTask.request.value(forHTTPHeaderField: "IS-SWIFTUIWEBVIEW-VIEWER-FILE-REQUEST")?.lowercased() != "true",
-                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let mimeType = mimeType(ofFileAtUrl: url) {
+                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let mimeType = mimeType(ofFileAtUrl: url) {
                     do {
                         let html = try String(contentsOfFile: viewerHtmlPath)
                         if let data = html.data(using: .utf8) {
