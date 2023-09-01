@@ -1,4 +1,4 @@
-// swift-tools-version:5.7
+// swift-tools-version:5.8
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -15,12 +15,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", branch: "development"),
+        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
     ],
     targets: [
         .target(
             name: "SwiftUIWebView",
             dependencies: [
                 .product(name: "ZIPFoundation", package: "ZipFoundation"),
+                .product(name: "BookmarkStorage", package: "bookmark-storage"),
             ],
             resources: [
                 .copy("Resources/foliate-js/"), // CodeSign errors...

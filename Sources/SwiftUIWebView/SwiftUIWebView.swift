@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
 import ZIPFoundation
+import BookmarkStorage
 
 public extension URL {
     var isEBookURL: Bool {
@@ -423,7 +424,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
     
     @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = nil, completionHandler: ((Result<Any, any Error>) async -> Void)? = nil) async {
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any, any Error>) async -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(uuid)") // TODO: Error
             return
@@ -624,7 +625,7 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    let ebookTextProcessor: ((String) -> String)?
+    let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let obscuredInsets: EdgeInsets
@@ -653,7 +654,7 @@ public struct WebView: UIViewControllerRepresentable {
 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
-                ebookTextProcessor: ((String) -> String)? = nil,
+                ebookTextProcessor: ((String) async -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
@@ -826,7 +827,7 @@ public struct WebView: NSViewRepresentable {
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [String: (URL) -> Void]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    let ebookTextProcessor: ((String) -> String)?
+    let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     /// Unused on macOS (for now).
@@ -854,7 +855,7 @@ public struct WebView: NSViewRepresentable {
 //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [String: (URL) -> Void] = [:],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
-                ebookTextProcessor: ((String) -> String)? = nil,
+                ebookTextProcessor: ((String) async -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
@@ -1037,13 +1038,15 @@ extension WebView {
 }
 
 final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
-    var ebookTextProcessor: ((String) -> String)? = nil
+    var ebookTextProcessor: ((String) async -> String)? = nil
+    
+    private let bookmarkStore = BookmarkStore(delegate: UserDefaultsBookmarkStorageDelegate())
     
     enum CustomSchemeHandlerError: Error {
         case fileNotFound
     }
 
-    init(ebookTextProcessor: ((String) -> String)? = nil) {
+    init(ebookTextProcessor: ((String) async -> String)? = nil) {
         self.ebookTextProcessor = ebookTextProcessor
         super.init()
     }
@@ -1057,26 +1060,30 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
             
             if url.path == "/process-text" {
                 if urlSchemeTask.request.httpMethod == "POST", let payload = urlSchemeTask.request.httpBody, let text = String(data: payload, encoding: .utf8) {
-                    var respText = text
-                    if let ebookTextProcessor = ebookTextProcessor {
-                        respText = ebookTextProcessor(text)
+                    let ebookTextProcessor = ebookTextProcessor
+                    Task.detached {
+                        var respText = text
+                        if let ebookTextProcessor = ebookTextProcessor {
+                            respText = await ebookTextProcessor(text)
+                        }
+                        if let respData = respText.data(using: .utf8) {
+                            Task { @MainActor in
+                                let resp = HTTPURLResponse(
+                                    url: url, mimeType: nil, expectedContentLength: respData.count, textEncodingName: "utf-8")
+                                urlSchemeTask.didReceive(resp)
+                                urlSchemeTask.didReceive(respData)
+                                urlSchemeTask.didFinish()
+                            }
+                        }
                     }
-                    if let respData = respText.data(using: .utf8) {
-                        let resp = HTTPURLResponse(
-                            url: url, mimeType: nil, expectedContentLength: respData.count, textEncodingName: "utf-8")
-                        urlSchemeTask.didReceive(resp)
-                        urlSchemeTask.didReceive(respData)
-                        urlSchemeTask.didFinish()
-                        return
-                    }
+                    return
                 }
             } else if url.pathComponents.starts(with: ["/", "load"]) {
+                // Bundle file.
                 let loadPath = "/" + url.pathComponents.dropFirst(2).joined(separator: "/")
-                
                 if let fileUrl = bundleURLFromWebURL(url),
                    let mimeType = mimeType(ofFileAtUrl: fileUrl),
                    let data = try? Data(contentsOf: fileUrl) {
-                    // Viewer asset.
                     let response = HTTPURLResponse(
                         url: url,
                         mimeType: mimeType,
@@ -1087,6 +1094,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     return
                 } else if urlSchemeTask.request.value(forHTTPHeaderField: "IS-SWIFTUIWEBVIEW-VIEWER-FILE-REQUEST")?.lowercased() != "true",
                           let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let mimeType = mimeType(ofFileAtUrl: url) {
+                    // File viewer bundle file.
                     do {
                         let html = try String(contentsOfFile: viewerHtmlPath)
                         if let data = html.data(using: .utf8) {
@@ -1116,19 +1124,33 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                   } catch { }
                   }*/ else if
                     let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-                    let fileUrl = URL(string: "file://\(path)"),
+                    let fileURL = URL(string: "file://\(path)"),
                     let currentURL = URL(string: "\(scheme)://\(scheme)/load\(path)"),
-                    urlSchemeTask.request.mainDocumentURL == currentURL, // Security check.
-                    let mimeType = mimeType(ofFileAtUrl: fileUrl),
-                    let data = try? Data(contentsOf: fileUrl) {
+                    // Security check.
+                    urlSchemeTask.request.mainDocumentURL == currentURL {
                       // User file.
-                      let response = HTTPURLResponse(
-                        url: url,
-                        mimeType: mimeType,
-                        expectedContentLength: data.count, textEncodingName: nil)
-                      urlSchemeTask.didReceive(response)
-                      urlSchemeTask.didReceive(data)
-                      urlSchemeTask.didFinish()
+                      let urlAccess = SimpleURLAccess(urls: [fileURL])
+                      try? bookmarkStore.accessURLs(
+                        [urlAccess],
+                        withUserPromptTitle: "File Access Permission Required",
+                        description: "Locate the file '\(fileURL.lastPathComponent)' to provide permission for access.",
+                        prompt: "Open '\(fileURL.deletingPathExtension().lastPathComponent)'",
+                        options: URLAccessOptions()) { urlAccess in
+                            guard let fileURL = urlAccess.urls.first else { return }
+                            var err: NSError? = nil
+                            NSFileCoordinator().coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &err, byAccessor: { (fileURL: URL) -> Void in
+                                if let mimeType = mimeType(ofFileAtUrl: fileURL),
+                                   let data = try? Data(contentsOf: fileURL) {
+                                    let response = HTTPURLResponse(
+                                        url: url,
+                                        mimeType: mimeType,
+                                        expectedContentLength: data.count, textEncodingName: nil)
+                                    urlSchemeTask.didReceive(response)
+                                    urlSchemeTask.didReceive(data)
+                                    urlSchemeTask.didFinish()
+                                }
+                            })
+                        }
                       return
                   }/* else if webView.url?.scheme == scheme, let webURL = webView.url, let epubURL = URL(string: "file://" + webURL.path), let archive = Archive(url: epubURL, accessMode: .read), let entry = archive[String(url.path.dropFirst())] {
                     var data = Data()
@@ -1167,6 +1189,61 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
         return UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
     }
 }
+
+public extension URL {
+    var fileURLFromCustomSchemeLoaderURL: URL? {
+        guard scheme == "ebook", pathComponents.starts(with: ["/", "load"]) else { return nil }
+        let loadPath = "/" + pathComponents.dropFirst(2).joined(separator: "/")
+        guard let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
+        return URL(string: "file://\(path)")
+    }
+}
+
+//// https://adam.garrett-harris.com/2021-08-21-providing-access-to-directories-in-ios-with-bookmarks/
+//fileprivate struct FileBookmarks {
+//    static func
+//    func startAccessingFileURL() -> URL? {
+//        guard let fileURL = url.isFileURL ? url : url.fileURLFromCustomSchemeLoaderURL else { return nil }
+//
+//        if let fileURLBookmarkData = fileURLBookmarkData {
+//            var isStale = false
+//            let resolvedURL = try? URL(
+//                resolvingBookmarkData: fileURLBookmarkData,
+//                bookmarkDataIsStale: &isStale)
+//
+//            if let resolvedURL = resolvedURL, !isStale {
+//                return resolvedURL
+//            }
+//        }
+//
+//        // Start accessing a security-scoped resource.
+//        guard fileURL.startAccessingSecurityScopedResource() else {
+//            // Handle the failure here.
+//            return nil
+//        }
+//
+//        // Make sure you release the security-scoped resource when you finish.
+//        defer { fileURL.stopAccessingSecurityScopedResource() }
+//
+//        var err: NSError? = nil
+//        var failed = true
+//        NSFileCoordinator().coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &err, byAccessor: { (newURL: URL) -> Void in
+//            do {
+//                let bookmarkData = try fileURL.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
+//                safeWrite(self) { _, bookmark in
+//                    bookmark.fileURLBookmarkData = bookmarkData
+//                }
+//                failed = false
+//            } catch let error {
+//                print("\(error)")
+//            }
+//        })
+//        if failed {
+//            print("Failed to access file URL \(fileURL)")
+//        }
+//        return fileURL
+//    }
+//}
 
 /*
 struct WebViewTest: View {
