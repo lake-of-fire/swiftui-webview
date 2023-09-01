@@ -563,7 +563,6 @@ export class Paginator extends HTMLElement {
         // set background to `doc` background
         // this is needed because the iframe does not fill the whole element
         // READER REMOVED: this.#background.style.background = background
-        this.#background.style.background = background
 
         const { width, height } = this.#container.getBoundingClientRect()
         const size = vertical ? height : width
