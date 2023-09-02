@@ -438,9 +438,11 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
         }
     }
    
+    /// Returns whether the frame was already added.
     @MainActor
-    public func addMultiTargetFrame(_ frame: WKFrameInfo) {
-        multiTargetFrames.insert(frame)
+    public func addMultiTargetFrame(_ frame: WKFrameInfo) -> Bool {
+        let (inserted, _) = multiTargetFrames.insert(frame)
+        return inserted
     }
     
     @MainActor
@@ -1080,7 +1082,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                 }
             } else if url.pathComponents.starts(with: ["/", "load"]) {
                 // Bundle file.
-                let loadPath = "/" + url.pathComponents.dropFirst(2).joined(separator: "/")
+                let loadPath = "/" + url.pathComponents.dropFirst(2).joined(separator: "/") + (url.hasDirectoryPath ? "/" : "")
                 if let fileUrl = bundleURLFromWebURL(url),
                    let mimeType = mimeType(ofFileAtUrl: fileUrl),
                    let data = try? Data(contentsOf: fileUrl) {
@@ -1139,15 +1141,35 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                             guard let fileURL = urlAccess.urls.first else { return }
                             var err: NSError? = nil
                             NSFileCoordinator().coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &err, byAccessor: { (fileURL: URL) -> Void in
-                                if let mimeType = mimeType(ofFileAtUrl: fileURL),
-                                   let data = try? Data(contentsOf: fileURL) {
-                                    let response = HTTPURLResponse(
-                                        url: url,
-                                        mimeType: mimeType,
-                                        expectedContentLength: data.count, textEncodingName: nil)
-                                    urlSchemeTask.didReceive(response)
-                                    urlSchemeTask.didReceive(data)
-                                    urlSchemeTask.didFinish()
+                                if fileURL.hasDirectoryPath {
+                                    Task.detached {
+//                                        let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+                                        guard let epubData = EPub.zipToEPub(directoryURL: fileURL), let zippedFileURL = URL(string: "ebook://ebook/\(path)") else {
+                                            print("Failed to ZIP epub \(fileURL) for loading.")
+                                            // TODO: Canceling/failed tasks
+                                            return
+                                        }
+                                        Task { @MainActor in
+                                            let response = HTTPURLResponse(
+                                                url: fileURL,
+                                                mimeType: "application/epub+zip",
+                                                expectedContentLength: epubData.count, textEncodingName: nil)
+                                            urlSchemeTask.didReceive(response)
+                                            urlSchemeTask.didReceive(epubData)
+                                            urlSchemeTask.didFinish()
+                                        }
+                                    }
+                                } else {
+                                    if let mimeType = mimeType(ofFileAtUrl: fileURL),
+                                       let data = try? Data(contentsOf: fileURL) {
+                                        let response = HTTPURLResponse(
+                                            url: url,
+                                            mimeType: mimeType,
+                                            expectedContentLength: data.count, textEncodingName: nil)
+                                        urlSchemeTask.didReceive(response)
+                                        urlSchemeTask.didReceive(data)
+                                        urlSchemeTask.didFinish()
+                                    }
                                 }
                             })
                         }
