@@ -408,7 +408,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) async -> Void)?) async -> Void)? = nil
     
-    private var multiTargetFrames = Set<WKFrameInfo>()
+    private var multiTargetFrames = [String: WKFrameInfo]()
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.uuid == rhs.uuid
@@ -431,7 +431,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
         }
         await asyncCaller(js, arguments, frame, world, completionHandler)
         if duplicateInMultiTargetFrames {
-            for targetFrame in multiTargetFrames {
+            for targetFrame in multiTargetFrames.values {
                 if targetFrame == frame { continue }
                 await asyncCaller(js, arguments, targetFrame, world, completionHandler)
             }
@@ -440,8 +440,12 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
    
     /// Returns whether the frame was already added.
     @MainActor
-    public func addMultiTargetFrame(_ frame: WKFrameInfo) -> Bool {
-        let (inserted, _) = multiTargetFrames.insert(frame)
+    public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String) -> Bool {
+        var inserted = false
+        if multiTargetFrames.keys.contains(uuid) {
+            inserted = true
+        }
+        multiTargetFrames[uuid] = frame
         return inserted
     }
     
