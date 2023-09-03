@@ -500,7 +500,7 @@ export class Paginator extends HTMLElement {
                     this.#afterScroll('scroll')
                 }
             }
-        }, 100))
+        }, 200))
 
         const opts = { passive: false }
         this.addEventListener('touchstart', this.#onTouchStart.bind(this), opts)

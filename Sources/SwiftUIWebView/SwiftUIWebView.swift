@@ -160,7 +160,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             if let url = message.webView?.url, let scheme = url.scheme, scheme == "ebook" || scheme == "ebook-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.isEBookURL, let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
                 Task { @MainActor in
                     do {
-                        try await _ = message.webView?.callAsyncJavaScript("window.loadEBook(url)", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
+                        try await _ = message.webView?.callAsyncJavaScript("window.loadEBook({ url })", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
                     } catch {
                         print("Failed to initialize ePUB: \(error.localizedDescription)")
                         if let message = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String {
@@ -441,9 +441,9 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     /// Returns whether the frame was already added.
     @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String) -> Bool {
-        var inserted = false
-        if multiTargetFrames.keys.contains(uuid) {
-            inserted = true
+        var inserted = true
+        if multiTargetFrames.keys.contains(uuid) && multiTargetFrames[uuid]?.request.url == frame.request.url {
+            inserted = false
         }
         multiTargetFrames[uuid] = frame
         return inserted
@@ -1039,6 +1039,7 @@ extension WebView {
             "swiftUIWebViewLocationChanged",
             "swiftUIWebViewImageUpdated",
             "swiftUIWebViewEPUBJSInitialized",
+            "swiftUIWebViewEBookLoaded",
         ]
     }
 }
@@ -1140,7 +1141,7 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                         [urlAccess],
                         withUserPromptTitle: "File Access Permission Required",
                         description: "Locate the file '\(fileURL.lastPathComponent)' to provide permission for access.",
-                        prompt: "Open '\(fileURL.deletingPathExtension().lastPathComponent)'",
+                        prompt: "Locate Original",
                         options: URLAccessOptions()) { urlAccess in
                             guard let fileURL = urlAccess.urls.first else { return }
                             var err: NSError? = nil

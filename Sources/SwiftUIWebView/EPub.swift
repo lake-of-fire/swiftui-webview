@@ -17,9 +17,6 @@ struct EPub {
     }
     
     static func addEpubFolder(archive: Archive, directoryURL: URL, relativePath: String) {
-//        if !relativePath.isEmpty {
-//            addEpubEntry(archive: archive, directoryURL: directoryURL, relativePath: relativePath)
-//        }
         let folderURL: URL
         if relativePath.isEmpty {
             folderURL = directoryURL

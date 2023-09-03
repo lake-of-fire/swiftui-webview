@@ -20,6 +20,20 @@ const replaceText = async (text, mediaType) => {
     })
 }
 
+const debounce = (f, wait, immediate) => {
+    let timeout
+    return (...args) => {
+        const later = () => {
+            timeout = null
+            if (!immediate) f(...args)
+        }
+        const callNow = immediate && !timeout
+        if (timeout) clearTimeout(timeout)
+        timeout = setTimeout(later, wait)
+        if (callNow) f(...args)
+    }
+}
+
 const isZip = async file => {
     const arr = new Uint8Array(await file.slice(0, 4).arrayBuffer())
     return arr[0] === 0x50 && arr[1] === 0x4b && arr[2] === 0x03 && arr[3] === 0x04
@@ -46,23 +60,6 @@ const getFileEntries = async entry => entry.isFile ? entry
             .readEntries(entries => resolve(entries), error => reject(error))),
         getFileEntries))).flat()
 
-const makeDirectoryLoader = async entry => {
-    const entries = await getFileEntries(entry)
-    const files = await Promise.all(
-        entries.map(entry => new Promise((resolve, reject) =>
-            entry.file(file => resolve([file, entry.fullPath]),
-                error => reject(error)))))
-    const map = new Map(files.map(([file, path]) =>
-        [path.replace(entry.fullPath + '/', ''), file]))
-    const decoder = new TextDecoder()
-    const decode = x => x ? decoder.decode(x) : null
-    const getBuffer = name => map.get(name)?.arrayBuffer() ?? null
-    const loadText = async name => decode(await getBuffer(name))
-    const loadBlob = name => map.get(name)
-    const getSize = name => map.get(name)?.size ?? 0
-    return { loadText, loadBlob, getSize, replaceText }
-}
-
 const isCBZ = ({ name, type }) =>
     type === 'application/vnd.comicbook+zip' || name.endsWith('.cbz')
 
@@ -75,12 +72,7 @@ const isFBZ = ({ name, type }) =>
 
 const getView = async file => {
     let book
-    if (file.isDirectory) {
-        const loader = await makeDirectoryLoader(file)
-        const { EPUB } = await import('./epub.js')
-        book = await new EPUB(loader).init()
-    }
-    else if (!file.size) throw new Error('File not found')
+    if (!file.size) throw new Error('File not found')
     else if (await isZip(file)) {
         const loader = await makeZipLoader(file)
         if (isCBZ(file)) {
@@ -162,6 +154,7 @@ const percentFormat = new Intl.NumberFormat(locales, { style: 'percent' })
 
 class Reader {
     #tocView
+    hasLoadedLastPosition = false
     style = {
         spacing: 1.4,
         justify: true,
@@ -203,6 +196,7 @@ class Reader {
         menu.groups.layout.select('paginated')
     }
     async open(file) {
+        this.hasLoadedLastPosition = false
         this.view = await getView(file)
         this.view.addEventListener('load', this.#onLoad.bind(this))
         this.view.addEventListener('relocate', this.#onRelocate.bind(this))
@@ -211,8 +205,7 @@ class Reader {
 //        this.view.renderer.setAttribute('flow', 'scrolled')
         this.view.renderer.setAttribute('flow', 'paginated')
         this.view.renderer.setStyles?.(getCSS(this.style))
-        this.view.renderer.next()
-
+//        this.view.renderer.next()
         
         $('#header-bar').style.visibility = 'visible'
         $('#nav-bar').style.visibility = 'visible'
@@ -246,8 +239,29 @@ class Reader {
                 ?.map(author => typeof author === 'string' ? author : author.name)
                 ?.join(', ')
                 ?? ''
-        Promise.resolve(book.getCover?.())?.then(blob =>
-            blob ? $('#side-bar-cover').src = URL.createObjectURL(blob) : null)
+        Promise.resolve(book.getCover?.())?.then(blob => {
+            blob ? $('#side-bar-cover').src = URL.createObjectURL(blob) : null
+            if (blob) {
+                // From https://stackoverflow.com/a/52959897/89373
+                (async () => {
+                    const bmp = await createImageBitmap(blob);
+                    const canvas = document.createElement('canvas');
+                    let resizing = Math.min(1.0, (80.0 / bmp.width), (120.0 / bmp.height))
+                    canvas.width = bmp.width * resizing;
+                    canvas.height = bmp.height * resizing;
+                    const ctx = canvas.getContext('bitmaprenderer');
+                    ctx.transferFromImageBitmap(bmp);
+                    //const blob2 = await new Promise((res) => canvas.toBlob(res));
+                    let dataUrl = canvas.toDataURL("image/jpeg", 0.4);
+                    
+                    let mainDocumentURL = (window.location != window.parent.location) ? document.referrer : document.location.href
+                    window.webkit.messageHandlers.imageUpdated.postMessage({
+                        newImageURL: dataUrl,
+                        mainDocumentURL: mainDocumentURL,
+                    })
+                })().catch(console.error);
+            }
+        })
 
         const toc = book.toc
         if (toc) {
@@ -299,17 +313,32 @@ class Reader {
     #onLoad({ detail: { doc } }) {
         doc.addEventListener('keydown', this.#handleKeydown.bind(this))
     }
+    
+    #postUpdateReadingProgressMessage = debounce(({ fraction, cfi }) => {
+        let mainDocumentURL = (window.location != window.parent.location) ? document.referrer : document.location.href
+        window.webkit.messageHandlers.updateReadingProgress.postMessage({
+            fractionalCompletion: fraction,
+            cfi: cfi,
+            mainDocumentURL: mainDocumentURL,
+        })
+    }, 400)
+
     #onRelocate({ detail }) {
-        const { fraction, location, tocItem, pageItem } = detail
+        const { fraction, location, tocItem, pageItem, cfi } = detail
         const percent = percentFormat.format(fraction)
-        const loc = pageItem
-            ? `Page ${pageItem.label}`
-            : `Loc ${location.current}`
+        const loc = pageItem ? `Page ${pageItem.label}` : `Loc ${location.current}`
         const slider = $('#progress-slider')
         slider.style.visibility = 'visible'
         slider.value = fraction
         slider.title = `${percent} · ${loc}`
         if (tocItem?.href) this.#tocView?.setCurrentHref?.(tocItem.href)
+        
+        if (this.hasLoadedLastPosition) {
+            this.#postUpdateReadingProgressMessage({ fraction, cfi })
+//        } else {
+//            //  window.loadLastPosition({ cfi: 'epubcfi(/6/6!/4/2[ごんぎつね],,/4/4/1:99)' })
+//            window.webkit.messageHandlers.swiftUIWebViewEBookLoaded.postMessage({})
+        }
     }
 }
 
@@ -328,8 +357,8 @@ class Reader {
 //    .catch(e => console.error(e))
 //else dropTarget.style.visibility = 'visible'
 
-window.loadEBook = function (url) {
-    const reader = new Reader()
+window.loadEBook = function ({ url }) {
+    window.reader = new Reader()
     globalThis.reader = reader
     
     if (url) fetch(url, {
@@ -339,7 +368,19 @@ window.loadEBook = function (url) {
     })
         .then(res => res.blob())
         .then(blob => reader.open(new File([blob], new URL(url).pathname)))
+        .then(() => {
+            window.webkit.messageHandlers.swiftUIWebViewEBookLoaded.postMessage({})
+        })
         .catch(e => console.error(e))
+}
+
+window.loadLastPosition = async ({ cfi }) => {
+    if (cfi.length > 0) {
+        await window.reader.view.goTo(cfi).catch(e => console.error(e))
+    } else {
+        await window.reader.view.renderer.next()
+    }
+    window.reader.hasLoadedLastPosition = true
 }
 
 window.webkit.messageHandlers.swiftUIWebViewEPUBJSInitialized.postMessage({})
