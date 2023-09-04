@@ -406,7 +406,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
 //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?, ((Result<Any, any Error>) async -> Void)?) async -> Void)? = nil
+    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> Any?)? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     
@@ -424,17 +424,22 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
     
     @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any, any Error>) async -> Void)? = nil) async {
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(uuid)") // TODO: Error
             return
         }
-        await asyncCaller(js, arguments, frame, world, completionHandler)
-        if duplicateInMultiTargetFrames {
-            for targetFrame in multiTargetFrames.values {
-                if targetFrame == frame { continue }
-                await asyncCaller(js, arguments, targetFrame, world, completionHandler)
+        do {
+            let result = try await asyncCaller(js, arguments, frame, world)
+            await completionHandler?(.success(result))
+            if duplicateInMultiTargetFrames {
+                for targetFrame in multiTargetFrames.values {
+                    if targetFrame == frame { continue }
+                    _ = try await asyncCaller(js, arguments, targetFrame, world)
+                }
             }
+        } catch {
+            await completionHandler?(.failure(error))
         }
     }
    
@@ -554,6 +559,7 @@ fileprivate let kDownArrowKeyCode:  UInt16  = 125
 fileprivate let kUpArrowKeyCode:    UInt16  = 126
 
 public class EnhancedWKWebView: WKWebView {
+    #if os(macOS)
     public override var isOpaque: Bool {
         return true
     }
@@ -567,6 +573,7 @@ public class EnhancedWKWebView: WKWebView {
             super.keyDown(with: event)
         }
     }
+    #endif
 }
 
 #if os(iOS)
@@ -688,7 +695,7 @@ public struct WebView: UIViewControllerRepresentable {
     }
     
     @MainActor
-    private static func makeWebView(id: String?, config: WebViewConfig, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> EnhancedWKWebView {
+    private func makeWebView(id: String?, config: WebViewConfig, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
         if let id = id {
             web = Self.webViewCache[id] // it is UI thread so safe to access static
@@ -741,8 +748,8 @@ public struct WebView: UIViewControllerRepresentable {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
-        let webView = Self.makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
-        refreshMessageHandlers(context: context)
+        let webView = makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
+        refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
         
         refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
 
@@ -769,12 +776,12 @@ public struct WebView: UIViewControllerRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
-        context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
+        context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world in
             let world = world ?? .defaultClient
             if let args = args {
-                webView.callAsyncJavaScript(js, arguments: args, in: frame, in: world, completionHandler: callback)
+                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
-                webView.callAsyncJavaScript(js, in: frame, in: world, completionHandler: callback)
+                return try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
             }
         }
         
@@ -899,7 +906,7 @@ public struct WebView: NSViewRepresentable {
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
-        refreshMessageHandlers(context: context)
+        refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
         
         // For private mode later:
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
@@ -1004,11 +1011,14 @@ extension WebView {
     }
     
     @MainActor
-    func refreshMessageHandlers(context: Context) {
+    func refreshMessageHandlers(userContentController: WKUserContentController, context: Context) {
         for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
+        }
+        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + messageHandlerNamesToRegister) {
+            userContentController.removeScriptMessageHandler(forName: missing)
         }
     }
     
