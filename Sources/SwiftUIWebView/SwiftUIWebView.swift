@@ -617,13 +617,18 @@ public class WebViewController: UIViewController {
     private func updateObscuredInsets() {
         guard let webView = view.subviews.first as? WKWebView else { return }
         let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: obscuredInsets.bottom, right: obscuredInsets.right)
-        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
+//        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
+//        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
+        let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
             webView.setValue(insets, forKey: key)
+//            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
+//            webView.setValue(insets, forKey: "obscuredInsets")
 //        webView.safeAreaInsetsDidChange()
-            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
-            let key2 = argument2.compactMap({ $0 as? String }).joined()
-            webView.setValue(true, forKey: key2)
+//            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
+//            let key2 = argument2.compactMap({ $0 as? String }).joined()
+//            webView.setValue(true, forKey: key2)
+//            webView.setValue(true, forKey: "_haveSetUnobscuredSafeAreaInsets")
 //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
     }
@@ -757,8 +762,8 @@ public struct WebView: UIViewControllerRepresentable {
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
-//        webView.scrollView.contentInsetAdjustmentBehavior = .always
-        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
+        webView.scrollView.contentInsetAdjustmentBehavior = .always
+//        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.pageZoom = config.pageZoom
         webView.isOpaque = config.isOpaque
@@ -817,10 +822,14 @@ public struct WebView: UIViewControllerRepresentable {
         controller.webView.scrollView.alwaysBounceVertical = bounces
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
-        controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
-        
-        // _obscuredInsets ignores bottom (maybe a side too..?)
-        controller.webView.scrollView.contentInset.bottom = obscuredInsets.bottom
+//        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
+        let bottomSafeAreaInset = controller.view.window?.safeAreaInsets.bottom ?? 0
+
+//        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
+        print(obscuredInsets)
+        controller.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom - bottomSafeAreaInset, right: 0)
+        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
+        // _obscuredInsets ignores sides, probably
     }
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
