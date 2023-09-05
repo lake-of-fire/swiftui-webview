@@ -2,7 +2,6 @@ import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
 import ZIPFoundation
-import BookmarkStorage
 
 public extension URL {
     var isEBookURL: Bool {
@@ -1065,8 +1064,6 @@ extension WebView {
 
 final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
     var ebookTextProcessor: ((String) async -> String)? = nil
-    
-    private let bookmarkStore = BookmarkStore(delegate: UserDefaultsBookmarkStorageDelegate())
     
     enum CustomSchemeHandlerError: Error {
         case fileNotFound

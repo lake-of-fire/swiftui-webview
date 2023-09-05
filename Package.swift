@@ -22,7 +22,7 @@ let package = Package(
             name: "SwiftUIWebView",
             dependencies: [
                 .product(name: "ZIPFoundation", package: "ZipFoundation"),
-                .product(name: "BookmarkStorage", package: "bookmark-storage"),
+//                .product(name: "BookmarkStorage", package: "bookmark-storage"),
             ],
             resources: [
                 .copy("Resources/foliate-js/"), // CodeSign errors...
