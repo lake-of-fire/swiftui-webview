@@ -1152,48 +1152,36 @@ final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
                     // Security check.
                     urlSchemeTask.request.mainDocumentURL == currentURL {
                       // User file.
-                      let urlAccess = SimpleURLAccess(urls: [fileURL])
-                      try? bookmarkStore.accessURLs(
-                        [urlAccess],
-                        withUserPromptTitle: "File Access Permission Required",
-                        description: "Locate the file '\(fileURL.lastPathComponent)' to provide permission for access.",
-                        prompt: "Locate Original",
-                        options: URLAccessOptions()) { urlAccess in
-                            guard let fileURL = urlAccess.urls.first else { return }
-                            var err: NSError? = nil
-                            NSFileCoordinator().coordinate(readingItemAt: fileURL, options: .withoutChanges, error: &err, byAccessor: { (fileURL: URL) -> Void in
-                                if fileURL.hasDirectoryPath {
-                                    Task.detached {
-//                                        let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-                                        guard let epubData = EPub.zipToEPub(directoryURL: fileURL), let zippedFileURL = URL(string: "ebook://ebook/\(path)") else {
-                                            print("Failed to ZIP epub \(fileURL) for loading.")
-                                            // TODO: Canceling/failed tasks
-                                            return
-                                        }
-                                        Task { @MainActor in
-                                            let response = HTTPURLResponse(
-                                                url: fileURL,
-                                                mimeType: "application/epub+zip",
-                                                expectedContentLength: epubData.count, textEncodingName: nil)
-                                            urlSchemeTask.didReceive(response)
-                                            urlSchemeTask.didReceive(epubData)
-                                            urlSchemeTask.didFinish()
-                                        }
-                                    }
-                                } else {
-                                    if let mimeType = mimeType(ofFileAtUrl: fileURL),
-                                       let data = try? Data(contentsOf: fileURL) {
-                                        let response = HTTPURLResponse(
-                                            url: url,
-                                            mimeType: mimeType,
-                                            expectedContentLength: data.count, textEncodingName: nil)
-                                        urlSchemeTask.didReceive(response)
-                                        urlSchemeTask.didReceive(data)
-                                        urlSchemeTask.didFinish()
-                                    }
-                                }
-                            })
-                        }
+                      if fileURL.hasDirectoryPath {
+                          Task.detached {
+                              //                                        let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+                              guard let epubData = EPub.zipToEPub(directoryURL: fileURL), let zippedFileURL = URL(string: "ebook://ebook/\(path)") else {
+                                  print("Failed to ZIP epub \(fileURL) for loading.")
+                                  // TODO: Canceling/failed tasks
+                                  return
+                              }
+                              Task { @MainActor in
+                                  let response = HTTPURLResponse(
+                                    url: fileURL,
+                                    mimeType: "application/epub+zip",
+                                    expectedContentLength: epubData.count, textEncodingName: nil)
+                                  urlSchemeTask.didReceive(response)
+                                  urlSchemeTask.didReceive(epubData)
+                                  urlSchemeTask.didFinish()
+                              }
+                          }
+                      } else {
+                          if let mimeType = mimeType(ofFileAtUrl: fileURL),
+                             let data = try? Data(contentsOf: fileURL) {
+                              let response = HTTPURLResponse(
+                                url: url,
+                                mimeType: mimeType,
+                                expectedContentLength: data.count, textEncodingName: nil)
+                              urlSchemeTask.didReceive(response)
+                              urlSchemeTask.didReceive(data)
+                              urlSchemeTask.didFinish()
+                          }
+                      }
                       return
                   }/* else if webView.url?.scheme == scheme, let webURL = webView.url, let epubURL = URL(string: "file://" + webURL.path), let archive = Archive(url: epubURL, accessMode: .read), let entry = archive[String(url.path.dropFirst())] {
                     var data = Data()
