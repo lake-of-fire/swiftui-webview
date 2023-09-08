@@ -939,22 +939,12 @@ public struct WebView: NSViewRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
-        context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world, callback in
+        context.coordinator.scriptCaller?.asyncCaller = { (js: String, args: [String: Any]?, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> Any? in
             let world = world ?? .defaultClient
             if let args = args {
-                webView.callAsyncJavaScript(js, arguments: args, in: frame, in: world, completionHandler: { result in
-                    guard let callback = callback else { return }
-                    Task { @MainActor in
-                        await callback(result)
-                    }
-                })
+                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
-                webView.callAsyncJavaScript(js, in: frame, in: world, completionHandler: { result in
-                    guard let callback = callback else { return }
-                    Task { @MainActor in
-                        await callback(result)
-                    }
-                })
+                return try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
             }
         }
         return webView
