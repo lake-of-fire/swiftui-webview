@@ -825,9 +825,10 @@ public struct WebView: UIViewControllerRepresentable {
         let bottomSafeAreaInset = controller.view.window?.safeAreaInsets.bottom ?? 0
 
 //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
-        print(obscuredInsets)
+//        print(obscuredInsets)
         controller.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom - bottomSafeAreaInset, right: 0)
-        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
+//        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
+        controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: 0, bottom: obscuredInsets.bottom, right: 0)
         // _obscuredInsets ignores sides, probably
     }
     
