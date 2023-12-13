@@ -253,6 +253,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
     }
     
+    @MainActor
+    public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        scriptCaller?.removeAllMultiTargetFrames()
+        setLoading(false, isProvisionallyNavigating: false, error: error)
+
+    }
+    
+    @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         setLoading(false, isProvisionallyNavigating: false)
     }
@@ -320,13 +328,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 let pdfJSHTML = try String(contentsOfFile: pdfJSPath)
                 webView.loadHTMLString(pdfJSHTML, baseURL: pdfURL)
             } catch { }
-            return (.cancel, preferences)
-        }
-        
-        if let url = navigationAction.request.url,
-           let scheme = url.scheme,
-           let schemeHandler = self.webView.schemeHandlers[scheme] {
-            schemeHandler(url)
             return (.cancel, preferences)
         }
         
@@ -640,7 +641,7 @@ public struct WebView: UIViewControllerRepresentable {
     var scriptCaller: WebViewScriptCaller?
     let blockedHosts: Set<String>?
     let htmlInState: Bool
-    let schemeHandlers: [String: (URL) -> Void]
+    let schemeHandlers: [(WKURLSchemeHandler, String)] = []
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
@@ -669,7 +670,7 @@ public struct WebView: UIViewControllerRepresentable {
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
 //                onWarm: (() async -> Void)? = nil,
-                schemeHandlers: [String: (URL) -> Void] = [:],
+                schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 ebookTextProcessor: ((String) async -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
@@ -726,6 +727,9 @@ public struct WebView: UIViewControllerRepresentable {
             for scheme in ["pdf", "ebook"] {
                 configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(ebookTextProcessor: ebookTextProcessor), forURLScheme: scheme)
 //                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
+            }
+            for (urlSchemeHandler, urlScheme) in schemeHandlers {
+                configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
             }
             
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
@@ -847,12 +851,12 @@ public struct WebView: NSViewRepresentable {
     let blockedHosts: Set<String>?
     let htmlInState: Bool
 //    let onWarm: (() -> Void)?
-    let schemeHandlers: [String: (URL) -> Void]
+    let schemeHandlers: [(WKURLSchemeHandler, String)]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
-    /// Unused on macOS (for now).
+    /// Unused on macOS (for now?).
     var obscuredInsets: EdgeInsets
     var bounces = true
     private var messageHandlerNamesToRegister = Set<String>()
@@ -875,7 +879,7 @@ public struct WebView: NSViewRepresentable {
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
 //                onWarm: (() -> Void)? = nil,
-                schemeHandlers: [String: (URL) -> Void] = [:],
+                schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 ebookTextProcessor: ((String) async -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
@@ -924,6 +928,9 @@ public struct WebView: NSViewRepresentable {
         for scheme in ["pdf", "ebook"] {
             configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(ebookTextProcessor: ebookTextProcessor), forURLScheme: scheme)
 //            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
+        }
+        for (urlSchemeHandler, urlScheme) in schemeHandlers {
+            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
         }
 
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
