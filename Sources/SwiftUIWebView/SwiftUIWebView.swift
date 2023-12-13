@@ -641,7 +641,7 @@ public struct WebView: UIViewControllerRepresentable {
     var scriptCaller: WebViewScriptCaller?
     let blockedHosts: Set<String>?
     let htmlInState: Bool
-    let schemeHandlers: [(WKURLSchemeHandler, String)] = []
+    let schemeHandlers: [(WKURLSchemeHandler, String)]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
