@@ -333,6 +333,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
 //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
         if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
+            // TODO: this is missing all our config.userScripts, make sure it inherits those...
             self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
             
             self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
@@ -801,6 +802,8 @@ public struct WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
+        context.coordinator.config = config
+        
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
@@ -960,6 +963,8 @@ public struct WebView: NSViewRepresentable {
     
     @MainActor
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
+        context.coordinator.config = config
+        
 //        refreshMessageHandlers(context: context)
         updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
@@ -1030,7 +1035,7 @@ extension WebView {
     
     @MainActor
     func updateUserScripts(userContentController: WKUserContentController, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebViewConfig) {
-        var scripts =  config.userScripts
+        var scripts = config.userScripts
         if let domain = domain?.domainURL.host {
             scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
         } else {
@@ -1038,9 +1043,11 @@ extension WebView {
         }
         let allScripts = Self.systemScripts + scripts
 //        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
-        userContentController.removeAllUserScripts()
-        for script in allScripts {
-            userContentController.addUserScript(script.webKitUserScript)
+        if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
+            userContentController.removeAllUserScripts()
+            for script in allScripts {
+                userContentController.addUserScript(script.webKitUserScript)
+            }
         }
 //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
