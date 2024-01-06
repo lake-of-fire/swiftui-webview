@@ -425,14 +425,14 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
     
     @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async -> Void)? = nil) async {
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(uuid)") // TODO: Error
             return
         }
         do {
             let result = try await asyncCaller(js, arguments, frame, world)
-            await completionHandler?(.success(result))
+            try await completionHandler?(.success(result))
             if duplicateInMultiTargetFrames {
                 for targetFrame in multiTargetFrames.values {
                     if targetFrame == frame { continue }
@@ -440,7 +440,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
                 }
             }
         } catch {
-            await completionHandler?(.failure(error))
+            try? await completionHandler?(.failure(error))
         }
     }
    
@@ -1011,7 +1011,7 @@ extension WebView {
                 encodedContentRuleList: contentRules) { (ruleList, error) in
                     guard let ruleList = ruleList else {
                         if let error = error {
-                            print(error.localizedDescription)
+                            print(error)
                         }
                         return
                     }
