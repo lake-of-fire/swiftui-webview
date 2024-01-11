@@ -333,9 +333,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
 //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
         if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
-            // TODO: this is missing all our config.userScripts, make sure it inherits those...
-            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
-            
             self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
         }
         
@@ -353,6 +350,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
             newState.error = nil
             self.webView.state = newState
         }
+        
+        //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
+        if navigationResponse.isForMainFrame, let mainDocumentURL = navigationResponse.response.url {
+            // TODO: this is missing all our config.userScripts, make sure it inherits those...
+            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
+        }
+        
         return .allow
     }
 }
@@ -805,9 +809,9 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.config = config
         
 //        refreshMessageHandlers(context: context)
-        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
+//        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
-        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
+//        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
         if needsHistoryRefresh {
             var newState = state
@@ -966,9 +970,9 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.config = config
         
 //        refreshMessageHandlers(context: context)
-        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
+//        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
-        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
+//        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
 
         // Can't disable on macOS.
 //        uiView.scrollView.bounces = bounces
