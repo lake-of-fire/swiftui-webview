@@ -1029,6 +1029,9 @@ extension WebView {
     func refreshMessageHandlers(userContentController: WKUserContentController, context: Context) {
         for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+            
+            // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
