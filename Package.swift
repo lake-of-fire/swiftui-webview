@@ -25,7 +25,6 @@ let package = Package(
 //                .product(name: "BookmarkStorage", package: "bookmark-storage"),
             ],
             resources: [
-                .copy("Resources/foliate-js/"), // CodeSign errors...
 //                .process("Resources"),
             ]),
     ]

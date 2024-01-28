@@ -3,12 +3,6 @@ import WebKit
 import UniformTypeIdentifiers
 import ZIPFoundation
 
-public extension URL {
-    var isEBookURL: Bool {
-        return (isFileURL || scheme == "https" || scheme == "http" || scheme == "ebook" || scheme == "ebook-url") && pathExtension.lowercased() == "epub"
-    }
-}
-
 public struct WebViewState: Equatable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -155,19 +149,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         if message.name == "swiftUIWebViewLocationChanged" {
             webView.needsHistoryRefresh = true
             return
-        } else if message.name == "swiftUIWebViewEPUBJSInitialized" {
-            if let url = message.webView?.url, let scheme = url.scheme, scheme == "ebook" || scheme == "ebook-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.isEBookURL, let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
-                Task { @MainActor in
-                    do {
-                        try await _ = message.webView?.callAsyncJavaScript("window.loadEBook({ url })", arguments: ["url": loaderURL.absoluteString], contentWorld: .page)
-                    } catch {
-                        print("Failed to initialize ePUB: \(error.localizedDescription)")
-                        if let message = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String {
-                            print(message)
-                        }
-                    }
-                }
-            }
         } else if message.name == "swiftUIWebViewImageUpdated" {
             guard let body = message.body as? [String: Any] else { return }
             if let imageURLRaw = body["imageURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
@@ -316,23 +297,23 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }*/
         
         // PDF.js loader
-        if
-            false,
-                let url = navigationAction.request.url,
-            navigationAction.targetFrame?.isMainFrame ?? false,
-            url.isFileURL || url.absoluteString.hasPrefix("https://"),
-            navigationAction.request.url?.pathExtension.lowercased() == "pdf",
-            //           navigationAction.request.mainDocumentURL?.scheme != "pdf",
-            let pdfJSPath = Bundle.module.path(forResource: "viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let pdfURL = URL(string: url.isFileURL ? "pdf://\(path)" : "pdf-url://\(url.absoluteString.dropFirst("https://".count))") {
-            do {
-                let pdfJSHTML = try String(contentsOfFile: pdfJSPath)
-                webView.loadHTMLString(pdfJSHTML, baseURL: pdfURL)
-            } catch { }
-            return (.cancel, preferences)
-        }
+//        if
+//            false,
+//                let url = navigationAction.request.url,
+//            navigationAction.targetFrame?.isMainFrame ?? false,
+//            url.isFileURL || url.absoluteString.hasPrefix("https://"),
+//            navigationAction.request.url?.pathExtension.lowercased() == "pdf",
+//            //           navigationAction.request.mainDocumentURL?.scheme != "pdf",
+//            let pdfJSPath = Bundle.module.path(forResource: "viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let pdfURL = URL(string: url.isFileURL ? "pdf://\(path)" : "pdf-url://\(url.absoluteString.dropFirst("https://".count))") {
+//            do {
+//                let pdfJSHTML = try String(contentsOfFile: pdfJSPath)
+//                webView.loadHTMLString(pdfJSHTML, baseURL: pdfURL)
+//            } catch { }
+//            return (.cancel, preferences)
+//        }
         
 //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
+        if navigationAction.targetFrame?.isMainFrame ?? false {
             self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
         }
         
@@ -648,7 +629,6 @@ public struct WebView: UIViewControllerRepresentable {
     let htmlInState: Bool
     let schemeHandlers: [(WKURLSchemeHandler, String)]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let obscuredInsets: EdgeInsets
@@ -677,7 +657,6 @@ public struct WebView: UIViewControllerRepresentable {
 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
-                ebookTextProcessor: ((String) async -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
@@ -695,7 +674,6 @@ public struct WebView: UIViewControllerRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
-        self.ebookTextProcessor = ebookTextProcessor
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
@@ -729,10 +707,6 @@ public struct WebView: UIViewControllerRepresentable {
             //            let dataStore = WKWebsiteDataStore.nonPersistent()
             //            configuration.websiteDataStore = dataStore
             
-            for scheme in ["pdf", "ebook"] {
-                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(ebookTextProcessor: ebookTextProcessor), forURLScheme: scheme)
-//                configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
-            }
             for (urlSchemeHandler, urlScheme) in schemeHandlers {
                 configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
             }
@@ -860,7 +834,6 @@ public struct WebView: NSViewRepresentable {
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [(WKURLSchemeHandler, String)]
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
-    let ebookTextProcessor: ((String) async -> String)?
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     /// Unused on macOS (for now?).
@@ -888,7 +861,6 @@ public struct WebView: NSViewRepresentable {
 //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
-                ebookTextProcessor: ((String) async -> String)? = nil,
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil) {
         self.config = config
@@ -905,7 +877,6 @@ public struct WebView: NSViewRepresentable {
             self.messageHandlerNamesToRegister.insert(name)
         }
         self.messageHandlers = messageHandlers
-        self.ebookTextProcessor = ebookTextProcessor
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
@@ -932,10 +903,6 @@ public struct WebView: NSViewRepresentable {
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
         //        configuration.websiteDataStore = dataStore
         
-        for scheme in ["pdf", "ebook"] {
-            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(ebookTextProcessor: ebookTextProcessor), forURLScheme: scheme)
-//            configuration.setURLSchemeHandler(GenericFileURLSchemeHandler(), forURLScheme: "\(scheme)-url")
-        }
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
         }
@@ -1068,179 +1035,10 @@ extension WebView {
         [
             "swiftUIWebViewLocationChanged",
             "swiftUIWebViewImageUpdated",
-            "swiftUIWebViewEPUBJSInitialized",
-            "swiftUIWebViewEBookLoaded",
         ]
     }
 }
 
-final class GenericFileURLSchemeHandler: NSObject, WKURLSchemeHandler {
-    var ebookTextProcessor: ((String) async -> String)? = nil
-    
-    enum CustomSchemeHandlerError: Error {
-        case fileNotFound
-    }
-
-    init(ebookTextProcessor: ((String) async -> String)? = nil) {
-        self.ebookTextProcessor = ebookTextProcessor
-        super.init()
-    }
-    
-    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
-    
-    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        guard let url = urlSchemeTask.request.url else { return }
-        for (scheme, srcName) in [("ebook", "foliate-js")] { // TODO: "pdf"
-            guard url.scheme?.lowercased() == scheme, url.host?.lowercased() == scheme else { continue }
-            
-            if url.path == "/process-text" {
-                if urlSchemeTask.request.httpMethod == "POST", let payload = urlSchemeTask.request.httpBody, let text = String(data: payload, encoding: .utf8) {
-                    let ebookTextProcessor = ebookTextProcessor
-                    Task.detached {
-                        var respText = text
-                        if let ebookTextProcessor = ebookTextProcessor {
-                            respText = await ebookTextProcessor(text)
-                        }
-                        if let respData = respText.data(using: .utf8) {
-                            Task { @MainActor in
-                                let resp = HTTPURLResponse(
-                                    url: url, mimeType: nil, expectedContentLength: respData.count, textEncodingName: "utf-8")
-                                urlSchemeTask.didReceive(resp)
-                                urlSchemeTask.didReceive(respData)
-                                urlSchemeTask.didFinish()
-                            }
-                        }
-                    }
-                    return
-                }
-            } else if url.pathComponents.starts(with: ["/", "load"]) {
-                // Bundle file.
-                let loadPath = "/" + url.pathComponents.dropFirst(2).joined(separator: "/") + (url.hasDirectoryPath ? "/" : "")
-                if let fileUrl = bundleURLFromWebURL(url),
-                   let mimeType = mimeType(ofFileAtUrl: fileUrl),
-                   let data = try? Data(contentsOf: fileUrl) {
-                    let response = HTTPURLResponse(
-                        url: url,
-                        mimeType: mimeType,
-                        expectedContentLength: data.count, textEncodingName: nil)
-                    urlSchemeTask.didReceive(response)
-                    urlSchemeTask.didReceive(data)
-                    urlSchemeTask.didFinish()
-                    return
-                } else if urlSchemeTask.request.value(forHTTPHeaderField: "IS-SWIFTUIWEBVIEW-VIEWER-FILE-REQUEST")?.lowercased() != "true",
-                          let viewerHtmlPath = Bundle.module.path(forResource: "\(scheme)-viewer", ofType: "html", inDirectory: srcName), let mimeType = mimeType(ofFileAtUrl: url) {
-                    // File viewer bundle file.
-                    do {
-                        let html = try String(contentsOfFile: viewerHtmlPath)
-                        if let data = html.data(using: .utf8) {
-                            let response = HTTPURLResponse(
-                                url: url,
-                                mimeType: mimeType,
-                                expectedContentLength: data.count, textEncodingName: nil)
-                            urlSchemeTask.didReceive(response)
-                            urlSchemeTask.didReceive(data)
-                            urlSchemeTask.didFinish()
-                            return
-                        }
-                    } catch { }
-                }/* else if url.absoluteString.hasPrefix("\(scheme)-url://"),
-                  let remoteURL = URL(string: "https://\(url.absoluteString.dropFirst("\(scheme)-url://".count))"),
-                  urlSchemeTask.request.mainDocumentURL == url,
-                  let mimeType = mimeType(ofFileAtUrl: remoteURL) {
-                  do {
-                  let data = try Data(contentsOf: remoteURL)
-                  let response = HTTPURLResponse(
-                  url: url,
-                  mimeType: mimeType,
-                  expectedContentLength: data.count, textEncodingName: nil)
-                  urlSchemeTask.didReceive(response)
-                  urlSchemeTask.didReceive(data)
-                  urlSchemeTask.didFinish()
-                  } catch { }
-                  }*/ else if
-                    let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-                    let fileURL = URL(string: "file://\(path)"),
-                    let currentURL = URL(string: "\(scheme)://\(scheme)/load\(path)"),
-                    // Security check.
-                    urlSchemeTask.request.mainDocumentURL == currentURL {
-                      // User file.
-                      if fileURL.hasDirectoryPath {
-                          Task.detached {
-                              //                                        let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
-                              guard let epubData = EPub.zipToEPub(directoryURL: fileURL), let zippedFileURL = URL(string: "ebook://ebook/\(path)") else {
-                                  print("Failed to ZIP epub \(fileURL) for loading.")
-                                  // TODO: Canceling/failed tasks
-                                  return
-                              }
-                              Task { @MainActor in
-                                  let response = HTTPURLResponse(
-                                    url: fileURL,
-                                    mimeType: "application/epub+zip",
-                                    expectedContentLength: epubData.count, textEncodingName: nil)
-                                  urlSchemeTask.didReceive(response)
-                                  urlSchemeTask.didReceive(epubData)
-                                  urlSchemeTask.didFinish()
-                              }
-                          }
-                      } else {
-                          if let mimeType = mimeType(ofFileAtUrl: fileURL),
-                             let data = try? Data(contentsOf: fileURL) {
-                              let response = HTTPURLResponse(
-                                url: url,
-                                mimeType: mimeType,
-                                expectedContentLength: data.count, textEncodingName: nil)
-                              urlSchemeTask.didReceive(response)
-                              urlSchemeTask.didReceive(data)
-                              urlSchemeTask.didFinish()
-                          }
-                      }
-                      return
-                  }/* else if webView.url?.scheme == scheme, let webURL = webView.url, let epubURL = URL(string: "file://" + webURL.path), let archive = Archive(url: epubURL, accessMode: .read), let entry = archive[String(url.path.dropFirst())] {
-                    var data = Data()
-                    do {
-                    let _ = try archive.extract(entry) { chunk in
-                    data.append(chunk)
-                    }
-                    let mimeType = mimeType(ofFileAtUrl: url)
-                    let response = HTTPURLResponse(
-                    url: url,
-                    mimeType: mimeType,
-                    expectedContentLength: data.count, textEncodingName: nil)
-                    urlSchemeTask.didReceive(response)
-                    urlSchemeTask.didReceive(data)
-                    urlSchemeTask.didFinish()
-                    } catch { print("Failed to extract: \(error.localizedDescription)") }
-                    }*/
-            }
-        }
-        urlSchemeTask.didFailWithError(CustomSchemeHandlerError.fileNotFound)
-    }
-    
-    private func bundleURLFromWebURL(_ url: URL) -> URL? {
-        guard url.path.hasPrefix("/load/viewer-assets/") else { return nil }
-        let assetName = url.deletingPathExtension().lastPathComponent
-        let assetExtension = url.pathExtension
-        let assetDirectory = url.deletingLastPathComponent().path.deletingPrefix("/load/viewer-assets/")
-        return Bundle.module.url(forResource: assetName, withExtension: assetExtension, subdirectory: assetDirectory)
-//        return Bundle.module.url(
-//            forResource: assetName,
-//            withExtension: assetExtension,
-//            subdirectory: "Resources")
-    }
-
-    private func mimeType(ofFileAtUrl url: URL) -> String? {
-        return UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-    }
-}
-
-public extension URL {
-    var fileURLFromCustomSchemeLoaderURL: URL? {
-        guard scheme == "ebook", pathComponents.starts(with: ["/", "load"]) else { return nil }
-        let loadPath = "/" + pathComponents.dropFirst(2).joined(separator: "/")
-        guard let path = loadPath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
-        return URL(string: "file://\(path)")
-    }
-}
 
 //// https://adam.garrett-harris.com/2021-08-21-providing-access-to-directories-in-ios-with-bookmarks/
 //fileprivate struct FileBookmarks {
@@ -1390,10 +1188,3 @@ struct WebView_Previews: PreviewProvider {
     }
 }
 */
-
-fileprivate extension String {
-    func deletingPrefix(_ prefix: String) -> String {
-        guard self.hasPrefix(prefix) else { return self }
-        return String(self.dropFirst(prefix.count))
-    }
-}
