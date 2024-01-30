@@ -419,9 +419,17 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
             let result = try await asyncCaller(js, arguments, frame, world)
             try await completionHandler?(.success(result))
             if duplicateInMultiTargetFrames {
-                for targetFrame in multiTargetFrames.values {
+                for (uuid, targetFrame) in multiTargetFrames {
                     if targetFrame == frame { continue }
-                    _ = try await asyncCaller(js, arguments, targetFrame, world)
+                    do {
+                        _ = try await asyncCaller(js, arguments, targetFrame, world)
+                    } catch {
+                        if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
+                            multiTargetFrames.removeValue(forKey: uuid)
+                        } else {
+                            print(error)
+                        }
+                    }
                 }
             }
         } catch {
