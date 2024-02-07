@@ -720,6 +720,8 @@ public struct WebView: UIViewControllerRepresentable {
             }
             
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
+            web?.isOpaque = false
+            web?.backgroundColor = .clear
             
             if let id = id {
                 Self.webViewCache[id] = web
@@ -923,6 +925,8 @@ public struct WebView: NSViewRepresentable {
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
+        
+        webView.setValue(false, forKey: "drawsBackground")
         
         context.coordinator.navigator.webView = webView
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
