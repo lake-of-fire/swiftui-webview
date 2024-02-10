@@ -710,6 +710,7 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.dataDetectorTypes = [.all]
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
+            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
             
             // For private mode later:
             //            let dataStore = WKWebsiteDataStore.nonPersistent()
