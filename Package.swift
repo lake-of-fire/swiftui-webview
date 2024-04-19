@@ -15,7 +15,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", branch: "development"),
-        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
+//        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
     ],
     targets: [
         .target(
