@@ -146,7 +146,10 @@ public class WebViewCoordinator: NSObject {
 
 extension WebViewCoordinator: WKScriptMessageHandler {
     public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        if message.name == "swiftUIWebViewLocationChanged" {
+        if message.name == "swiftUIWebViewBackgroundStatus", let hasBackground = message.body as? Bool {
+            webView.drawsBackground = !hasBackground
+            return
+        } else if message.name == "swiftUIWebViewLocationChanged" {
             webView.needsHistoryRefresh = true
             return
         } else if message.name == "swiftUIWebViewImageUpdated" {
@@ -457,6 +460,69 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
 }
 
+fileprivate struct WebViewBackgroundStatusUserScript {
+    let userScript: WebViewUserScript
+    
+    init() {
+        let contents = """
+(function() {
+    let lastReportedBackground = null;
+
+    function checkBodyBackground() {
+        const body = document.body;
+        if (!body) return;
+
+        const computedStyle = window.getComputedStyle(body);
+        const bgColor = computedStyle.getPropertyValue('background-color');
+        const bgImage = computedStyle.getPropertyValue('background-image');
+
+        const hasBackground = bgColor !== 'rgba(0, 0, 0, 0)' || bgImage !== 'none';
+
+        if (hasBackground !== lastReportedBackground) {
+            lastReportedBackground = hasBackground;
+            if (window.webkit) {
+                window.webkit.messageHandlers.swiftUIWebViewBackgroundStatus.postMessage(hasBackground);
+            }
+        }
+    }
+
+    const observer = new MutationObserver((mutations) => {
+        checkBodyBackground();
+        mutations.forEach((mutation) => {
+            if (mutation.type === 'childList' && document.body) {
+                checkBodyBackground();
+                observeBodyStyle();
+            } else if (mutation.type === 'attributes' && mutation.target === document.body) {
+                checkBodyBackground();
+            }
+        });
+    });
+
+    function observeBodyStyle() {
+        if (document.body) {
+            const bodyObserver = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (mutation.type === 'attributes' && mutation.attributeName.startsWith('style')) {
+                        checkBodyBackground();
+                    }
+                });
+            });
+            bodyObserver.observe(document.body, { attributes: true, attributeFilter: ['style'] });
+        }
+    }
+
+    if (document.body) {
+        checkBodyBackground();
+        observeBodyStyle();
+    } else {
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+    }
+})()
+"""
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+    }
+}
+
 fileprivate struct LocationChangeUserScript {
     let userScript: WebViewUserScript
     
@@ -483,7 +549,7 @@ window.addEventListener('swiftUIWebViewLocationChanged', function () {
     }
 });
 """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
     }
 }
 
@@ -503,7 +569,7 @@ new MutationObserver(function(mutations) {
     }
 }).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
 """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient)
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
     }
 }
 
@@ -769,6 +835,8 @@ public struct WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
         
+        webView.setValue(drawsBackground, forKey: "drawsBackground")
+        
         context.coordinator.navigator.webView = webView
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
@@ -797,6 +865,8 @@ public struct WebView: UIViewControllerRepresentable {
 //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
 //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
+        
+        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         if needsHistoryRefresh {
             var newState = state
@@ -855,6 +925,7 @@ public struct WebView: NSViewRepresentable {
     
 //    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
+    @State fileprivate var drawsBackground = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
 
     private static let processPool = WKProcessPool()
@@ -909,7 +980,8 @@ public struct WebView: NSViewRepresentable {
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
-        
+//        updateUserScripts(userContentController: configuration.userContentController, coordinator: context.coordinator, forDomain: nil, config: config)
+
         // For private mode later:
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
         //        configuration.websiteDataStore = dataStore
@@ -927,7 +999,7 @@ public struct WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        webView.setValue(false, forKey: "drawsBackground")
+        webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         context.coordinator.navigator.webView = webView
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
@@ -957,6 +1029,8 @@ public struct WebView: NSViewRepresentable {
         // Can't disable on macOS.
 //        uiView.scrollView.bounces = bounces
 //        uiView.scrollView.alwaysBounceVertical = bounces
+        
+        uiView.setValue(drawsBackground, forKey: "drawsBackground")
         
         if needsHistoryRefresh {
             var newState = state
@@ -1040,12 +1114,14 @@ extension WebView {
     }
     
     fileprivate static let systemScripts = [
+        WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
     ]
     
     fileprivate static var systemMessageHandlers: [String] {
         [
+            "swiftUIWebViewBackgroundStatus",
             "swiftUIWebViewLocationChanged",
             "swiftUIWebViewImageUpdated",
         ]
