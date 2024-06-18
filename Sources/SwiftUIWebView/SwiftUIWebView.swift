@@ -713,6 +713,7 @@ public struct WebView: UIViewControllerRepresentable {
     private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
 //    @State fileprivate var isWarm = false
+    @State fileprivate var drawsBackground = false
     @State fileprivate var needsHistoryRefresh = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
     
@@ -835,7 +836,7 @@ public struct WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
         
-        webView.setValue(drawsBackground, forKey: "drawsBackground")
+//        webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         context.coordinator.navigator.webView = webView
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
@@ -866,7 +867,7 @@ public struct WebView: UIViewControllerRepresentable {
         
 //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
-        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
+//        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         if needsHistoryRefresh {
             var newState = state
