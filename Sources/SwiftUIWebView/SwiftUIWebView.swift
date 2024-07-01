@@ -773,7 +773,7 @@ public struct WebView: UIViewControllerRepresentable {
             let configuration = WKWebViewConfiguration()
             configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
             //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
-            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
+//            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
             configuration.dataDetectorTypes = [.all]
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool

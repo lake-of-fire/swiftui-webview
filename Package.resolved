@@ -1,15 +1,6 @@
 {
   "pins" : [
     {
-      "identity" : "bookmark-storage",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/lake-of-fire/bookmark-storage.git",
-      "state" : {
-        "branch" : "master",
-        "revision" : "f8630a02c6c2d0602b4c3299ae8514cdb2bedec5"
-      }
-    },
-    {
       "identity" : "zipfoundation",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/weichsel/ZIPFoundation.git",
