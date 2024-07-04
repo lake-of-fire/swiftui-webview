@@ -330,6 +330,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             var newState = self.webView.state
             newState.pageURL = url
             newState.pageTitle = nil
+            newState.pageImageURL = nil
             newState.pageHTML = nil
             newState.error = nil
             self.webView.state = newState
