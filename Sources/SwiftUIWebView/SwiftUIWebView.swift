@@ -392,8 +392,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 }
 
-public class WebViewScriptCaller: Equatable, ObservableObject {
-    let uuid = UUID().uuidString
+public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
+    public let id = UUID().uuidString
 //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> Any?)? = nil
@@ -401,13 +401,13 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     private var multiTargetFrames = [String: WKFrameInfo]()
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
-        return lhs.uuid == rhs.uuid
+        return lhs.id == rhs.id
     }
 
     @MainActor
     public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
         guard let caller = caller else {
-            print("No caller set for WebViewScriptCaller \(uuid)") // TODO: Error
+            print("No caller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
         caller(js, completionHandler)
@@ -416,7 +416,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     @MainActor
     public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
-            print("No asyncCaller set for WebViewScriptCaller \(uuid)") // TODO: Error
+            print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
         do {
@@ -775,10 +775,14 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
             //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
 //            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
-            configuration.dataDetectorTypes = [.all]
+            if config.dataDetectorsEnabled {
+                configuration.dataDetectorTypes = [.all]
+            } else {
+                configuration.dataDetectorTypes = []
+            }
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
-            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
+//            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
             
             // For private mode later:
             //            let dataStore = WKWebsiteDataStore.nonPersistent()
