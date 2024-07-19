@@ -241,7 +241,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         scriptCaller?.removeAllMultiTargetFrames()
         setLoading(false, isProvisionallyNavigating: false, error: error)
-
     }
     
     @MainActor
@@ -330,6 +329,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             var newState = self.webView.state
             newState.pageURL = url
             newState.pageTitle = nil
+            newState.isProvisionallyNavigating = false
             newState.pageImageURL = nil
             newState.pageHTML = nil
             newState.error = nil
