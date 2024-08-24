@@ -772,6 +772,7 @@ public struct WebView: UIViewControllerRepresentable {
             preferences.allowsContentJavaScript = config.javaScriptEnabled
             
             let configuration = WKWebViewConfiguration()
+            configuration.applicationNameForUserAgent = "Safari/604.1"
             configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
             //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
 //            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
@@ -982,6 +983,7 @@ public struct WebView: NSViewRepresentable {
 //        preferences.setValue(true, forKey: "developerExtrasEnabled") // Wasn't working - revisit, because it would be great to have.
         
         let configuration = WKWebViewConfiguration()
+        configuration.applicationNameForUserAgent = "Safari/604.1"
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
