@@ -86,8 +86,8 @@ public class WebViewCoordinator: NSObject {
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
 //    var lastInstalledScriptsHash = -1
-    
     var compiledContentRules = [String: WKContentRuleList]()
+    var urlObservation: NSKeyValueObservation?
     
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
@@ -106,6 +106,23 @@ public class WebViewCoordinator: NSObject {
 //                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
 //            }
 //        }
+    }
+    
+    func setWebView(_ webView: WKWebView) {
+        navigator.webView = webView
+                
+        urlObservation = webView.observe(\.url, changeHandler: { [weak self] (webView, _) in
+            guard let self else { return }
+            if let url = webView.backForwardList.currentItem?.url {
+                setLoading(
+                    false,
+                    pageURL: url,
+                    canGoBack: webView.canGoBack,
+                    canGoForward: webView.canGoForward,
+                    backList: webView.backForwardList.backList,
+                    forwardList: webView.backForwardList.forwardList)
+            }
+        })
     }
     
     @discardableResult func setLoading(_ isLoading: Bool,
@@ -844,7 +861,7 @@ public struct WebView: UIViewControllerRepresentable {
         
 //        webView.setValue(drawsBackground, forKey: "drawsBackground")
         
-        context.coordinator.navigator.webView = webView
+        context.coordinator.setWebView(webView)
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -1009,7 +1026,7 @@ public struct WebView: NSViewRepresentable {
         
         webView.setValue(drawsBackground, forKey: "drawsBackground")
         
-        context.coordinator.navigator.webView = webView
+        context.coordinator.setWebView(webView)
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
