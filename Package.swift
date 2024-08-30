@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(
             name: "SwiftUIWebView",
+            type: .dynamic,
             targets: ["SwiftUIWebView"]),
     ],
     dependencies: [
