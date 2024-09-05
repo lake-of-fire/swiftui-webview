@@ -116,10 +116,10 @@ public class WebViewCoordinator: NSObject {
     
     func setWebView(_ webView: WKWebView) {
         navigator.webView = webView
-                
-        urlObservation = webView.observe(\.url, changeHandler: { [weak self] (webView, _) in
+        
+        urlObservation = webView.observe(\.url, changeHandler: { [weak self] (webView, change) in
             guard let self else { return }
-            if let url = webView.backForwardList.currentItem?.url {
+            if let url = webView.url {
                 setLoading(
                     false,
                     pageURL: url,
