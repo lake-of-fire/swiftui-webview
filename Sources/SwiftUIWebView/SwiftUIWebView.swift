@@ -89,15 +89,21 @@ public class WebViewCoordinator: NSObject {
     var compiledContentRules = [String: WKContentRuleList]()
     var urlObservation: NSKeyValueObservation?
     
+    var onNavigationCommitted: ((WebViewState) -> Void)?
+    var onNavigationFinished: ((WebViewState) -> Void)?
+    var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
     }
     
-    init(webView: WebView, navigator: WebViewNavigator, scriptCaller: WebViewScriptCaller? = nil, config: WebViewConfig) {
+    init(webView: WebView, navigator: WebViewNavigator, scriptCaller: WebViewScriptCaller? = nil, config: WebViewConfig, messageHandlers: [String: ((WebViewMessage) async -> Void)], onNavigationCommitted: ((WebViewState) -> Void)?, onNavigationFinished: ((WebViewState) -> Void)?) {
         self.webView = webView
         self.navigator = navigator
         self.scriptCaller = scriptCaller
         self.config = config
+        self.messageHandlers = messageHandlers
+        self.onNavigationCommitted = onNavigationCommitted
+        self.onNavigationFinished = onNavigationFinished
         
         // TODO: Make about:blank history initialization optional via configuration.
         #warning("confirm this sitll works")
@@ -191,7 +197,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             return
         }*/
         
-        guard let messageHandler = webView.messageHandlers[message.name] else { return }
+        guard let messageHandler = messageHandlers[message.name] else { return }
         let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
         Task {
             await messageHandler(message)
@@ -219,7 +225,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
          */
         
-        if let onNavigationFinished = self.webView.onNavigationFinished {
+        if let onNavigationFinished = self.onNavigationFinished {
             onNavigationFinished(newState)
         }
         
@@ -277,7 +283,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scriptCaller?.removeAllMultiTargetFrames()
         let newState = setLoading(true, pageURL: webView.url, isProvisionallyNavigating: false)
-        if let onNavigationCommitted = self.webView.onNavigationCommitted {
+        if let onNavigationCommitted = self.onNavigationCommitted {
             onNavigationCommitted(newState)
         }
     }
@@ -772,7 +778,15 @@ public struct WebView: UIViewControllerRepresentable {
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
-        WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
+        return WebViewCoordinator(
+            webView: self,
+            navigator: navigator,
+            scriptCaller: scriptCaller,
+            config: config,
+            messageHandlers: messageHandlers,
+            onNavigationCommitted: onNavigationCommitted,
+            onNavigationFinished: onNavigationFinished
+        )
     }
     
     @MainActor
@@ -884,6 +898,9 @@ public struct WebView: UIViewControllerRepresentable {
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
         context.coordinator.config = config
+        context.coordinator.messageHandlers = messageHandlers
+        context.coordinator.onNavigationCommitted = onNavigationCommitted
+        context.coordinator.onNavigationFinished = onNavigationFinished
         
 //        refreshMessageHandlers(context: context)
 //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
@@ -988,7 +1005,15 @@ public struct WebView: NSViewRepresentable {
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
-        return WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
+        return WebViewCoordinator(
+            webView: self,
+            navigator: navigator,
+            scriptCaller: scriptCaller,
+            config: config,
+            messageHandlers: messageHandlers,
+            onNavigationCommitted: onNavigationCommitted,
+            onNavigationFinished: onNavigationFinished
+        )
     }
     
     @MainActor
@@ -1045,8 +1070,12 @@ public struct WebView: NSViewRepresentable {
     @MainActor
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
         context.coordinator.config = config
-        
+        context.coordinator.messageHandlers = messageHandlers
+        context.coordinator.onNavigationCommitted = onNavigationCommitted
+        context.coordinator.onNavigationFinished = onNavigationFinished
+
 //        refreshMessageHandlers(context: context)
+//        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
 //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
 //        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
