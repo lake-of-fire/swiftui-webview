@@ -131,14 +131,16 @@ public class WebViewCoordinator: NSObject {
         })
     }
     
-    @discardableResult func setLoading(_ isLoading: Bool,
-                                       pageURL: URL? = nil,
-                                       isProvisionallyNavigating: Bool? = nil,
-                                       canGoBack: Bool? = nil,
-                                       canGoForward: Bool? = nil,
-                                       backList: [WKBackForwardListItem]? = nil,
-                                       forwardList: [WKBackForwardListItem]? = nil,
-                                       error: Error? = nil) -> WebViewState {
+    @discardableResult func setLoading(
+        _ isLoading: Bool,
+        pageURL: URL? = nil,
+        isProvisionallyNavigating: Bool? = nil,
+        canGoBack: Bool? = nil,
+        canGoForward: Bool? = nil,
+        backList: [WKBackForwardListItem]? = nil,
+        forwardList: [WKBackForwardListItem]? = nil,
+        error: Error? = nil
+    ) -> WebViewState {
         var newState = webView.state
         newState.isLoading = isLoading
         if let pageURL = pageURL {
@@ -178,11 +180,12 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         } else if message.name == "swiftUIWebViewImageUpdated" {
             guard let body = message.body as? [String: Any] else { return }
             if let imageURLRaw = body["imageURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
-                var newState = webView.state
-                newState.pageImageURL = imageURL
-                let targetState = newState
                 Task { @MainActor in
-                //                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
+                    guard webView.state.pageURL == url else { return }
+                    var newState = webView.state
+                    newState.pageImageURL = imageURL
+                    let targetState = newState
+                    //                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
                     webView.state = targetState
                 }
             }
@@ -282,7 +285,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         scriptCaller?.removeAllMultiTargetFrames()
-        let newState = setLoading(true, pageURL: webView.url, isProvisionallyNavigating: false)
+        var newState = setLoading(
+            true,
+            pageURL: webView.url,
+            isProvisionallyNavigating: false
+        )
+        newState.pageImageURL = nil
+        newState.pageTitle = nil
+        newState.pageHTML = nil
+        newState.error = nil
         if let onNavigationCommitted = self.onNavigationCommitted {
             onNavigationCommitted(newState)
         }
@@ -590,6 +601,15 @@ new MutationObserver(function(mutations) {
         window.webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
             imageURL: url, url: window.location.href})
         lastURL = url
+    } else if (window.webkit) {
+        let node = document.querySelector('#reader-header img')
+        if (node && window.webkit) {
+            let url = node.getAttribute('src')
+            if (lastURL === url) { return }
+            window.webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
+                imageURL: url, url: window.location.href})
+            lastURL = url
+        }
     }
 }).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
 """
