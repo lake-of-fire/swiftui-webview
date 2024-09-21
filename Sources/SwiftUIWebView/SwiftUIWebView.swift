@@ -348,6 +348,21 @@ extension WebViewCoordinator: WKNavigationDelegate {
 //            return (.cancel, preferences)
 //        }
         
+        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
+            // TODO: this is missing all our config.userScripts, make sure it inherits those...
+            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
+            
+            scriptCaller?.removeAllMultiTargetFrames()
+            var newState = self.webView.state
+            newState.pageURL = mainDocumentURL
+            newState.pageTitle = nil
+            newState.isProvisionallyNavigating = false
+            newState.pageImageURL = nil
+            newState.pageHTML = nil
+            newState.error = nil
+            self.webView.state = newState
+        }
+        
 //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
         if navigationAction.targetFrame?.isMainFrame ?? false {
             self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
@@ -358,24 +373,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
-        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url {
-            scriptCaller?.removeAllMultiTargetFrames()
-            var newState = self.webView.state
-            newState.pageURL = url
-            newState.pageTitle = nil
-            newState.isProvisionallyNavigating = false
-            newState.pageImageURL = nil
-            newState.pageHTML = nil
-            newState.error = nil
-            self.webView.state = newState
-        }
-        
-        //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-        if navigationResponse.isForMainFrame, let mainDocumentURL = navigationResponse.response.url {
-            // TODO: this is missing all our config.userScripts, make sure it inherits those...
-            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
-        }
-        
         return .allow
     }
 }
