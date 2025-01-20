@@ -58,22 +58,48 @@ public struct WebViewMessage: Equatable {
 
 public struct WebViewUserScript: Equatable, Hashable {
     public let source: String
-    public let webKitUserScript: WKUserScript
+    public let injectionTime: WKUserScriptInjectionTime
+    public let isForMainFrameOnly: Bool
+    public let world: WKContentWorld
     public let allowedDomains: Set<String>
+    
+    @MainActor
+    public lazy var webKitUserScript: WKUserScript = {
+        return WKUserScript(
+            source: source,
+            injectionTime: injectionTime,
+            forMainFrameOnly: isForMainFrameOnly,
+            in: world
+        )
+    }()
     
     public static func == (lhs: WebViewUserScript, rhs: WebViewUserScript) -> Bool {
         lhs.source == rhs.source
+        && lhs.injectionTime == rhs.injectionTime
+        && lhs.isForMainFrameOnly == rhs.isForMainFrameOnly
+        && lhs.world == rhs.world
         && lhs.allowedDomains == rhs.allowedDomains
     }
     
-    public init(source: String, injectionTime: WKUserScriptInjectionTime, forMainFrameOnly: Bool, in world: WKContentWorld = .defaultClient, allowedDomains: Set<String> = Set()) {
+    public init(
+        source: String,
+        injectionTime: WKUserScriptInjectionTime,
+        forMainFrameOnly: Bool,
+        in world: WKContentWorld = .defaultClient,
+        allowedDomains: Set<String> = Set()
+    ) {
         self.source = source
-        self.webKitUserScript = WKUserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
+        self.injectionTime = injectionTime
+        self.isForMainFrameOnly = forMainFrameOnly
+        self.world = world
         self.allowedDomains = allowedDomains
     }
     
     public func hash(into hasher: inout Hasher) {
         hasher.combine(source)
+        hasher.combine(injectionTime)
+        hasher.combine(isForMainFrameOnly)
+        hasher.combine(world)
         hasher.combine(allowedDomains)
     }
 }
@@ -1173,11 +1199,29 @@ extension WebView {
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
-        let allScripts = Self.systemScripts + scripts
-//        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
-        if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
+        var allScripts = Self.systemScripts + scripts
+        //        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
+        
+        if allScripts.isEmpty && !userContentController.userScripts.isEmpty {
             userContentController.removeAllUserScripts()
-            for script in allScripts {
+            return
+        }
+        
+        var matchedExistingScripts = [WKUserScript]()
+        if !allScripts.allSatisfy({ newScript in
+            return userContentController.userScripts.contains(where: { existingScript in
+                if newScript.source == existingScript.source
+                    && newScript.injectionTime == existingScript.injectionTime
+                    && newScript.isForMainFrameOnly == existingScript.isForMainFrameOnly {
+//                    && newScript.world == existingScript.world { // TODO: Track associated worlds...
+                    matchedExistingScripts.append(existingScript)
+                    return true
+                }
+                return false
+            })
+        }) || userContentController.userScripts.contains(where: { !matchedExistingScripts.contains($0) }) {
+            userContentController.removeAllUserScripts()
+            for var script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
             }
         }
