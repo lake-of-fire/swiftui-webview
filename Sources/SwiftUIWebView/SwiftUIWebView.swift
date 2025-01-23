@@ -121,8 +121,18 @@ public class WebViewCoordinator: NSObject {
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
     }
-    
-    init(webView: WebView, navigator: WebViewNavigator, scriptCaller: WebViewScriptCaller? = nil, config: WebViewConfig, messageHandlers: [String: ((WebViewMessage) async -> Void)], onNavigationCommitted: ((WebViewState) -> Void)?, onNavigationFinished: ((WebViewState) -> Void)?) {
+    var textSelection: Binding<String?>
+
+    init(
+        webView: WebView,
+        navigator: WebViewNavigator,
+        scriptCaller: WebViewScriptCaller? = nil,
+        config: WebViewConfig,
+        messageHandlers: [String: ((WebViewMessage) async -> Void)],
+        onNavigationCommitted: ((WebViewState) -> Void)?,
+        onNavigationFinished: ((WebViewState) -> Void)?,
+        textSelection: Binding<String?>
+    ) {
         self.webView = webView
         self.navigator = navigator
         self.scriptCaller = scriptCaller
@@ -130,7 +140,8 @@ public class WebViewCoordinator: NSObject {
         self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
-        
+        self.textSelection = textSelection
+
         // TODO: Make about:blank history initialization optional via configuration.
         #warning("confirm this sitll works")
 //        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
@@ -215,6 +226,11 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     webView.state = targetState
                 }
             }
+        } else if message.name == "swiftUIWebViewTextSelection" {
+            guard let body = message.body as? [String: String], let text = body["text"] as? String else {
+                return
+            }
+            textSelection.wrappedValue = text
         }
         /* else if message.name == "swiftUIWebViewIsWarm" {
             if !webView.isWarm, let onWarm = webView.onWarm {
@@ -613,6 +629,7 @@ window.addEventListener('swiftUIWebViewLocationChanged', function () {
 
 fileprivate struct ImageChangeUserScript {
     let userScript: WebViewUserScript
+    
     init() {
         let contents = """
 var lastURL;
@@ -637,6 +654,43 @@ new MutationObserver(function(mutations) {
 }).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
 """
         userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+    }
+}
+
+fileprivate struct TextSelectionUserScript {
+    let userScript: WebViewUserScript
+    
+    init() {
+        let contents = """
+            (function() {
+                let lastSentText = null;
+
+                function sendSelectedTextAndHTML() {
+                    const selection = window.getSelection();
+                    const selectedText = selection.toString();
+            
+                    if (!selection || selection.rangeCount === 0 || selectedText === '') {
+                        if (lastSentText !== null) {
+                            window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
+                                text: null,
+                            });
+                            lastSentText = null;
+                        }
+                        return;
+                    }
+                    if (selectedText === lastSentText) {
+                        return;
+                    }
+                    
+                    lastSentText = selectedText;
+                    window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
+                        text: selectedText,
+                    });
+                }
+                document.addEventListener('selectionchange', sendSelectedTextAndHTML);
+            })(); 
+            """
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page)
     }
 }
 
@@ -686,13 +740,17 @@ fileprivate let kDownArrowKeyCode:  UInt16  = 125
 fileprivate let kUpArrowKeyCode:    UInt16  = 126
 
 public class EnhancedWKWebView: WKWebView {
-    #if os(macOS)
+#if os(iOS)
+    var buildMenu: ((UIMenuBuilder) -> Void)?
+#endif
+    
+#if os(macOS)
     public override var isOpaque: Bool {
         return true
     }
     
     public override func keyDown(with event: NSEvent) {
-    //                    print(">> key \(event.keyCode)")
+        //                    print(">> key \(event.keyCode)")
         switch event.keyCode {
         case kLeftArrowKeyCode, kRightArrowKeyCode, kDownArrowKeyCode, kUpArrowKeyCode:
             return
@@ -700,7 +758,12 @@ public class EnhancedWKWebView: WKWebView {
             super.keyDown(with: event)
         }
     }
-    #endif
+#elseif os(iOS)
+    override open func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        buildMenu?(builder)
+    }
+#endif
 }
 
 #if os(iOS)
@@ -772,6 +835,8 @@ public struct WebView: UIViewControllerRepresentable {
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
+    let buildMenu: ((UIMenuBuilder) -> Void)?
+    @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
     var bounces = true
     let persistentWebViewID: String?
@@ -800,7 +865,10 @@ public struct WebView: UIViewControllerRepresentable {
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
-                onNavigationFinished: ((WebViewState) -> Void)? = nil) {
+                onNavigationFinished: ((WebViewState) -> Void)? = nil,
+                buildMenu: ((UIMenuBuilder) -> Void)? = nil,
+                textSelection: Binding<String?>? = nil
+    ) {
         self.config = config
         _state = state
         self.navigator = navigator
@@ -818,6 +886,8 @@ public struct WebView: UIViewControllerRepresentable {
         self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        self.buildMenu = buildMenu
+        _textSelection = textSelection ?? .constant(nil)
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -828,7 +898,8 @@ public struct WebView: UIViewControllerRepresentable {
             config: config,
             messageHandlers: messageHandlers,
             onNavigationCommitted: onNavigationCommitted,
-            onNavigationFinished: onNavigationFinished
+            onNavigationFinished: onNavigationFinished,
+            textSelection: $textSelection
         )
     }
     
@@ -883,6 +954,7 @@ public struct WebView: UIViewControllerRepresentable {
                 web.configuration.userContentController.add(coordinator, contentWorld: .page, name: messageHandlerName)
                 coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
             }
+            web.buildMenu = buildMenu
         }
         guard let web = web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
         return web
@@ -944,7 +1016,8 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.messageHandlers = messageHandlers
         context.coordinator.onNavigationCommitted = onNavigationCommitted
         context.coordinator.onNavigationFinished = onNavigationFinished
-        
+        context.coordinator.textSelection = $textSelection
+
 //        refreshMessageHandlers(context: context)
 //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
@@ -967,6 +1040,7 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         
+        controller.webView.buildMenu = buildMenu
         controller.webView.scrollView.bounces = bounces
         controller.webView.scrollView.alwaysBounceVertical = bounces
         
@@ -1001,6 +1075,7 @@ public struct WebView: NSViewRepresentable {
     var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
+    @Binding var textSelection: String?
     /// Unused on macOS (for now?).
     var obscuredInsets: EdgeInsets
     var bounces = true
@@ -1028,7 +1103,10 @@ public struct WebView: NSViewRepresentable {
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
-                onNavigationFinished: ((WebViewState) -> Void)? = nil) {
+                onNavigationFinished: ((WebViewState) -> Void)? = nil,
+                buildMenu: ((Any) -> Void)? = nil,
+                textSelection: Binding<String?>? = nil
+    ) {
         self.config = config
         self.navigator = navigator
         _state = state
@@ -1045,6 +1123,8 @@ public struct WebView: NSViewRepresentable {
         self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        
+        // TODO: buildMenu macOS...
     }
     
     public func makeCoordinator() -> WebViewCoordinator {
@@ -1232,6 +1312,7 @@ extension WebView {
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
+        TextSelectionUserScript().userScript,
     ]
     
     fileprivate static var systemMessageHandlers: [String] {
@@ -1239,6 +1320,7 @@ extension WebView {
             "swiftUIWebViewBackgroundStatus",
             "swiftUIWebViewLocationChanged",
             "swiftUIWebViewImageUpdated",
+            "swiftUIWebViewTextSelection",
         ]
     }
 }
