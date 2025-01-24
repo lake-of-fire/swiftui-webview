@@ -250,6 +250,41 @@ extension WebViewCoordinator: WKScriptMessageHandler {
     }
 }
 
+#if os(macOS)
+extension WebViewCoordinator: WKUIDelegate {
+    public func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
+        let urls = FileManager.default.urls(for: .documentDirectory, in: .allDomainsMask)
+        // for Japanese names.
+        let name = suggestedFilename.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "cannotencode"
+        return URL(string: name, relativeTo: urls[0])
+    }
+    
+    public func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor ([URL]?) -> Void) {
+        let openPanel = NSOpenPanel()
+        openPanel.allowsMultipleSelection = true
+        openPanel.canChooseDirectories = false
+        openPanel.canChooseFiles = true
+        openPanel.resolvesAliases = true
+        
+        func handleResult(_ result: NSApplication.ModalResponse) {
+            if result == NSApplication.ModalResponse.OK {
+                if let url = openPanel.url {
+                    completionHandler([url])
+                }
+            } else if result == NSApplication.ModalResponse.cancel {
+                completionHandler(nil)
+            }
+        }
+        
+        if let window = webView.window {
+            openPanel.beginSheetModal(for: window, completionHandler: handleResult)
+        } else { // web view is somehow not in a window? Fall back to begin
+            openPanel.begin(completionHandler: handleResult)
+        }
+    }
+}
+#endif
+
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -1123,6 +1158,7 @@ public struct WebView: NSViewRepresentable {
         self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        _textSelection = textSelection ?? .constant(nil)
         
         // TODO: buildMenu macOS...
     }
@@ -1135,7 +1171,8 @@ public struct WebView: NSViewRepresentable {
             config: config,
             messageHandlers: messageHandlers,
             onNavigationCommitted: onNavigationCommitted,
-            onNavigationFinished: onNavigationFinished
+            onNavigationFinished: onNavigationFinished,
+            textSelection: $textSelection
         )
     }
     
@@ -1162,9 +1199,10 @@ public struct WebView: NSViewRepresentable {
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
         }
-
+        
         let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.pageZoom = config.pageZoom
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         webView.layer?.backgroundColor = .white
