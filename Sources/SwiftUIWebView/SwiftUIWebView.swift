@@ -467,6 +467,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
+//        debugPrint("# WebViewNavigator.load(...)", request.url)
         if let url = request.url, url.isFileURL {
             webView.loadFileURL(url, allowingReadAccessTo: url)
         } else {
@@ -475,6 +476,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
+//        debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView = webView else { return }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
