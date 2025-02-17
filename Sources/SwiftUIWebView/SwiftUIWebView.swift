@@ -967,6 +967,7 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.processPool = Self.processPool
 //            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
             
+            configuration.websiteDataStore = WKWebsiteDataStore.default()
             // For private mode later:
             //            let dataStore = WKWebsiteDataStore.nonPersistent()
             //            configuration.websiteDataStore = dataStore
@@ -1189,6 +1190,10 @@ public struct WebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.applicationNameForUserAgent = "Safari/604.1"
         configuration.defaultWebpagePreferences = preferences
+        configuration.websiteDataStore = WKWebsiteDataStore.default()
+        // For private mode later:
+        //            let dataStore = WKWebsiteDataStore.nonPersistent()
+        //            configuration.websiteDataStore = dataStore
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
