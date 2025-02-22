@@ -288,6 +288,7 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+//        debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -313,6 +314,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
     
     private func extractPageState(webView: WKWebView) {
+        // TODO: Also get window location to confirm state matches JS result
         webView.evaluateJavaScript("document.title") { (response, error) in
             if let title = response as? String {
                 var newState = self.webView.state
@@ -361,6 +363,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+//        debugPrint("# didCommit nav", webView.url)
         scriptCaller?.removeAllMultiTargetFrames()
         var newState = setLoading(
             true,
