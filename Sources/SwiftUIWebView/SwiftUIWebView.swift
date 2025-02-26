@@ -468,6 +468,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
         }
     }
     
+    public var backForwardList: WKBackForwardList {
+        return webView?.backForwardList ?? WKBackForwardList()
+    }
+    
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
 //        debugPrint("# WebViewNavigator.load(...)", request.url)
