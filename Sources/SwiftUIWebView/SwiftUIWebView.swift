@@ -3,6 +3,17 @@ import WebKit
 import UniformTypeIdentifiers
 import ZIPFoundation
 
+public struct WebViewMessageHandlersKey: EnvironmentKey {
+    public static let defaultValue: [String: (WebViewMessage) async -> Void] = [:]
+}
+
+public extension EnvironmentValues {
+    var webViewMessageHandlers: [String: (WebViewMessage) async -> Void] {
+        get { self[WebViewMessageHandlersKey.self] }
+        set { self[WebViewMessageHandlersKey.self] = newValue }
+    }
+}
+
 public struct WebViewState: Equatable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -104,6 +115,22 @@ public struct WebViewUserScript: Equatable, Hashable {
     }
 }
 
+public enum DarkModeSetting: String, CaseIterable, Identifiable {
+    case system
+    case darkModeOverride
+    
+    public var id: String { self.rawValue }
+    
+    public var title: String {
+        switch self {
+        case .system:
+            return "Use System Setting"
+        case .darkModeOverride:
+            return "Always Dark Mode"
+        }
+    }
+}
+
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
     
@@ -119,7 +146,7 @@ public class WebViewCoordinator: NSObject {
     var onNavigationFinished: ((WebViewState) -> Void)?
     var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     var messageHandlerNames: [String] {
-        webView.messageHandlers.keys.map { $0 }
+        messageHandlers.keys.map { $0 }
     }
     var textSelection: Binding<String?>
 
@@ -363,7 +390,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-//        debugPrint("# didCommit nav", webView.url)
+        debugPrint("# didCommit nav", webView.url)
         scriptCaller?.removeAllMultiTargetFrames()
         var newState = setLoading(
             true,
@@ -474,7 +501,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
-//        debugPrint("# WebViewNavigator.load(...)", request.url)
+        debugPrint("# WebViewNavigator.load(...)", request.url)
         if let url = request.url, url.isFileURL {
             webView.loadFileURL(url, allowingReadAccessTo: url)
         } else {
@@ -483,7 +510,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
-//        debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+        debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView = webView else { return }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
@@ -752,18 +779,22 @@ public struct WebViewConfig {
     public let isOpaque: Bool
     public let backgroundColor: Color
     public let userScripts: [WebViewUserScript]
+    public let darkModeSetting: DarkModeSetting
     
-    public init(javaScriptEnabled: Bool = true,
-                contentRules: String? = nil,
-                allowsBackForwardNavigationGestures: Bool = true,
-                allowsInlineMediaPlayback: Bool = true,
-                mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [WKAudiovisualMediaTypes.all],
-                dataDetectorsEnabled: Bool = true,
-                isScrollEnabled: Bool = true,
-                pageZoom: CGFloat = 1,
-                isOpaque: Bool = true,
-                backgroundColor: Color = .clear,
-                userScripts: [WebViewUserScript] = []) {
+    public init(
+        javaScriptEnabled: Bool = true,
+        contentRules: String? = nil,
+        allowsBackForwardNavigationGestures: Bool = true,
+        allowsInlineMediaPlayback: Bool = true,
+        mediaTypesRequiringUserActionForPlayback: WKAudiovisualMediaTypes = [WKAudiovisualMediaTypes.all],
+        dataDetectorsEnabled: Bool = true,
+        isScrollEnabled: Bool = true,
+        pageZoom: CGFloat = 1,
+        isOpaque: Bool = true,
+        backgroundColor: Color = .clear,
+        userScripts: [WebViewUserScript] = [],
+        darkModeSetting: DarkModeSetting = .system
+    ) {
         self.javaScriptEnabled = javaScriptEnabled
         self.contentRules = contentRules
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
@@ -775,6 +806,7 @@ public struct WebViewConfig {
         self.isOpaque = isOpaque
         self.backgroundColor = backgroundColor
         self.userScripts = userScripts
+        self.darkModeSetting = darkModeSetting
     }
 }
 
@@ -876,7 +908,6 @@ public struct WebView: UIViewControllerRepresentable {
     let blockedHosts: Set<String>?
     let htmlInState: Bool
     let schemeHandlers: [(WKURLSchemeHandler, String)]
-    var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let buildMenu: ((UIMenuBuilder) -> Void)?
@@ -886,7 +917,8 @@ public struct WebView: UIViewControllerRepresentable {
     let persistentWebViewID: String?
 //    let onWarm: (() async -> Void)?
     
-    private var messageHandlerNamesToRegister = Set<String>()
+    @Environment(\.webViewMessageHandlers) private var webViewMessageHandlers
+    
     private var userContentController = WKUserContentController()
 //    @State fileprivate var isWarm = false
     @State fileprivate var drawsBackground = false
@@ -907,7 +939,6 @@ public struct WebView: UIViewControllerRepresentable {
                 persistentWebViewID: String? = nil,
 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
-                messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((UIMenuBuilder) -> Void)? = nil,
@@ -924,10 +955,6 @@ public struct WebView: UIViewControllerRepresentable {
         self.persistentWebViewID = persistentWebViewID
 //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
-        for name in messageHandlers.keys.map({ $0 }) {
-            self.messageHandlerNamesToRegister.insert(name)
-        }
-        self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.buildMenu = buildMenu
@@ -940,7 +967,7 @@ public struct WebView: UIViewControllerRepresentable {
             navigator: navigator,
             scriptCaller: scriptCaller,
             config: config,
-            messageHandlers: messageHandlers,
+            messageHandlers: webViewMessageHandlers,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
             textSelection: $textSelection
@@ -1010,7 +1037,7 @@ public struct WebView: UIViewControllerRepresentable {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
 //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
-        let webView = makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
+        let webView = makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: Set(webViewMessageHandlers.keys))
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
         
         refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
@@ -1049,6 +1076,8 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         
+        refreshDarkModeSetting(webView: webView)
+
         // In case we retrieved a cached web view that is already warm but we don't know it.
 //        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
 
@@ -1058,11 +1087,12 @@ public struct WebView: UIViewControllerRepresentable {
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
         context.coordinator.config = config
-        context.coordinator.messageHandlers = messageHandlers
+        context.coordinator.messageHandlers = webViewMessageHandlers
         context.coordinator.onNavigationCommitted = onNavigationCommitted
         context.coordinator.onNavigationFinished = onNavigationFinished
         context.coordinator.textSelection = $textSelection
 
+        refreshDarkModeSetting(webView: controller.webView)
 //        refreshMessageHandlers(context: context)
 //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
@@ -1117,15 +1147,15 @@ public struct WebView: NSViewRepresentable {
     let htmlInState: Bool
 //    let onWarm: (() -> Void)?
     let schemeHandlers: [(WKURLSchemeHandler, String)]
-    var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     @Binding var textSelection: String?
     /// Unused on macOS (for now?).
     var obscuredInsets: EdgeInsets
     var bounces = true
-    private var messageHandlerNamesToRegister = Set<String>()
     private var userContentController = WKUserContentController()
+    
+    @Environment(\.webViewMessageHandlers) private var webViewMessageHandlers
     
 //    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
@@ -1146,7 +1176,6 @@ public struct WebView: NSViewRepresentable {
                 persistentWebViewID: String? = nil,
 //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
-                messageHandlers: [String: (WebViewMessage) async -> Void] = [:],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((Any) -> Void)? = nil,
@@ -1162,10 +1191,6 @@ public struct WebView: NSViewRepresentable {
         self.bounces = bounces
 //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
-        for name in messageHandlers.keys.map({ $0 }) {
-            self.messageHandlerNamesToRegister.insert(name)
-        }
-        self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         _textSelection = textSelection ?? .constant(nil)
@@ -1179,7 +1204,7 @@ public struct WebView: NSViewRepresentable {
             navigator: navigator,
             scriptCaller: scriptCaller,
             config: config,
-            messageHandlers: messageHandlers,
+            messageHandlers: webViewMessageHandlers,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
             textSelection: $textSelection
@@ -1210,6 +1235,8 @@ public struct WebView: NSViewRepresentable {
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
         //        configuration.websiteDataStore = dataStore
         
+        configuration.setValue(drawsBackground, forKey: "drawsBackground")
+
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
         }
@@ -1224,8 +1251,6 @@ public struct WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        webView.setValue(drawsBackground, forKey: "drawsBackground")
-        
         context.coordinator.setWebView(webView)
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
@@ -1239,13 +1264,16 @@ public struct WebView: NSViewRepresentable {
                 return try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
             }
         }
+        
+        refreshDarkModeSetting(webView: webView)
+
         return webView
     }
     
     @MainActor
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
         context.coordinator.config = config
-        context.coordinator.messageHandlers = messageHandlers
+        context.coordinator.messageHandlers = webViewMessageHandlers
         context.coordinator.onNavigationCommitted = onNavigationCommitted
         context.coordinator.onNavigationFinished = onNavigationFinished
 
@@ -1259,6 +1287,8 @@ public struct WebView: NSViewRepresentable {
 //        uiView.scrollView.bounces = bounces
 //        uiView.scrollView.alwaysBounceVertical = bounces
         
+        refreshDarkModeSetting(webView: uiView)
+
         uiView.setValue(drawsBackground, forKey: "drawsBackground")
         
         if needsHistoryRefresh {
@@ -1287,6 +1317,15 @@ public struct WebView: NSViewRepresentable {
 
 extension WebView {
     @MainActor
+    func refreshDarkModeSetting(webView: WKWebView) {
+#if os(iOS)
+        webView.overrideUserInterfaceStyle = config.darkModeSetting == .darkModeOverride ? .dark : .unspecified
+#elseif os(macOS)
+        webView.appearance = config.darkModeSetting == .darkModeOverride ? NSAppearance(named: .darkAqua) : nil
+#endif
+    }
+    
+    @MainActor
     func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
         userContentController.removeAllContentRuleLists()
         guard let contentRules = config.contentRules else { return }
@@ -1310,15 +1349,18 @@ extension WebView {
     
     @MainActor
     func refreshMessageHandlers(userContentController: WKUserContentController, context: Context) {
-        for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
+        let envHandlerNames = Set(webViewMessageHandlers.keys)
+        let requiredHandlers = Set(Self.systemMessageHandlers).union(envHandlerNames)
+        
+        for messageHandlerName in requiredHandlers {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            
             // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
             userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
             userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + messageHandlerNamesToRegister) {
+        
+        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(requiredHandlers) {
             userContentController.removeScriptMessageHandler(forName: missing)
         }
     }
