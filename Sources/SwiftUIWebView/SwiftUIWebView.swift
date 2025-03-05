@@ -559,7 +559,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     
     @MainActor
     public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
-        guard let asyncCaller = asyncCaller else {
+        guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
