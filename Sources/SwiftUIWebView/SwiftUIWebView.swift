@@ -144,6 +144,7 @@ public class WebViewCoordinator: NSObject {
     
     var onNavigationCommitted: ((WebViewState) -> Void)?
     var onNavigationFinished: ((WebViewState) -> Void)?
+    var onNavigationFailed: ((WebViewState) -> Void)?
     var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     var messageHandlerNames: [String] {
         messageHandlers.keys.map { $0 }
@@ -158,6 +159,7 @@ public class WebViewCoordinator: NSObject {
         messageHandlers: [String: ((WebViewMessage) async -> Void)],
         onNavigationCommitted: ((WebViewState) -> Void)?,
         onNavigationFinished: ((WebViewState) -> Void)?,
+        onNavigationFailed: ((WebViewState) -> Void)?,
         textSelection: Binding<String?>
     ) {
         self.webView = webView
@@ -167,6 +169,7 @@ public class WebViewCoordinator: NSObject {
         self.messageHandlers = messageHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        self.onNavigationFailed = onNavigationFailed
         self.textSelection = textSelection
 
         // TODO: Make about:blank history initialization optional via configuration.
@@ -333,9 +336,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
          */
         
-        if let onNavigationFinished = self.onNavigationFinished {
-            onNavigationFinished(newState)
-        }
+        onNavigationFinished?(newState)
         
         extractPageState(webView: webView)
     }
@@ -383,9 +384,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         scriptCaller?.removeAllMultiTargetFrames()
-        setLoading(false, isProvisionallyNavigating: false, error: error)
+        let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         
         extractPageState(webView: webView)
+        
+        onNavigationFailed?(newState)
     }
     
     @MainActor
@@ -910,6 +913,7 @@ public struct WebView: UIViewControllerRepresentable {
     let schemeHandlers: [(WKURLSchemeHandler, String)]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
+    let onNavigationFailed: ((WebViewState) -> Void)?
     let buildMenu: ((UIMenuBuilder) -> Void)?
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
@@ -941,6 +945,7 @@ public struct WebView: UIViewControllerRepresentable {
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
+                onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((UIMenuBuilder) -> Void)? = nil,
                 textSelection: Binding<String?>? = nil
     ) {
@@ -957,6 +962,7 @@ public struct WebView: UIViewControllerRepresentable {
         self.schemeHandlers = schemeHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        self.onNavigationFailed = onNavigationFailed
         self.buildMenu = buildMenu
         _textSelection = textSelection ?? .constant(nil)
     }
@@ -970,6 +976,7 @@ public struct WebView: UIViewControllerRepresentable {
             messageHandlers: webViewMessageHandlers,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
+            onNavigationFailed: onNavigationFailed,
             textSelection: $textSelection
         )
     }
@@ -1090,6 +1097,7 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.messageHandlers = webViewMessageHandlers
         context.coordinator.onNavigationCommitted = onNavigationCommitted
         context.coordinator.onNavigationFinished = onNavigationFinished
+        context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.textSelection = $textSelection
 
         refreshDarkModeSetting(webView: controller.webView)
@@ -1149,6 +1157,7 @@ public struct WebView: NSViewRepresentable {
     let schemeHandlers: [(WKURLSchemeHandler, String)]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
+    let onNavigationFailed: ((WebViewState) -> Void)?
     @Binding var textSelection: String?
     /// Unused on macOS (for now?).
     var obscuredInsets: EdgeInsets
@@ -1178,6 +1187,7 @@ public struct WebView: NSViewRepresentable {
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
+                onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((Any) -> Void)? = nil,
                 textSelection: Binding<String?>? = nil
     ) {
@@ -1193,6 +1203,7 @@ public struct WebView: NSViewRepresentable {
         self.schemeHandlers = schemeHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        self.onNavigationFailed = onNavigationFailed
         _textSelection = textSelection ?? .constant(nil)
         
         // TODO: buildMenu macOS...
@@ -1207,6 +1218,7 @@ public struct WebView: NSViewRepresentable {
             messageHandlers: webViewMessageHandlers,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
+            onNavigationFailed: onNavigationFailed,
             textSelection: $textSelection
         )
     }
@@ -1276,6 +1288,7 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.messageHandlers = webViewMessageHandlers
         context.coordinator.onNavigationCommitted = onNavigationCommitted
         context.coordinator.onNavigationFinished = onNavigationFinished
+        context.coordinator.onNavigationFailed = onNavigationFailed
 
 //        refreshMessageHandlers(context: context)
 //        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
