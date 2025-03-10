@@ -20,6 +20,7 @@ public struct WebViewState: Equatable {
     public internal(set) var pageURL: URL
     public internal(set) var pageTitle: String?
     public internal(set) var pageImageURL: URL?
+    public internal(set) var pageIconURL: URL?
     public internal(set) var pageHTML: String?
     public internal(set) var error: Error?
     public internal(set) var canGoBack: Bool
@@ -33,6 +34,7 @@ public struct WebViewState: Equatable {
         pageURL: URL(string: "about:blank")!,
         pageTitle: nil,
         pageImageURL: nil,
+        pageIconURL: nil,
         pageHTML: nil,
         error: nil,
         canGoBack: false,
@@ -46,6 +48,7 @@ public struct WebViewState: Equatable {
             && lhs.pageURL == rhs.pageURL
             && lhs.pageTitle == rhs.pageTitle
             && lhs.pageImageURL == rhs.pageImageURL
+            && lhs.pageIconURL == rhs.pageIconURL
             && lhs.pageHTML == rhs.pageHTML
             && lhs.error?.localizedDescription == rhs.error?.localizedDescription
             && lhs.canGoBack == rhs.canGoBack
@@ -263,6 +266,17 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     webView.state = targetState
                 }
             }
+        } else if message.name == "swiftUIWebViewPageIconUpdated" {
+            guard let body = message.body as? [String: Any] else { return }
+            if let imageURLRaw = body["pageIconURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
+                Task { @MainActor in
+                    guard webView.state.pageURL == url else { return }
+                    var newState = webView.state
+                    newState.pageIconURL = imageURL
+                    let targetState = newState
+                    webView.state = targetState
+                }
+            }
         } else if message.name == "swiftUIWebViewTextSelection" {
             guard let body = message.body as? [String: String], let text = body["text"] as? String else {
                 return
@@ -407,6 +421,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             isProvisionallyNavigating: false
         )
         newState.pageImageURL = nil
+        newState.pageIconURL = nil
         newState.pageTitle = nil
         newState.pageHTML = nil
         newState.error = nil
@@ -472,6 +487,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             newState.pageTitle = nil
             newState.isProvisionallyNavigating = false
             newState.pageImageURL = nil
+            newState.pageIconURL = nil
             newState.pageHTML = nil
             newState.error = nil
             self.webView.state = newState
@@ -730,6 +746,75 @@ new MutationObserver(function(mutations) {
         }
     }
 }).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
+"""
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+    }
+}
+
+fileprivate struct PageIconChangeUserScript {
+    let userScript: WebViewUserScript
+    
+    init() {
+        let contents = """
+(function () {
+    var lastURL = null;
+
+    function resolveURL(url) {
+        if (!url) return null;
+        try {
+            return new URL(url, window.location.origin).href;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function getFaviconURL() {
+        // Define the selectors in the order of preference.
+        const selectors = [
+            'link[rel="apple-touch-icon"]',
+            'link[rel="shortcut icon"]',
+            'link[rel="icon"]'
+        ];
+
+        for (let selector of selectors) {
+            let element = document.querySelector(selector);
+            if (element && element.getAttribute('href')) {
+                return resolveURL(element.getAttribute('href'));
+            }
+        }
+        return null;
+    }
+
+    function sendFaviconUpdate() {
+        const url = getFaviconURL();
+        if (url && url !== lastURL && window.webkit?.messageHandlers?.swiftUIWebViewPageIconUpdated) {
+            window.webkit.messageHandlers.swiftUIWebViewPageIconUpdated.postMessage({
+                pageIconURL: url,
+                url: window.location.href,
+            });
+            lastURL = url;
+        }
+    }
+
+    function init() {
+        sendFaviconUpdate();
+
+        new MutationObserver(() => {
+            sendFaviconUpdate();
+        }).observe(document.head, {
+            childList: true,
+            subtree: false, // Only need to observe the immediate head children
+            attributes: true,
+            attributeFilter: ['rel', 'href']
+        });
+    }
+
+    if (document.readyState === 'complete') {
+        init();
+    } else {
+        document.addEventListener('DOMContentLoaded', init);
+    }
+})();
 """
         userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
     }
@@ -1198,7 +1283,7 @@ public struct WebView: NSViewRepresentable {
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
-                onURLChanged: ((WebViewStateURL) -> Void)? = nil,
+                onURLChanged: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((Any) -> Void)? = nil,
                 textSelection: Binding<String?>? = nil
     ) {
@@ -1433,6 +1518,7 @@ extension WebView {
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
+        PageIconChangeUserScript().userScript,
         TextSelectionUserScript().userScript,
     ]
     
@@ -1441,6 +1527,7 @@ extension WebView {
             "swiftUIWebViewBackgroundStatus",
             "swiftUIWebViewLocationChanged",
             "swiftUIWebViewImageUpdated",
+            "swiftUIWebViewPageIconUpdated",
             "swiftUIWebViewTextSelection",
         ]
     }
