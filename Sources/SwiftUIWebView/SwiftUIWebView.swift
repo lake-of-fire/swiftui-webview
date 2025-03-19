@@ -44,17 +44,17 @@ public struct WebViewState: Equatable {
     
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
-            && lhs.isProvisionallyNavigating == rhs.isProvisionallyNavigating
-            && lhs.pageURL == rhs.pageURL
-            && lhs.pageTitle == rhs.pageTitle
-            && lhs.pageImageURL == rhs.pageImageURL
-            && lhs.pageIconURL == rhs.pageIconURL
-            && lhs.pageHTML == rhs.pageHTML
-            && lhs.error?.localizedDescription == rhs.error?.localizedDescription
-            && lhs.canGoBack == rhs.canGoBack
-            && lhs.canGoForward == rhs.canGoForward
-            && lhs.backList == rhs.backList
-            && lhs.forwardList == rhs.forwardList
+        && lhs.isProvisionallyNavigating == rhs.isProvisionallyNavigating
+        && lhs.pageURL == rhs.pageURL
+        && lhs.pageTitle == rhs.pageTitle
+        && lhs.pageImageURL == rhs.pageImageURL
+        && lhs.pageIconURL == rhs.pageIconURL
+        && lhs.pageHTML == rhs.pageHTML
+        && lhs.error?.localizedDescription == rhs.error?.localizedDescription
+        && lhs.canGoBack == rhs.canGoBack
+        && lhs.canGoForward == rhs.canGoForward
+        && lhs.backList == rhs.backList
+        && lhs.forwardList == rhs.forwardList
     }
 }
 
@@ -141,9 +141,13 @@ public class WebViewCoordinator: NSObject {
     var scriptCaller: WebViewScriptCaller?
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
-//    var lastInstalledScriptsHash = -1
+    //    var lastInstalledScriptsHash = -1
     var compiledContentRules = [String: WKContentRuleList]()
     private var urlObservation: NSKeyValueObservation?
+    
+    // UIScrollViewDelegate
+    internal var lastContentOffset: CGFloat = 0
+    internal var accumulatedScrollOffset: CGFloat = 0
     
     var onNavigationCommitted: ((WebViewState) -> Void)?
     var onNavigationFinished: ((WebViewState) -> Void)?
@@ -153,6 +157,7 @@ public class WebViewCoordinator: NSObject {
     var messageHandlerNames: [String] {
         messageHandlers.keys.map { $0 }
     }
+    var hideNavigationDueToScroll: Binding<Bool>
     var textSelection: Binding<String?>
     
     init(
@@ -165,6 +170,7 @@ public class WebViewCoordinator: NSObject {
         onNavigationFinished: ((WebViewState) -> Void)?,
         onNavigationFailed: ((WebViewState) -> Void)?,
         onURLChanged: ((WebViewState) -> Void)? = nil,
+        hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
         self.webView = webView
@@ -176,17 +182,18 @@ public class WebViewCoordinator: NSObject {
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
+        self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.textSelection = textSelection
-
+        
         // TODO: Make about:blank history initialization optional via configuration.
-        #warning("confirm this sitll works")
-//        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
-//            Task { @MainActor in
-//                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
-//            }
-//        }
+#warning("confirm this sitll works")
+        //        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
+        //            Task { @MainActor in
+        //                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
+        //            }
+        //        }
     }
-   
+    
     deinit {
         urlObservation?.invalidate()
     }
@@ -284,14 +291,14 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             textSelection.wrappedValue = text
         }
         /* else if message.name == "swiftUIWebViewIsWarm" {
-            if !webView.isWarm, let onWarm = webView.onWarm {
-                Task { @MainActor in
-                    webView.isWarm = true
-                    await onWarm()
-                }
-            }
-            return
-        }*/
+         if !webView.isWarm, let onWarm = webView.onWarm {
+         Task { @MainActor in
+         webView.isWarm = true
+         await onWarm()
+         }
+         }
+         return
+         }*/
         
         guard let messageHandler = messageHandlers[message.name] else { return }
         let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
@@ -339,7 +346,7 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-//        debugPrint("# didFinish nav", webView.url)
+        //        debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -350,11 +357,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
             forwardList: webView.backForwardList.forwardList)
         // TODO: Move to an init postMessage callback
         /*
-        if let url = webView.url, let scheme = url.scheme, scheme == "pdf" || scheme == "pdf-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "pdf", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
-            // TODO: Escaping? Use async eval for passing object data.
-            let jsString = "pdfjsLib.getDocument('\(loaderURL.absoluteString)').promise.then(doc => { PDFViewerApplication.load(doc); });"
-            webView.evaluateJavaScript(jsString, completionHandler: nil)
-        }
+         if let url = webView.url, let scheme = url.scheme, scheme == "pdf" || scheme == "pdf-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "pdf", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
+         // TODO: Escaping? Use async eval for passing object data.
+         let jsString = "pdfjsLib.getDocument('\(loaderURL.absoluteString)').promise.then(doc => { PDFViewerApplication.load(doc); });"
+         webView.evaluateJavaScript(jsString, completionHandler: nil)
+         }
          */
         
         onNavigationFinished?(newState)
@@ -450,32 +457,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         // ePub loader
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
-        /*if let url = navigationAction.request.url,
-           navigationAction.targetFrame?.isMainFrame ?? false,
-           url.isEBookURL, !["ebook", "ebook-url"].contains(url.scheme),
-           let viewerHtmlPath = Bundle.module.path(forResource: "ebook-reader", ofType: "html", inDirectory: "Foliate"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let epubURL = URL(string: url.isFileURL ? "epub://\(path)" : "epub-url://\(url.absoluteString.hasPrefix("https://") ? url.absoluteString.dropFirst("https://".count) : url.absoluteString.dropFirst("http://".count))") {
-            do {
-                let html = try String(contentsOfFile: viewerHtmlPath, encoding: .utf8)
-                webView.loadHTMLString(html, baseURL: epubURL)
-            } catch { }
-            return (.cancel, preferences)
-        }*/
-        
-        // PDF.js loader
-//        if
-//            false,
-//                let url = navigationAction.request.url,
-//            navigationAction.targetFrame?.isMainFrame ?? false,
-//            url.isFileURL || url.absoluteString.hasPrefix("https://"),
-//            navigationAction.request.url?.pathExtension.lowercased() == "pdf",
-//            //           navigationAction.request.mainDocumentURL?.scheme != "pdf",
-//            let pdfJSPath = Bundle.module.path(forResource: "viewer", ofType: "html"), let path = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed), let pdfURL = URL(string: url.isFileURL ? "pdf://\(path)" : "pdf-url://\(url.absoluteString.dropFirst("https://".count))") {
-//            do {
-//                let pdfJSHTML = try String(contentsOfFile: pdfJSPath)
-//                webView.loadHTMLString(pdfJSHTML, baseURL: pdfURL)
-//            } catch { }
-//            return (.cancel, preferences)
-//        }
         
         if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
             // TODO: this is missing all our config.userScripts, make sure it inherits those...
@@ -493,7 +474,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             self.webView.state = newState
         }
         
-//        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
+        //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
         if navigationAction.targetFrame?.isMainFrame ?? false {
             self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
         }
@@ -524,7 +505,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
-//        debugPrint("# WebViewNavigator.load(...)", request.url)
+        //        debugPrint("# WebViewNavigator.load(...)", request.url)
         if let url = request.url, url.isFileURL {
             webView.loadFileURL(url, allowingReadAccessTo: url)
         } else {
@@ -533,7 +514,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
-//        debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+        //        debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView = webView else { return }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
@@ -561,7 +542,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
 public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     public let id = UUID().uuidString
-//    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> Any?)? = nil
     
@@ -570,7 +551,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
         return lhs.id == rhs.id
     }
-
+    
     @MainActor
     public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
         guard let caller = caller else {
@@ -607,7 +588,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
             try? await completionHandler?(.failure(error))
         }
     }
-   
+    
     /// Returns whether the frame was already added.
     @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String) -> Bool {
@@ -827,7 +808,7 @@ fileprivate struct TextSelectionUserScript {
         let contents = """
             (function() {
                 let lastSentText = null;
-
+            
                 function sendSelectedTextAndHTML() {
                     const selection = window.getSelection();
                     const selectedText = selection.toString();
@@ -975,19 +956,19 @@ public class WebViewController: UIViewController {
     private func updateObscuredInsets() {
         guard let webView = view.subviews.first as? WKWebView else { return }
         let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: obscuredInsets.bottom, right: obscuredInsets.right)
-//        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
-//        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
+        //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
+        //        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
         let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
-            webView.setValue(insets, forKey: key)
-//            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
-//            webView.setValue(insets, forKey: "obscuredInsets")
-//        webView.safeAreaInsetsDidChange()
-//            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
-//            let key2 = argument2.compactMap({ $0 as? String }).joined()
-//            webView.setValue(true, forKey: key2)
-//            webView.setValue(true, forKey: "_haveSetUnobscuredSafeAreaInsets")
-//        }
+        webView.setValue(insets, forKey: key)
+        //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
+        //            webView.setValue(insets, forKey: "obscuredInsets")
+        //        webView.safeAreaInsetsDidChange()
+        //            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
+        //            let key2 = argument2.compactMap({ $0 as? String }).joined()
+        //            webView.setValue(true, forKey: key2)
+        //            webView.setValue(true, forKey: "_haveSetUnobscuredSafeAreaInsets")
+        //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
     }
 }
@@ -1005,16 +986,17 @@ public struct WebView: UIViewControllerRepresentable {
     let onNavigationFailed: ((WebViewState) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
     let buildMenu: ((UIMenuBuilder) -> Void)?
+    @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
     var bounces = true
     let persistentWebViewID: String?
-//    let onWarm: (() async -> Void)?
+    //    let onWarm: (() async -> Void)?
     
     @Environment(\.webViewMessageHandlers) private var webViewMessageHandlers
     
     private var userContentController = WKUserContentController()
-//    @State fileprivate var isWarm = false
+    //    @State fileprivate var isWarm = false
     @State fileprivate var drawsBackground = false
     @State fileprivate var needsHistoryRefresh = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
@@ -1031,13 +1013,14 @@ public struct WebView: UIViewControllerRepresentable {
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
-//                onWarm: (() async -> Void)? = nil,
+                //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((UIMenuBuilder) -> Void)? = nil,
+                hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil
     ) {
         self.config = config
@@ -1049,13 +1032,14 @@ public struct WebView: UIViewControllerRepresentable {
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
         self.persistentWebViewID = persistentWebViewID
-//        self.onWarm = onWarm
+        //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
         self.buildMenu = buildMenu
+        _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
     }
     
@@ -1070,6 +1054,7 @@ public struct WebView: UIViewControllerRepresentable {
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
             onURLChanged: onURLChanged,
+            hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
     }
@@ -1091,7 +1076,7 @@ public struct WebView: UIViewControllerRepresentable {
             configuration.applicationNameForUserAgent = "Safari/604.1"
             configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
             //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
-//            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
+            //            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
             if config.dataDetectorsEnabled {
                 configuration.dataDetectorTypes = [.all]
             } else {
@@ -1099,7 +1084,7 @@ public struct WebView: UIViewControllerRepresentable {
             }
             configuration.defaultWebpagePreferences = preferences
             configuration.processPool = Self.processPool
-//            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
+            //            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
             
             configuration.websiteDataStore = WKWebsiteDataStore.default()
             // For private mode later:
@@ -1120,34 +1105,37 @@ public struct WebView: UIViewControllerRepresentable {
             
             web?.backgroundColor = .white
         }
-        if let web = web {
-            for messageHandlerName in messageHandlerNamesToRegister {
-                if coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-                web.configuration.userContentController.add(coordinator, contentWorld: .page, name: messageHandlerName)
-                coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-            }
-            web.buildMenu = buildMenu
+        guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
+        
+        for messageHandlerName in messageHandlerNamesToRegister {
+            if coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+            web.configuration.userContentController.add(coordinator, contentWorld: .page, name: messageHandlerName)
+            coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        guard let web = web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
+        
+        web.buildMenu = buildMenu
+        
+        web.scrollView.delegate = coordinator
+        
         return web
     }
     
     @MainActor
     public func makeUIViewController(context: Context) -> WebViewController {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
-//        preferences.setValue(true, forKey: "developerExtrasEnabled")
+        //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
         let webView = makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: Set(webViewMessageHandlers.keys))
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
         
         refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
-
+        
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         webView.scrollView.contentInsetAdjustmentBehavior = .always
-//        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
+        //        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.pageZoom = config.pageZoom
         webView.isOpaque = config.isOpaque
@@ -1160,7 +1148,7 @@ public struct WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
         
-//        webView.setValue(drawsBackground, forKey: "drawsBackground")
+        //        webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         context.coordinator.setWebView(webView)
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
@@ -1177,10 +1165,10 @@ public struct WebView: UIViewControllerRepresentable {
         }
         
         refreshDarkModeSetting(webView: webView)
-
+        
         // In case we retrieved a cached web view that is already warm but we don't know it.
-//        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
-
+        //        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
+        
         return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
     }
     
@@ -1193,14 +1181,14 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.textSelection = $textSelection
-
+        
         refreshDarkModeSetting(webView: controller.webView)
-//        refreshMessageHandlers(context: context)
-//        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
+        //        refreshMessageHandlers(context: context)
+        //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
         
-//        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
+        //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
-//        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
+        //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         if needsHistoryRefresh {
             var newState = state
@@ -1210,7 +1198,7 @@ public struct WebView: UIViewControllerRepresentable {
             newState.canGoForward = controller.webView.canGoForward
             newState.backList = controller.webView.backForwardList.backList
             newState.forwardList = controller.webView.backForwardList.forwardList
-//            DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) {
+            //            DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) {
             Task { @MainActor in
                 state = newState
                 needsHistoryRefresh = false
@@ -1222,13 +1210,13 @@ public struct WebView: UIViewControllerRepresentable {
         controller.webView.scrollView.alwaysBounceVertical = bounces
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
-//        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
+        //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
         let bottomSafeAreaInset = controller.view.window?.safeAreaInsets.bottom ?? 0
-
-//        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
-//        print(obscuredInsets)
+        
+        //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
+        //        print(obscuredInsets)
         controller.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom - bottomSafeAreaInset, right: 0)
-//        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
+        //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
         controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: 0, bottom: obscuredInsets.bottom, right: 0)
         // _obscuredInsets ignores sides, probably
     }
@@ -1247,12 +1235,13 @@ public struct WebView: NSViewRepresentable {
     var scriptCaller: WebViewScriptCaller?
     let blockedHosts: Set<String>?
     let htmlInState: Bool
-//    let onWarm: (() -> Void)?
+    //    let onWarm: (() -> Void)?
     let schemeHandlers: [(WKURLSchemeHandler, String)]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let onNavigationFailed: ((WebViewState) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
+    @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
     /// Unused on macOS (for now?).
     var obscuredInsets: EdgeInsets
@@ -1261,11 +1250,11 @@ public struct WebView: NSViewRepresentable {
     
     @Environment(\.webViewMessageHandlers) private var webViewMessageHandlers
     
-//    @State fileprivate var isWarm = false
+    //    @State fileprivate var isWarm = false
     @State fileprivate var needsHistoryRefresh = false
     @State fileprivate var drawsBackground = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
-
+    
     private static let processPool = WKProcessPool()
     
     /// `persistentWebViewID` is only used on iOS, not macOS.
@@ -1278,13 +1267,14 @@ public struct WebView: NSViewRepresentable {
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
                 persistentWebViewID: String? = nil,
-//                onWarm: (() -> Void)? = nil,
+                //                onWarm: (() -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 buildMenu: ((Any) -> Void)? = nil,
+                hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil
     ) {
         self.config = config
@@ -1295,12 +1285,13 @@ public struct WebView: NSViewRepresentable {
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
-//        self.onWarm = onWarm
+        //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
+        _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
         
         // TODO: buildMenu macOS...
@@ -1317,6 +1308,7 @@ public struct WebView: NSViewRepresentable {
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
             onURLChanged: onURLChanged,
+            hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
     }
@@ -1327,7 +1319,7 @@ public struct WebView: NSViewRepresentable {
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
-//        preferences.setValue(true, forKey: "developerExtrasEnabled") // Wasn't working - revisit, because it would be great to have.
+        //        preferences.setValue(true, forKey: "developerExtrasEnabled") // Wasn't working - revisit, because it would be great to have.
         
         let configuration = WKWebViewConfiguration()
         configuration.applicationNameForUserAgent = "Safari/604.1"
@@ -1339,14 +1331,14 @@ public struct WebView: NSViewRepresentable {
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
-//        updateUserScripts(userContentController: configuration.userContentController, coordinator: context.coordinator, forDomain: nil, config: config)
-
+        //        updateUserScripts(userContentController: configuration.userContentController, coordinator: context.coordinator, forDomain: nil, config: config)
+        
         // For private mode later:
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
         //        configuration.websiteDataStore = dataStore
         
         configuration.setValue(drawsBackground, forKey: "drawsBackground")
-
+        
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
         }
@@ -1376,7 +1368,7 @@ public struct WebView: NSViewRepresentable {
         }
         
         refreshDarkModeSetting(webView: webView)
-
+        
         return webView
     }
     
@@ -1388,19 +1380,19 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.onNavigationFinished = onNavigationFinished
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
-
-//        refreshMessageHandlers(context: context)
-//        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
-//        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
-//        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
-
+        //        refreshMessageHandlers(context: context)
+        //        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
+        //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
+        
+        //        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
+        
         // Can't disable on macOS.
-//        uiView.scrollView.bounces = bounces
-//        uiView.scrollView.alwaysBounceVertical = bounces
+        //        uiView.scrollView.bounces = bounces
+        //        uiView.scrollView.alwaysBounceVertical = bounces
         
         refreshDarkModeSetting(webView: uiView)
-
+        
         uiView.setValue(drawsBackground, forKey: "drawsBackground")
         
         if needsHistoryRefresh {
@@ -1412,7 +1404,7 @@ public struct WebView: NSViewRepresentable {
             newState.backList = uiView.backForwardList.backList
             newState.forwardList = uiView.backForwardList.forwardList
             Task { @MainActor in
-//            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                //            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
                 state = newState
                 needsHistoryRefresh = false
             }
@@ -1499,7 +1491,7 @@ extension WebView {
                 if newScript.source == existingScript.source
                     && newScript.injectionTime == existingScript.injectionTime
                     && newScript.isForMainFrameOnly == existingScript.isForMainFrameOnly {
-//                    && newScript.world == existingScript.world { // TODO: Track associated worlds...
+                    //                    && newScript.world == existingScript.world { // TODO: Track associated worlds...
                     matchedExistingScripts.append(existingScript)
                     return true
                 }
@@ -1511,7 +1503,7 @@ extension WebView {
                 userContentController.addUserScript(script.webKitUserScript)
             }
         }
-//        coordinator.lastInstalledScriptsHash = allScripts.hashValue
+        //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
     
     fileprivate static let systemScripts = [
@@ -1581,104 +1573,104 @@ extension WebView {
 //}
 
 /*
-struct WebViewTest: View {
-    @State private var action = WebViewAction.idle
-    @State private var state = WebViewState.empty
-
-    private var userScripts: [WKUserScript] = []
-    @State private var address = "https://www.google.com"
-    
-    var body: some View {
-        VStack {
-            titleView
-            navigationToolbar
-            errorView
-            Divider()
-            WebView(action: $action,
-                    state: $state,
-                    blockedHosts: Set(["apple.com"]),
-                    htmlInState: true)
-            Text(state.pageHTML ?? "")
-                .lineLimit(nil)
-            Spacer()
-        }
-    }
-    
-    private var titleView: some View {
-        Text(String(format: "%@ - %@", state.pageTitle ?? "Load a page", state.pageURL.absoluteString))
-            .font(.system(size: 24))
-    }
-    
-    private var navigationToolbar: some View {
-        HStack(spacing: 10) {
-            Button("Test HTML") {
-                action = .loadHTML("<html><body><b>Hello World!</b></body></html>")
-            }
-            TextField("Address", text: $address)
-            if state.isLoading {
-                if #available(iOS 14, macOS 11, *) {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle())
-                } else {
-                    Text("Loading")
-                }
-            }
-            Spacer()
-            Button("Go") {
-                if let url = URL(string: address) {
-                    action = .load(URLRequest(url: url))
-                }
-            }
-            Button(action: {
-                action = .reload
-            }) {
-                if #available(iOS 14, macOS 11, *) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .imageScale(.large)
-                } else {
-                    Text("Reload")
-                }
-            }
-            if state.canGoBack {
-                Button(action: {
-                    action = .goBack
-                }) {
-                    if #available(iOS 14, macOS 11, *) {
-                        Image(systemName: "chevron.left")
-                            .imageScale(.large)
-                    } else {
-                        Text("<")
-                    }
-                }
-            }
-            if state.canGoForward {
-                Button(action: {
-                    action = .goForward
-                }) {
-                    if #available(iOS 14, macOS 11, *) {
-                        Image(systemName: "chevron.right")
-                            .imageScale(.large)
-                    } else {
-                        Text(">")
-                    }
-                }
-            }
-        }.padding()
-    }
-    
-    private var errorView: some View {
-        Group {
-            if let error = state.error {
-                Text(error.localizedDescription)
-                    .foregroundColor(.red)
-            }
-        }
-    }
-}
-
-struct WebView_Previews: PreviewProvider {
-    static var previews: some View {
-        WebViewTest()
-    }
-}
-*/
+ struct WebViewTest: View {
+ @State private var action = WebViewAction.idle
+ @State private var state = WebViewState.empty
+ 
+ private var userScripts: [WKUserScript] = []
+ @State private var address = "https://www.google.com"
+ 
+ var body: some View {
+ VStack {
+ titleView
+ navigationToolbar
+ errorView
+ Divider()
+ WebView(action: $action,
+ state: $state,
+ blockedHosts: Set(["apple.com"]),
+ htmlInState: true)
+ Text(state.pageHTML ?? "")
+ .lineLimit(nil)
+ Spacer()
+ }
+ }
+ 
+ private var titleView: some View {
+ Text(String(format: "%@ - %@", state.pageTitle ?? "Load a page", state.pageURL.absoluteString))
+ .font(.system(size: 24))
+ }
+ 
+ private var navigationToolbar: some View {
+ HStack(spacing: 10) {
+ Button("Test HTML") {
+ action = .loadHTML("<html><body><b>Hello World!</b></body></html>")
+ }
+ TextField("Address", text: $address)
+ if state.isLoading {
+ if #available(iOS 14, macOS 11, *) {
+ ProgressView()
+ .progressViewStyle(CircularProgressViewStyle())
+ } else {
+ Text("Loading")
+ }
+ }
+ Spacer()
+ Button("Go") {
+ if let url = URL(string: address) {
+ action = .load(URLRequest(url: url))
+ }
+ }
+ Button(action: {
+ action = .reload
+ }) {
+ if #available(iOS 14, macOS 11, *) {
+ Image(systemName: "arrow.counterclockwise")
+ .imageScale(.large)
+ } else {
+ Text("Reload")
+ }
+ }
+ if state.canGoBack {
+ Button(action: {
+ action = .goBack
+ }) {
+ if #available(iOS 14, macOS 11, *) {
+ Image(systemName: "chevron.left")
+ .imageScale(.large)
+ } else {
+ Text("<")
+ }
+ }
+ }
+ if state.canGoForward {
+ Button(action: {
+ action = .goForward
+ }) {
+ if #available(iOS 14, macOS 11, *) {
+ Image(systemName: "chevron.right")
+ .imageScale(.large)
+ } else {
+ Text(">")
+ }
+ }
+ }
+ }.padding()
+ }
+ 
+ private var errorView: some View {
+ Group {
+ if let error = state.error {
+ Text(error.localizedDescription)
+ .foregroundColor(.red)
+ }
+ }
+ }
+ }
+ 
+ struct WebView_Previews: PreviewProvider {
+ static var previews: some View {
+ WebViewTest()
+ }
+ }
+ */
