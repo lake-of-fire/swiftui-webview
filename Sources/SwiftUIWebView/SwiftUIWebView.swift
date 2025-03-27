@@ -14,6 +14,12 @@ public extension EnvironmentValues {
     }
 }
 
+#if os(iOS)
+public typealias BuildMenuType = (UIMenuBuilder) -> Void
+#elseif os(macOS)
+public typealias BuildMenuType = (Any) -> Void
+#endif
+
 public struct WebViewState: Equatable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -346,7 +352,7 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        //        debugPrint("# didFinish nav", webView.url)
+//                debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -505,7 +511,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
-        //        debugPrint("# WebViewNavigator.load(...)", request.url)
+//                debugPrint("# WebViewNavigator.load(...)", request.url)
         if let url = request.url, url.isFileURL {
             webView.loadFileURL(url, allowingReadAccessTo: url)
         } else {
@@ -514,7 +520,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
-        //        debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+//                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView = webView else { return }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
@@ -890,7 +896,7 @@ fileprivate let kUpArrowKeyCode:    UInt16  = 126
 
 public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
-    var buildMenu: ((UIMenuBuilder) -> Void)?
+    var buildMenu: BuildMenuType?
 #endif
     
 #if os(macOS)
@@ -985,7 +991,7 @@ public struct WebView: UIViewControllerRepresentable {
     let onNavigationFinished: ((WebViewState) -> Void)?
     let onNavigationFailed: ((WebViewState) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
-    let buildMenu: ((UIMenuBuilder) -> Void)?
+    let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
@@ -1019,7 +1025,7 @@ public struct WebView: UIViewControllerRepresentable {
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
-                buildMenu: ((UIMenuBuilder) -> Void)? = nil,
+                buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil
     ) {
@@ -1273,7 +1279,7 @@ public struct WebView: NSViewRepresentable {
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
-                buildMenu: ((Any) -> Void)? = nil,
+                buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil
     ) {
