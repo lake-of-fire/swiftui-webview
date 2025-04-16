@@ -1079,7 +1079,7 @@ public struct WebView: UIViewControllerRepresentable {
             preferences.allowsContentJavaScript = config.javaScriptEnabled
             
             let configuration = WKWebViewConfiguration()
-            configuration.applicationNameForUserAgent = "Safari/604.1"
+            configuration.applicationNameForUserAgent = userAgent
             configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
             //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
             //            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
@@ -1328,7 +1328,7 @@ public struct WebView: NSViewRepresentable {
         //        preferences.setValue(true, forKey: "developerExtrasEnabled") // Wasn't working - revisit, because it would be great to have.
         
         let configuration = WKWebViewConfiguration()
-        configuration.applicationNameForUserAgent = "Safari/604.1"
+        configuration.applicationNameForUserAgent = userAgent
         configuration.defaultWebpagePreferences = preferences
         configuration.websiteDataStore = WKWebsiteDataStore.default()
         // For private mode later:
@@ -1426,6 +1426,11 @@ public struct WebView: NSViewRepresentable {
 #endif
 
 extension WebView {
+    var userAgent: String {
+//        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+        return "Version/18.4 Safari/605.1.15"
+    }
+    
     @MainActor
     func refreshDarkModeSetting(webView: WKWebView) {
 #if os(iOS)
