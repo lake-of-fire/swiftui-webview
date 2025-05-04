@@ -254,6 +254,7 @@ public class WebViewCoordinator: NSObject {
         if let error = error {
             newState.error = error
         }
+//        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
         return newState
     }
