@@ -315,8 +315,19 @@ extension WebViewCoordinator: WKScriptMessageHandler {
     }
 }
 
-#if os(macOS)
 extension WebViewCoordinator: WKUIDelegate {
+    /// Suppress `target=_blank` and load in same view
+    /// See: https://nemecek.be/blog/1/how-to-open-target_blank-links-in-wkwebview-in-ios
+    public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let frame = navigationAction.targetFrame,
+           frame.isMainFrame {
+            return nil
+        }
+        webView.load(navigationAction.request)
+        return nil
+    }
+    
+#if os(macOS)
     public func download(_ download: WKDownload, decideDestinationUsing response: URLResponse, suggestedFilename: String) async -> URL? {
         let urls = FileManager.default.urls(for: .documentDirectory, in: .allDomainsMask)
         // for Japanese names.
@@ -347,8 +358,8 @@ extension WebViewCoordinator: WKUIDelegate {
             openPanel.begin(completionHandler: handleResult)
         }
     }
-}
 #endif
+}
 
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
@@ -482,9 +493,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         
         //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-        if navigationAction.targetFrame?.isMainFrame ?? false {
-            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
-        }
+//        if navigationAction.targetFrame?.isMainFrame ?? false {
+//            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
+//        }
         
         return (.allow, preferences)
     }
