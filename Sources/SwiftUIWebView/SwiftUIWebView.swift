@@ -254,7 +254,7 @@ public class WebViewCoordinator: NSObject {
         if let error = error {
             newState.error = error
         }
-//        debugPrint("# new state:", newState, "old:", webView.state)
+        //        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
         return newState
     }
@@ -266,7 +266,21 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             webView.drawsBackground = !hasBackground
             return
         } else if message.name == "swiftUIWebViewLocationChanged" {
-            webView.needsHistoryRefresh = true
+            guard let urlString = message.body as? String,
+                  let newURL = URL(string: urlString),
+                  let wk = navigator.webView else { return }
+            
+            Task { @MainActor in
+                let newState = setLoading(
+                    webView.state.isLoading,
+                    pageURL: newURL,
+                    canGoBack: wk.canGoBack,
+                    canGoForward: wk.canGoForward,
+                    backList: wk.backForwardList.backList,
+                    forwardList: wk.backForwardList.forwardList
+                )
+                onURLChanged?(newState)
+            }
             return
         } else if message.name == "swiftUIWebViewImageUpdated" {
             guard let body = message.body as? [String: Any] else { return }
@@ -364,7 +378,7 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-//                debugPrint("# didFinish nav", webView.url)
+        //                debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -419,7 +433,17 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         scriptCaller?.removeAllMultiTargetFrames()
-        setLoading(false, isProvisionallyNavigating: false, error: error)
+        let newState = setLoading(
+            false,
+            pageURL: webView.url,
+            isProvisionallyNavigating: false,
+            canGoBack: webView.canGoBack,
+            canGoForward: webView.canGoForward,
+            backList: webView.backForwardList.backList,
+            forwardList: webView.backForwardList.forwardList,
+            error: error
+        )
+        onURLChanged?(newState)
     }
     
     @MainActor
@@ -455,13 +479,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        setLoading(
+        let newState = setLoading(
             true,
             isProvisionallyNavigating: true,
             canGoBack: webView.canGoBack,
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
+        onURLChanged?(newState)
     }
     
     @MainActor
@@ -493,9 +518,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         
         //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-//        if navigationAction.targetFrame?.isMainFrame ?? false {
-//            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
-//        }
+        //        if navigationAction.targetFrame?.isMainFrame ?? false {
+        //            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
+        //        }
         
         return (.allow, preferences)
     }
@@ -523,7 +548,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
-//                debugPrint("# WebViewNavigator.load(...)", request.url)
+        //                debugPrint("# WebViewNavigator.load(...)", request.url)
         if let url = request.url, url.isFileURL {
             webView.loadFileURL(url, allowingReadAccessTo: url)
         } else {
@@ -532,7 +557,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
-//                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+        //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView = webView else { return }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
@@ -585,13 +610,19 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
+        let primitiveArguments: [String: Any]? = arguments?.mapValues {
+            if let set = $0 as? Set<AnyHashable> {
+                return Array(set)
+            }
+            return $0
+        }
         do {
-            let result = try await asyncCaller(js, arguments, frame, world)
+            let result = try await asyncCaller(js, primitiveArguments, frame, world)
             if duplicateInMultiTargetFrames {
                 for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
                     if targetFrame == frame { continue }
                     do {
-                        _ = try await asyncCaller(js, arguments, targetFrame, world)
+                        _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
                     } catch {
                         if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
                             multiTargetFrames.removeValue(forKey: uuid)
@@ -604,6 +635,27 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
             try await completionHandler?(.success(result))
         } catch {
             try? await completionHandler?(.failure(error))
+        }
+    }
+    
+    @MainActor
+    public func evaluateJavaScript(
+        _ js: String,
+        arguments: [String: Any]? = nil,
+        in frame: WKFrameInfo? = nil,
+        duplicateInMultiTargetFrames: Bool = false,
+        in world: WKContentWorld? = .page
+    ) async throws -> Any? {
+        try await withCheckedThrowingContinuation { continuation in
+            Task {
+                await self.evaluateJavaScript(js, arguments: arguments, in: frame, duplicateInMultiTargetFrames: duplicateInMultiTargetFrames, in: world) { result in
+                    do {
+                        continuation.resume(returning: try result.get())
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
         }
     }
     
@@ -1016,7 +1068,6 @@ public struct WebView: UIViewControllerRepresentable {
     private var userContentController = WKUserContentController()
     //    @State fileprivate var isWarm = false
     @State fileprivate var drawsBackground = false
-    @State fileprivate var needsHistoryRefresh = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
     
     private static var webViewCache: [String: EnhancedWKWebView] = [:]
@@ -1208,20 +1259,6 @@ public struct WebView: UIViewControllerRepresentable {
         
         //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
         
-        if needsHistoryRefresh {
-            var newState = state
-            newState.isLoading = state.isLoading
-            newState.isProvisionallyNavigating = state.isProvisionallyNavigating
-            newState.canGoBack = controller.webView.canGoBack
-            newState.canGoForward = controller.webView.canGoForward
-            newState.backList = controller.webView.backForwardList.backList
-            newState.forwardList = controller.webView.backForwardList.forwardList
-            //            DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) {
-            Task { @MainActor in
-                state = newState
-                needsHistoryRefresh = false
-            }
-        }
         
         controller.webView.buildMenu = buildMenu
         controller.webView.scrollView.bounces = bounces
@@ -1269,7 +1306,6 @@ public struct WebView: NSViewRepresentable {
     @Environment(\.webViewMessageHandlers) private var webViewMessageHandlers
     
     //    @State fileprivate var isWarm = false
-    @State fileprivate var needsHistoryRefresh = false
     @State fileprivate var drawsBackground = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
     
@@ -1413,20 +1449,6 @@ public struct WebView: NSViewRepresentable {
         
         uiView.setValue(drawsBackground, forKey: "drawsBackground")
         
-        if needsHistoryRefresh {
-            var newState = state
-            newState.isLoading = state.isLoading
-            newState.isProvisionallyNavigating = state.isProvisionallyNavigating
-            newState.canGoBack = uiView.canGoBack
-            newState.canGoForward = uiView.canGoForward
-            newState.backList = uiView.backForwardList.backList
-            newState.forwardList = uiView.backForwardList.forwardList
-            Task { @MainActor in
-                //            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-                state = newState
-                needsHistoryRefresh = false
-            }
-        }
     }
     
     public static func dismantleNSView(_ nsView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
@@ -1439,7 +1461,7 @@ public struct WebView: NSViewRepresentable {
 
 extension WebView {
     var userAgent: String {
-//        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
+        //        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
         return "Version/18.4 Safari/605.1.15"
     }
     
