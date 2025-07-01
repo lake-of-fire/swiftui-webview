@@ -3,6 +3,17 @@ import WebKit
 import UniformTypeIdentifiers
 import ZIPFoundation
 
+public struct WebViewMessageHandlersKey: EnvironmentKey {
+    public static let defaultValue: WebViewMessageHandlers = .init()
+}
+
+public extension EnvironmentValues {
+    var webViewMessageHandlers: WebViewMessageHandlers {
+        get { self[WebViewMessageHandlersKey.self] }
+        set { self[WebViewMessageHandlersKey.self] = newValue }
+    }
+}
+
 public class WebViewMessageHandlers: Identifiable, ObservableObject {
     public init() { }
     
