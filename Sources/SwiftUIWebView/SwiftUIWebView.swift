@@ -323,6 +323,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         
         guard let messageHandler = messageHandlers[message.name] else { return }
         let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
+//        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
         Task {
             await messageHandler(message)
         }
@@ -595,16 +596,16 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         return lhs.id == rhs.id
     }
     
-    @MainActor
+//    @MainActor
     public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
-        guard let caller = caller else {
+        guard let caller else {
             print("No caller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
         caller(js, completionHandler)
     }
     
-    @MainActor
+//    @MainActor
     public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
@@ -638,7 +639,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         }
     }
     
-    @MainActor
+//    @MainActor
     public func evaluateJavaScript(
         _ js: String,
         arguments: [String: Any]? = nil,
@@ -1226,6 +1227,7 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world in
             let world = world ?? .defaultClient
+//            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args = args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
