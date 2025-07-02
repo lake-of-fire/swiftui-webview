@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
 import ZIPFoundation
+import OrderedCollections
 
 public struct WebViewMessageHandlersKey: EnvironmentKey {
     public static let defaultValue: WebViewMessageHandlers = .init()
@@ -14,16 +15,16 @@ public extension EnvironmentValues {
     }
 }
 
-public class WebViewMessageHandlers: Identifiable, ObservableObject {
+public class WebViewMessageHandlers: Identifiable {
     public init() { }
     
-    internal var handlers = [String: (WebViewMessage) async -> Void]()
+    public var handlers = OrderedDictionary<String, (WebViewMessage) async -> Void>()
     
     public func add(_ name: String, handler: @escaping (WebViewMessage) async -> Void) {
         handlers[name] = handler
     }
     
-    public func add(handlers: [String: (WebViewMessage) async -> Void]) {
+    public func add(handlers: OrderedDictionary<String, (WebViewMessage) async -> Void>) {
         self.handlers.merge(handlers) { (old, new) in
             return { message in
                 await old(message)
@@ -31,7 +32,7 @@ public class WebViewMessageHandlers: Identifiable, ObservableObject {
             }
         }
     }
-
+    
     public func merge(handlers: WebViewMessageHandlers) {
         add(handlers: handlers.handlers)
     }
@@ -177,6 +178,7 @@ public class WebViewCoordinator: NSObject {
     // UIScrollViewDelegate
     internal var lastContentOffset: CGFloat = 0
     internal var accumulatedScrollOffset: CGFloat = 0
+    internal var lastEnvHandlerNames: OrderedSet<String>? = nil
     
     var onNavigationCommitted: ((WebViewState) -> Void)?
     var onNavigationFinished: ((WebViewState) -> Void)?
@@ -346,7 +348,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         
         guard let messageHandler = messageHandlers.handlers[message.name] else { return }
         let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
-//        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
+        //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
         Task {
             await messageHandler(message)
         }
@@ -619,7 +621,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         return lhs.id == rhs.id
     }
     
-//    @MainActor
+    //    @MainActor
     public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
         guard let caller else {
             print("No caller set for WebViewScriptCaller \(id)") // TODO: Error
@@ -628,7 +630,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         caller(js, completionHandler)
     }
     
-//    @MainActor
+    //    @MainActor
     public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
@@ -662,7 +664,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         }
     }
     
-//    @MainActor
+    //    @MainActor
     public func evaluateJavaScript(
         _ js: String,
         arguments: [String: Any]? = nil,
@@ -1087,7 +1089,7 @@ public struct WebView: UIViewControllerRepresentable {
     let persistentWebViewID: String?
     //    let onWarm: (() async -> Void)?
     
-    @EnvironmentObject private var webViewMessageHandlers: WebViewMessageHandlers
+    @Environment(\.webViewMessageHandlers) internal var webViewMessageHandlers
     
     private var userContentController = WKUserContentController()
     //    @State fileprivate var isWarm = false
@@ -1153,7 +1155,11 @@ public struct WebView: UIViewControllerRepresentable {
     }
     
     @MainActor
-    private func makeWebView(id: String?, config: WebViewConfig, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> EnhancedWKWebView {
+    private func makeWebView(
+        id: String?,
+        config: WebViewConfig,
+        coordinator: WebViewCoordinator
+    ) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
         if let id = id {
             web = Self.webViewCache[id] // it is UI thread so safe to access static
@@ -1200,12 +1206,6 @@ public struct WebView: UIViewControllerRepresentable {
         }
         guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
         
-        for messageHandlerName in messageHandlerNamesToRegister {
-            if coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            web.configuration.userContentController.add(coordinator, contentWorld: .page, name: messageHandlerName)
-            coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
-        
         web.buildMenu = buildMenu
         
         web.scrollView.delegate = coordinator
@@ -1218,7 +1218,11 @@ public struct WebView: UIViewControllerRepresentable {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
         //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
-        let webView = makeWebView(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: Set(webViewMessageHandlers.handlers.keys))
+        let webView = makeWebView(
+            id: persistentWebViewID,
+            config: config,
+            coordinator: context.coordinator
+        )
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
         
         refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
@@ -1250,7 +1254,7 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world in
             let world = world ?? .defaultClient
-//            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
+            //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args = args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
@@ -1258,7 +1262,7 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         context.coordinator.textSelection = $textSelection
-
+        
         refreshDarkModeSetting(webView: webView)
         
         // In case we retrieved a cached web view that is already warm but we don't know it.
@@ -1275,7 +1279,8 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.onNavigationFinished = onNavigationFinished
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
-
+        
+        refreshMessageHandlers(userContentController: controller.webView.configuration.userContentController, context: context)
         refreshDarkModeSetting(webView: controller.webView)
         //        refreshMessageHandlers(context: context)
         //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
@@ -1461,7 +1466,7 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.onURLChanged = onURLChanged
         
         //        refreshMessageHandlers(context: context)
-        //        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
+        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
         //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
         //        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
@@ -1521,11 +1526,24 @@ extension WebView {
         }
     }
     
+    /// Refreshes the WKScriptMessageHandlers for the WebView.
+    /// - Note: `systemMessageHandlers` are constant and never change.
+    ///         Only the environment's handler names are dynamic.
+    /// - Performance: This function avoids unnecessary Set creation or handler updates if nothing changed.
     @MainActor
     func refreshMessageHandlers(userContentController: WKUserContentController, context: Context) {
-        let envHandlerNames = Set(webViewMessageHandlers.handlers.keys)
+        // systemMessageHandlers never change, so only envHandlerNames matter.
+        let envHandlerNames = webViewMessageHandlers.handlers.keys
+        // Early exit if environment handler keys haven't changed
+        if context.coordinator.lastEnvHandlerNames == envHandlerNames {
+            return
+        }
+        context.coordinator.lastEnvHandlerNames = envHandlerNames
+        
+        // Only create sets if changes detected.
         let requiredHandlers = Set(Self.systemMessageHandlers).union(envHandlerNames)
         
+        // Add any missing handlers.
         for messageHandlerName in requiredHandlers {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
@@ -1534,8 +1552,10 @@ extension WebView {
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
         
+        // Remove any no-longer-needed handlers.
         for missing in context.coordinator.registeredMessageHandlerNames.subtracting(requiredHandlers) {
             userContentController.removeScriptMessageHandler(forName: missing)
+            context.coordinator.registeredMessageHandlerNames.remove(missing)
         }
     }
     
@@ -1584,15 +1604,13 @@ extension WebView {
         TextSelectionUserScript().userScript,
     ]
     
-    fileprivate static var systemMessageHandlers: [String] {
-        [
-            "swiftUIWebViewBackgroundStatus",
-            "swiftUIWebViewLocationChanged",
-            "swiftUIWebViewImageUpdated",
-            "swiftUIWebViewPageIconUpdated",
-            "swiftUIWebViewTextSelection",
-        ]
-    }
+    fileprivate static let systemMessageHandlers: [String] = [
+        "swiftUIWebViewBackgroundStatus",
+        "swiftUIWebViewLocationChanged",
+        "swiftUIWebViewImageUpdated",
+        "swiftUIWebViewPageIconUpdated",
+        "swiftUIWebViewTextSelection",
+    ]
 }
 
 
