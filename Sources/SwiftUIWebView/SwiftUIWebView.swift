@@ -642,25 +642,34 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
             }
             return $0
         }
+        var primaryError: Error?
+        var result: Any?
+        
         do {
-            let result = try await asyncCaller(js, primitiveArguments, frame, world)
-            if duplicateInMultiTargetFrames {
-                for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-                    if targetFrame == frame { continue }
-                    do {
-                        _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
-                    } catch {
-                        if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                            multiTargetFrames.removeValue(forKey: uuid)
-                        } else {
-                            print(error)
-                        }
+            result = try await asyncCaller(js, primitiveArguments, frame, world)
+        } catch {
+            primaryError = error
+        }
+        
+        if duplicateInMultiTargetFrames {
+            for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                if targetFrame == frame { continue }
+                do {
+                    _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
+                } catch {
+                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
+                        multiTargetFrames.removeValue(forKey: uuid)
+                    } else {
+                        print(error)
                     }
                 }
             }
-            try await completionHandler?(.success(result))
-        } catch {
-            try? await completionHandler?(.failure(error))
+        }
+        
+        if let primaryError {
+            try? await completionHandler?(.failure(primaryError))
+        } else {
+            try? await completionHandler?(.success(result))
         }
     }
     
