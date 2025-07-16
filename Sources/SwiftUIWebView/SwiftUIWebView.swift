@@ -4,6 +4,11 @@ import UniformTypeIdentifiers
 import ZIPFoundation
 import OrderedCollections
 
+@globalActor
+public actor WebViewActor {
+    public static var shared = WebViewActor()
+}
+
 public struct WebViewMessageHandlersKey: EnvironmentKey {
     public static let defaultValue: WebViewMessageHandlers = .init()
 }
@@ -458,7 +463,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        scriptCaller?.removeAllMultiTargetFrames()
+        Task { @WebViewActor in
+            scriptCaller?.removeAllMultiTargetFrames()
+        }
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -479,7 +486,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        scriptCaller?.removeAllMultiTargetFrames()
+        Task { @WebViewActor in
+            scriptCaller?.removeAllMultiTargetFrames()
+        }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         
         extractPageState(webView: webView)
@@ -489,7 +498,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        scriptCaller?.removeAllMultiTargetFrames()
+        Task { @WebViewActor in
+            scriptCaller?.removeAllMultiTargetFrames()
+        }
         var newState = setLoading(
             true,
             pageURL: webView.url,
@@ -531,7 +542,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             // TODO: this is missing all our config.userScripts, make sure it inherits those...
             self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
             
-            scriptCaller?.removeAllMultiTargetFrames()
+            await scriptCaller?.removeAllMultiTargetFrames()
             var newState = self.webView.state
             newState.pageURL = mainDocumentURL
             newState.pageTitle = nil
@@ -609,12 +620,17 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 }
 
+enum ScriptCallerError: Error {
+    case evaluationTimedOut
+}
+
 public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> Any?)? = nil
     
+    @WebViewActor
     private var multiTargetFrames = [String: WKFrameInfo]()
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
@@ -627,6 +643,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
             print("No caller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
+        debugPrint("# eval sync", js.prefix(100))
         caller(js, completionHandler)
     }
     
@@ -634,6 +651,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
+            try? await completionHandler?(.failure(ScriptCallerError.evaluationTimedOut))
             return
         }
         let primitiveArguments: [String: Any]? = arguments?.mapValues {
@@ -645,6 +663,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         var primaryError: Error?
         var result: Any?
         
+        debugPrint("# eval async", js.prefix(100))
         do {
             result = try await asyncCaller(js, primitiveArguments, frame, world)
         } catch {
@@ -652,13 +671,15 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         }
         
         if duplicateInMultiTargetFrames {
-            for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+            for (uuid, targetFrame) in await multiTargetFrames.filter({ !$0.value.isMainFrame }) {
                 if targetFrame == frame { continue }
                 do {
                     _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
                 } catch {
                     if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                        multiTargetFrames.removeValue(forKey: uuid)
+                        await { @WebViewActor in
+                            multiTargetFrames.removeValue(forKey: uuid)
+                        }()
                     } else {
                         print(error)
                     }
@@ -695,7 +716,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     }
     
     /// Returns whether the frame was already added.
-    @MainActor
+    @WebViewActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String) -> Bool {
         var inserted = true
         if multiTargetFrames.keys.contains(uuid) && multiTargetFrames[uuid]?.request.url == frame.request.url {
@@ -705,7 +726,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         return inserted
     }
     
-    @MainActor
+    @WebViewActor
     public func removeAllMultiTargetFrames() {
         multiTargetFrames.removeAll()
     }
@@ -720,6 +741,11 @@ fileprivate struct WebViewBackgroundStatusUserScript {
     init() {
         let contents = """
 (function() {
+    const isEbook = window.top.location.origin.startsWith('ebook://');
+    if (isEbook) {
+        return;
+    }
+
     let lastReportedBackground = null;
 
     function checkBodyBackground() {
@@ -916,9 +942,7 @@ fileprivate struct TextSelectionUserScript {
             
                 function sendSelectedTextAndHTML() {
                     const selection = window.getSelection();
-                    const selectedText = selection.toString();
-            
-                    if (!selection || selection.rangeCount === 0 || selectedText === '') {
+                    if (!selection || selection.rangeCount === 0) {
                         if (lastSentText !== null) {
                             window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
                                 text: null,
@@ -927,6 +951,18 @@ fileprivate struct TextSelectionUserScript {
                         }
                         return;
                     }
+            
+                    const selectedText = selection.toString();
+                    if (selectedText === '') {
+                        if (lastSentText !== null) {
+                            window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
+                                text: null,
+                            });
+                            lastSentText = null;
+                        }
+                        return;
+                    }
+            
                     if (selectedText === lastSentText) {
                         return;
                     }
@@ -1475,7 +1511,7 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.onURLChanged = onURLChanged
         
         //        refreshMessageHandlers(context: context)
-        refreshMessageHandlers(userContentController: context.webView?.configuration.userContentController, context: context)
+        refreshMessageHandlers(userContentController: uiView.configuration.userContentController, context: context)
         //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
         //        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
