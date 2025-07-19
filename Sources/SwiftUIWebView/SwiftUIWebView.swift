@@ -20,26 +20,40 @@ public extension EnvironmentValues {
     }
 }
 
-public class WebViewMessageHandlers: Identifiable {
-    public init() { }
+public struct WebViewMessageHandlers: Sendable {
+    public let handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void>
     
-    public var handlers = OrderedDictionary<String, (WebViewMessage) async -> Void>()
-    
-    public func add(_ name: String, handler: @escaping (WebViewMessage) async -> Void) {
-        handlers[name] = handler
+    public init(_ handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void> = [:]) {
+        self.handlers = handlers
     }
     
-    public func add(handlers: OrderedDictionary<String, (WebViewMessage) async -> Void>) {
-        self.handlers.merge(handlers) { (old, new) in
-            return { message in
-                await old(message)
-                await new(message)
+    public init(_ pairs: [(String, @Sendable (WebViewMessage) async -> Void)]) {
+        self.init(OrderedDictionary(uniqueKeysWithValues: pairs))
+    }
+    
+    public func composing(_ other: WebViewMessageHandlers) -> WebViewMessageHandlers {
+        var merged = handlers
+        for (k, h) in other.handlers {
+            if let existing = merged[k] {
+                merged[k] = { @Sendable message in
+                    await existing(message)
+                    await h(message)
+                }
+            } else {
+                merged[k] = h
             }
         }
+        return WebViewMessageHandlers(merged)
     }
     
-    public func merge(handlers: WebViewMessageHandlers) {
-        add(handlers: handlers.handlers)
+    public static func + (lhs: WebViewMessageHandlers, rhs: WebViewMessageHandlers) -> WebViewMessageHandlers {
+        lhs.composing(rhs)
+    }
+    
+    public func updating(_ name: String, handler: @Sendable @escaping (WebViewMessage) async -> Void) -> WebViewMessageHandlers {
+        var copy = handlers
+        copy[name] = handler
+        return WebViewMessageHandlers(copy)
     }
 }
 
@@ -49,7 +63,7 @@ public typealias BuildMenuType = (UIMenuBuilder) -> Void
 public typealias BuildMenuType = (Any) -> Void
 #endif
 
-public struct WebViewState: Equatable {
+public struct WebViewState: Equatable, Sendable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
     public internal(set) var pageURL: URL
@@ -105,11 +119,11 @@ public struct WebViewMessage: Equatable {
     }
 }
 
-public struct WebViewUserScript: Equatable, Hashable {
+public struct WebViewUserScript: Equatable, Hashable, Sendable {
     public let source: String
     public let injectionTime: WKUserScriptInjectionTime
     public let isForMainFrameOnly: Bool
-    public let world: WKContentWorld
+    public let world: WKContentWorld?
     public let allowedDomains: Set<String>
     
     @MainActor
@@ -118,7 +132,7 @@ public struct WebViewUserScript: Equatable, Hashable {
             source: source,
             injectionTime: injectionTime,
             forMainFrameOnly: isForMainFrameOnly,
-            in: world
+            in: world ?? .page
         )
     }()
     
@@ -134,7 +148,7 @@ public struct WebViewUserScript: Equatable, Hashable {
         source: String,
         injectionTime: WKUserScriptInjectionTime,
         forMainFrameOnly: Bool,
-        in world: WKContentWorld = .defaultClient,
+        in world: WKContentWorld? = nil,
         allowedDomains: Set<String> = Set()
     ) {
         self.source = source
@@ -153,7 +167,7 @@ public struct WebViewUserScript: Equatable, Hashable {
     }
 }
 
-public enum DarkModeSetting: String, CaseIterable, Identifiable {
+public enum DarkModeSetting: String, CaseIterable, Identifiable, Sendable {
     case system
     case darkModeOverride
     
@@ -169,6 +183,7 @@ public enum DarkModeSetting: String, CaseIterable, Identifiable {
     }
 }
 
+@MainActor
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
     
@@ -234,20 +249,24 @@ public class WebViewCoordinator: NSObject {
         urlObservation?.invalidate()
     }
     
+    @MainActor
     func setWebView(_ webView: WKWebView) {
         navigator.webView = webView
         
         urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let maybeNewURL = change.newValue, let newURL = maybeNewURL, newURL != webView.url else { return }
-            let newState = setLoading(
-                false,
-                pageURL: newURL,
-                canGoBack: webView.canGoBack,
-                canGoForward: webView.canGoForward,
-                backList: webView.backForwardList.backList,
-                forwardList: webView.backForwardList.forwardList)
-            onURLChanged?(newState)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let maybeNewURL = change.newValue, let newURL = maybeNewURL, newURL != webView.url else { return }
+                let newState = setLoading(
+                    false,
+                    pageURL: newURL,
+                    canGoBack: webView.canGoBack,
+                    canGoForward: webView.canGoForward,
+                    backList: webView.backForwardList.backList,
+                    forwardList: webView.backForwardList.forwardList)
+                onURLChanged?(newState)
+            }
         }
     }
     
@@ -463,8 +482,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        Task { @WebViewActor in
-            scriptCaller?.removeAllMultiTargetFrames()
+        Task {
+            await scriptCaller?.removeAllMultiTargetFrames()
         }
         let newState = setLoading(
             false,
@@ -486,8 +505,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        Task { @WebViewActor in
-            scriptCaller?.removeAllMultiTargetFrames()
+        Task {
+            await scriptCaller?.removeAllMultiTargetFrames()
         }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         
@@ -498,8 +517,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        Task { @WebViewActor in
-            scriptCaller?.removeAllMultiTargetFrames()
+        Task {
+            await scriptCaller?.removeAllMultiTargetFrames()
         }
         var newState = setLoading(
             true,
@@ -568,6 +587,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
 }
 
+@MainActor
 public class WebViewNavigator: NSObject, ObservableObject {
     weak var webView: WKWebView? {
         didSet {
@@ -628,9 +648,9 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> Any?)? = nil
+    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> sending Any?)? = nil
     
-    @WebViewActor
+    @MainActor
     private var multiTargetFrames = [String: WKFrameInfo]()
     
     public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
@@ -643,12 +663,19 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
             print("No caller set for WebViewScriptCaller \(id)") // TODO: Error
             return
         }
-        debugPrint("# eval sync", js.prefix(100))
+        //        debugPrint("# eval sync", js.prefix(100))
         caller(js, completionHandler)
     }
     
     //    @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, in frame: WKFrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: WKContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
+    public func evaluateJavaScript(
+        _ js: String,
+        arguments: [String: Any]? = nil,
+        in frame: WKFrameInfo? = nil,
+        duplicateInMultiTargetFrames: Bool = false,
+        in world: WKContentWorld? = nil,
+        completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil
+    ) async {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
             try? await completionHandler?(.failure(ScriptCallerError.evaluationTimedOut))
@@ -663,7 +690,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         var primaryError: Error?
         var result: Any?
         
-        debugPrint("# eval async", js.prefix(100))
+        //        debugPrint("# eval async", js.prefix(100))
         do {
             result = try await asyncCaller(js, primitiveArguments, frame, world)
         } catch {
@@ -671,20 +698,21 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         }
         
         if duplicateInMultiTargetFrames {
-            for (uuid, targetFrame) in await multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-                if targetFrame == frame { continue }
-                do {
-                    _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
-                } catch {
-                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                        await { @WebViewActor in
+            await { @MainActor [weak self] in
+                guard let self else { return }
+                for (uuid, targetFrame) in await multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                    if targetFrame == frame { continue }
+                    do {
+                        _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
+                    } catch {
+                        if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
                             multiTargetFrames.removeValue(forKey: uuid)
-                        }()
-                    } else {
-                        print(error)
+                        } else {
+                            print(error)
+                        }
                     }
                 }
-            }
+            }()
         }
         
         if let primaryError {
@@ -700,7 +728,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         arguments: [String: Any]? = nil,
         in frame: WKFrameInfo? = nil,
         duplicateInMultiTargetFrames: Bool = false,
-        in world: WKContentWorld? = .page
+        in world: WKContentWorld? = nil
     ) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             Task {
@@ -716,7 +744,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     }
     
     /// Returns whether the frame was already added.
-    @WebViewActor
+    @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String) -> Bool {
         var inserted = true
         if multiTargetFrames.keys.contains(uuid) && multiTargetFrames[uuid]?.request.url == frame.request.url {
@@ -726,7 +754,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         return inserted
     }
     
-    @WebViewActor
+    @MainActor
     public func removeAllMultiTargetFrames() {
         multiTargetFrames.removeAll()
     }
@@ -735,6 +763,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     }
 }
 
+@MainActor
 fileprivate struct WebViewBackgroundStatusUserScript {
     let userScript: WebViewUserScript
     
@@ -799,10 +828,16 @@ fileprivate struct WebViewBackgroundStatusUserScript {
     }
 })()
 """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
     }
 }
 
+@MainActor
 fileprivate struct LocationChangeUserScript {
     let userScript: WebViewUserScript
     
@@ -829,10 +864,16 @@ window.addEventListener('swiftUIWebViewLocationChanged', function () {
     }
 });
 """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
     }
 }
 
+@MainActor
 fileprivate struct ImageChangeUserScript {
     let userScript: WebViewUserScript
     
@@ -859,10 +900,16 @@ new MutationObserver(function(mutations) {
     }
 }).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
 """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
     }
 }
 
+@MainActor
 fileprivate struct PageIconChangeUserScript {
     let userScript: WebViewUserScript
     
@@ -928,10 +975,16 @@ fileprivate struct PageIconChangeUserScript {
     }
 })();
 """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page)
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
     }
 }
 
+@MainActor
 fileprivate struct TextSelectionUserScript {
     let userScript: WebViewUserScript
     
@@ -975,11 +1028,16 @@ fileprivate struct TextSelectionUserScript {
                 document.addEventListener('selectionchange', sendSelectedTextAndHTML);
             })(); 
             """
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: false, in: .page)
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: .page
+        )
     }
 }
 
-public struct WebViewConfig {
+public struct WebViewConfig: Sendable {
     public static let `default` = WebViewConfig()
     
     public let javaScriptEnabled: Bool
@@ -1298,7 +1356,7 @@ public struct WebView: UIViewControllerRepresentable {
         }
         context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world in
-            let world = world ?? .defaultClient
+            let world = world ?? .page
             //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args = args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
