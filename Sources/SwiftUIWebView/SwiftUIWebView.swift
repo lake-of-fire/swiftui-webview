@@ -644,18 +644,19 @@ enum ScriptCallerError: Error {
     case evaluationTimedOut
 }
 
-public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
+@MainActor
+public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> sending Any?)? = nil
+    var caller: ((String, ((sending Any?, Error?) -> Void)?) -> Void)? = nil
+    var asyncCaller: ((String, sending [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> sending Any?)? = nil
     
     @MainActor
     private var multiTargetFrames = [String: WKFrameInfo]()
     
-    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
-        return lhs.id == rhs.id
-    }
+//    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
+//        return lhs.id == rhs.id
+//    }
     
     //    @MainActor
     public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
@@ -668,13 +669,13 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     }
     
     //    @MainActor
-    public func evaluateJavaScript(
+    private func evaluateJavaScript(
         _ js: String,
-        arguments: [String: Any]? = nil,
+        arguments: sending [String: Any]? = nil,
         in frame: WKFrameInfo? = nil,
         duplicateInMultiTargetFrames: Bool = false,
         in world: WKContentWorld? = nil,
-        completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil
+        completionHandler: ((sending Result<Any?, any Error>) async throws -> Void)? = nil
     ) async {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
@@ -692,6 +693,7 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
         
         //        debugPrint("# eval async", js.prefix(100))
         do {
+//            result = try await asyncCaller(js, primitiveArguments, frame, world)
             result = try await asyncCaller(js, primitiveArguments, frame, world)
         } catch {
             primaryError = error
@@ -723,13 +725,14 @@ public class WebViewScriptCaller: Equatable, Identifiable, ObservableObject {
     }
     
     //    @MainActor
+    @discardableResult
     public func evaluateJavaScript(
         _ js: String,
-        arguments: [String: Any]? = nil,
+        arguments: sending [String: Any]? = nil,
         in frame: WKFrameInfo? = nil,
         duplicateInMultiTargetFrames: Bool = false,
         in world: WKContentWorld? = nil
-    ) async throws -> Any? {
+    ) async throws -> sending Any? {
         try await withCheckedThrowingContinuation { continuation in
             Task {
                 await self.evaluateJavaScript(js, arguments: arguments, in: frame, duplicateInMultiTargetFrames: duplicateInMultiTargetFrames, in: world) { result in
