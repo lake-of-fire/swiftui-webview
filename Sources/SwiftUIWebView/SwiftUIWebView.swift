@@ -1344,7 +1344,7 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
             let world = world ?? .page
             //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
-            if let args = args {
+            if let args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
                 let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
@@ -1534,13 +1534,16 @@ public struct WebView: NSViewRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
-        context.coordinator.scriptCaller?.asyncCaller = { (js: String, args: [String: Any]?, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> Any? in
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> Any? in
             let world = world ?? .defaultClient
-            if let args = args {
+            if let args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
-                return try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
+                if result == nil {
+                    return nil
+                }
+                return result as! any Sendable
             }
         }
         
