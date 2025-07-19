@@ -587,8 +587,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
 }
 
-@MainActor
 public class WebViewNavigator: NSObject, ObservableObject {
+    @MainActor
     weak var webView: WKWebView? {
         didSet {
             guard let webView = webView else { return }
@@ -599,10 +599,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
         }
     }
     
+    @MainActor
     public var backForwardList: WKBackForwardList {
         return webView?.backForwardList ?? WKBackForwardList()
     }
     
+    @MainActor
     public func load(_ request: URLRequest) {
         guard let webView = webView else { return }
         //                debugPrint("# WebViewNavigator.load(...)", request.url)
@@ -613,24 +615,29 @@ public class WebViewNavigator: NSObject, ObservableObject {
         }
     }
     
+    @MainActor
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView = webView else { return }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
     
+    @MainActor
     public func reload() {
         webView?.reload()
     }
     
+    @MainActor
     public func go(_ item: WKBackForwardListItem) {
         webView?.go(to: item)
     }
     
+    @MainActor
     public func goBack() {
         webView?.goBack()
     }
     
+    @MainActor
     public func goForward() {
         webView?.goForward()
     }
@@ -648,43 +655,39 @@ enum ScriptCallerError: Error {
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var caller: ((String, ((sending Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, sending [String: Any]?, WKFrameInfo?, WKContentWorld?) async throws -> sending Any?)? = nil
+//    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    var asyncCaller: ( @Sendable
+        (
+            String,
+            [String: any Sendable]?,
+            WKFrameInfo?,
+            WKContentWorld?
+        ) async throws -> sending Any?
+    )? = nil
     
-    @MainActor
     private var multiTargetFrames = [String: WKFrameInfo]()
     
 //    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
 //        return lhs.id == rhs.id
 //    }
-    
+     
     //    @MainActor
-    public func evaluateJavaScript(_ js: String, completionHandler: ((Any?, Error?) -> Void)? = nil) {
-        guard let caller else {
-            print("No caller set for WebViewScriptCaller \(id)") // TODO: Error
-            return
-        }
-        //        debugPrint("# eval sync", js.prefix(100))
-        caller(js, completionHandler)
-    }
-    
-    //    @MainActor
-    private func evaluateJavaScript(
+    @discardableResult
+    public func evaluateJavaScript(
         _ js: String,
-        arguments: sending [String: Any]? = nil,
+        arguments: [String: any Sendable]? = nil,
         in frame: WKFrameInfo? = nil,
         duplicateInMultiTargetFrames: Bool = false,
-        in world: WKContentWorld? = nil,
-        completionHandler: ((sending Result<Any?, any Error>) async throws -> Void)? = nil
-    ) async {
+        in world: WKContentWorld? = nil
+    ) async throws -> sending Any? {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
-            try? await completionHandler?(.failure(ScriptCallerError.evaluationTimedOut))
-            return
+            throw ScriptCallerError.evaluationTimedOut
         }
-        let primitiveArguments: [String: Any]? = arguments?.mapValues {
+        
+        let primitiveArguments: [String: any Sendable]? = arguments?.mapValues {
             if let set = $0 as? Set<AnyHashable> {
-                return Array(set)
+                return Array(set) as! any Sendable
             }
             return $0
         }
@@ -693,7 +696,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         
         //        debugPrint("# eval async", js.prefix(100))
         do {
-//            result = try await asyncCaller(js, primitiveArguments, frame, world)
+            //            result = try await asyncCaller(js, primitiveArguments, frame, world)
             result = try await asyncCaller(js, primitiveArguments, frame, world)
         } catch {
             primaryError = error
@@ -716,34 +719,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 }
             }()
         }
-        
-        if let primaryError {
-            try? await completionHandler?(.failure(primaryError))
-        } else {
-            try? await completionHandler?(.success(result))
+        guard let result else {
+            return nil
         }
-    }
-    
-    //    @MainActor
-    @discardableResult
-    public func evaluateJavaScript(
-        _ js: String,
-        arguments: sending [String: Any]? = nil,
-        in frame: WKFrameInfo? = nil,
-        duplicateInMultiTargetFrames: Bool = false,
-        in world: WKContentWorld? = nil
-    ) async throws -> sending Any? {
-        try await withCheckedThrowingContinuation { continuation in
-            Task {
-                await self.evaluateJavaScript(js, arguments: arguments, in: frame, duplicateInMultiTargetFrames: duplicateInMultiTargetFrames, in: world) { result in
-                    do {
-                        continuation.resume(returning: try result.get())
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
-        }
+        // Safe force-unwrap because all plist types are Sendable.
+        // swift-format-ignore: NeverForceUnwrap
+        return result as! any Sendable
     }
     
     /// Returns whether the frame was already added.
@@ -1357,14 +1338,20 @@ public struct WebView: UIViewControllerRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        context.coordinator.scriptCaller?.caller = { webView.evaluateJavaScript($0, completionHandler: $1) }
-        context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world in
+//        context.coordinator.scriptCaller?.caller = {
+//            webView.evaluateJavaScript($0, completionHandler: $1)
+//        }
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
             let world = world ?? .page
             //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args = args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
-                return try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
+                if result == nil {
+                    return nil
+                }
+                return result as! any Sendable
             }
         }
         context.coordinator.textSelection = $textSelection
