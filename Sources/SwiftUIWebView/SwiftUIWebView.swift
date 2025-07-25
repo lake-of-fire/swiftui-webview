@@ -588,13 +588,19 @@ extension WebViewCoordinator: WKNavigationDelegate {
 }
 
 public class WebViewNavigator: NSObject, ObservableObject {
+    private var pendingRequest: URLRequest?
+    
     @MainActor
     weak var webView: WKWebView? {
         didSet {
             guard let webView = webView else { return }
-            // TODO: Make about:blank history initialization optional via configuration.
-            if !webView.canGoBack && !webView.canGoForward && (webView.url == nil || webView.url?.absoluteString == "about:blank") {
-                load(URLRequest(url: URL(string: "about:blank")!))
+            if let request = pendingRequest {
+                webView.load(request)
+                pendingRequest = nil
+                return
+            }
+            if let blankURL = URL(string: "about:blank") {
+                webView.load(URLRequest(url: blankURL))
             }
         }
     }
@@ -606,12 +612,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func load(_ request: URLRequest) {
-        guard let webView = webView else { return }
-        //                debugPrint("# WebViewNavigator.load(...)", request.url)
-        if let url = request.url, url.isFileURL {
-            webView.loadFileURL(url, allowingReadAccessTo: url)
+        if let webView = webView {
+            if let url = request.url, url.isFileURL {
+                webView.loadFileURL(url, allowingReadAccessTo: url)
+            } else {
+                webView.load(request)
+            }
         } else {
-            webView.load(request)
+            pendingRequest = request
         }
     }
     
@@ -655,22 +663,22 @@ enum ScriptCallerError: Error {
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-//    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     var asyncCaller: ( @Sendable
-        (
-            String,
-            [String: any Sendable]?,
-            WKFrameInfo?,
-            WKContentWorld?
-        ) async throws -> sending Any?
+                       (
+                        String,
+                        [String: any Sendable]?,
+                        WKFrameInfo?,
+                        WKContentWorld?
+                       ) async throws -> sending Any?
     )? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     
-//    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
-//        return lhs.id == rhs.id
-//    }
-     
+    //    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
+    //        return lhs.id == rhs.id
+    //    }
+    
     //    @MainActor
     @discardableResult
     public func evaluateJavaScript(
@@ -1338,9 +1346,9 @@ public struct WebView: UIViewControllerRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-//        context.coordinator.scriptCaller?.caller = {
-//            webView.evaluateJavaScript($0, completionHandler: $1)
-//        }
+        //        context.coordinator.scriptCaller?.caller = {
+        //            webView.evaluateJavaScript($0, completionHandler: $1)
+        //        }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
             let world = world ?? .page
             //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
