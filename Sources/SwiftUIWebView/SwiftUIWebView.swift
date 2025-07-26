@@ -1353,9 +1353,9 @@ public struct WebView: UIViewControllerRepresentable {
             let world = world ?? .page
             //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args {
-                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
+                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world ?? .page)
             } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world ?? .page)
                 if result == nil {
                     return nil
                 }
@@ -1543,7 +1543,7 @@ public struct WebView: NSViewRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> Any? in
-            let world = world ?? .defaultClient
+            let world = world ?? .page
             if let args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
