@@ -593,7 +593,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
-            guard let webView = webView else { return }
+            guard let webView else { return }
             if let request = pendingRequest {
                 webView.load(request)
                 pendingRequest = nil
@@ -626,7 +626,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
-        guard let webView = webView else { return }
+        guard let webView else {
+            print("Warning: WebViewScriptCaller.loadHTML() called before webView is set.")
+            return
+        }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
     
