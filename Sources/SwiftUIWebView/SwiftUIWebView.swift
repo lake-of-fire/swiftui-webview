@@ -624,6 +624,21 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     @MainActor
+    public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
+        //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+        guard let webView else {
+            print("Warning: WebViewScriptCaller.loadHTML() called before webView is set.")
+            return
+        }
+        webView.load(
+            data,
+            mimeType: mimeType,
+            characterEncodingName: characterEncodingName,
+            baseURL: baseURL
+        )
+    }
+
+    @MainActor
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         guard let webView else {
@@ -1149,12 +1164,27 @@ public class WebViewController: UIViewController {
     
     private func updateObscuredInsets() {
         guard let webView = view.subviews.first as? WKWebView else { return }
-        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: obscuredInsets.bottom, right: obscuredInsets.right)
+        let insets = UIEdgeInsets(
+            top: obscuredInsets.top,
+            left: obscuredInsets.left,
+            bottom: obscuredInsets.bottom,
+            right: obscuredInsets.right
+        )
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
         //        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
         let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
         webView.setValue(insets, forKey: key)
+        
+        let unobscuredArgument: [Any] = ["un", "obsc", "uredSa", "feAre", "aInsets"]
+        webView.setValue(
+            UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
+            forKey: unobscuredArgument.compactMap({ $0 as? String }).joined()
+        )
+        if #available(iOS 15.5, *) {
+            webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
+        }
+        
         //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
         //            webView.setValue(insets, forKey: "obscuredInsets")
         //        webView.safeAreaInsetsDidChange()
@@ -1332,6 +1362,7 @@ public struct WebView: UIViewControllerRepresentable {
         webView.scrollView.contentInsetAdjustmentBehavior = .always
         //        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        webView.uiDelegate = context.coordinator
         webView.pageZoom = config.pageZoom
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
@@ -1404,9 +1435,20 @@ public struct WebView: UIViewControllerRepresentable {
         
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
         //        print(obscuredInsets)
-        controller.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom - bottomSafeAreaInset, right: 0)
+        controller.additionalSafeAreaInsets = UIEdgeInsets(
+            top: 0,
+            left: 0,
+            bottom: max(0, obscuredInsets.bottom - bottomSafeAreaInset),
+            right: 0
+        )
         //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
-        controller.obscuredInsets = UIEdgeInsets(top: obscuredInsets.top, left: 0, bottom: obscuredInsets.bottom, right: 0)
+        
+        controller.obscuredInsets = UIEdgeInsets(
+            top: obscuredInsets.top,
+            left: 0,
+            bottom: obscuredInsets.bottom,
+            right: 0
+        )
         // _obscuredInsets ignores sides, probably
     }
     
