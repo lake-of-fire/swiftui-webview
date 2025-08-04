@@ -6,7 +6,7 @@ import OrderedCollections
 
 @globalActor
 public actor WebViewActor {
-    public static var shared = WebViewActor()
+    public static let shared = WebViewActor()
 }
 
 public struct WebViewMessageHandlersKey: EnvironmentKey {
@@ -1353,7 +1353,7 @@ public struct WebView: UIViewControllerRepresentable {
         )
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
         
-        refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
+//        refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
         
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
@@ -1653,27 +1653,27 @@ extension WebView {
 #endif
     }
     
-    @MainActor
-    func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
-        userContentController.removeAllContentRuleLists()
-        guard let contentRules = config.contentRules else { return }
-        if let ruleList = coordinator.compiledContentRules[contentRules] {
-            userContentController.add(ruleList)
-        } else {
-            WKContentRuleListStore.default().compileContentRuleList(
-                forIdentifier: "ContentBlockingRules",
-                encodedContentRuleList: contentRules) { (ruleList, error) in
-                    guard let ruleList = ruleList else {
-                        if let error = error {
-                            print(error)
-                        }
-                        return
-                    }
-                    userContentController.add(ruleList)
-                    coordinator.compiledContentRules[contentRules] = ruleList
-                }
-        }
-    }
+//    @MainActor
+//    func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
+//        userContentController.removeAllContentRuleLists()
+//        guard let contentRules = config.contentRules else { return }
+//        if let ruleList = coordinator.compiledContentRules[contentRules] {
+//            userContentController.add(ruleList)
+//        } else {
+//            WKContentRuleListStore.default().compileContentRuleList(
+//                forIdentifier: "ContentBlockingRules",
+//                encodedContentRuleList: contentRules) { (ruleList, error) in
+//                    guard let ruleList = ruleList else {
+//                        if let error = error {
+//                            print(error)
+//                        }
+//                        return
+//                    }
+//                    userContentController.add(ruleList)
+//                    coordinator.compiledContentRules[contentRules] = ruleList
+//                }
+//        }
+//    }
     
     /// Refreshes the WKScriptMessageHandlers for the WebView.
     /// - Note: `systemMessageHandlers` are constant and never change.
