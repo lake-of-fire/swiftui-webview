@@ -265,7 +265,6 @@ public class WebViewCoordinator: NSObject {
                     canGoForward: webView.canGoForward,
                     backList: webView.backForwardList.backList,
                     forwardList: webView.backForwardList.forwardList)
-                onURLChanged?(newState)
             }
         }
     }
@@ -282,29 +281,38 @@ public class WebViewCoordinator: NSObject {
     ) -> WebViewState {
         var newState = webView.state
         newState.isLoading = isLoading
-        if let pageURL = pageURL {
+        var pageURLChanged = false
+        if let pageURL {
+            if pageURL != webView.state.pageURL {
+                pageURLChanged
+            }
             newState.pageURL = pageURL
         }
-        if let isProvisionallyNavigating = isProvisionallyNavigating {
+        if let isProvisionallyNavigating {
             newState.isProvisionallyNavigating = isProvisionallyNavigating
         }
-        if let canGoBack = canGoBack {
+        if let canGoBack {
             newState.canGoBack = canGoBack
         }
-        if let canGoForward = canGoForward {
+        if let canGoForward {
             newState.canGoForward = canGoForward
         }
-        if let backList = backList {
+        if let backList {
             newState.backList = backList
         }
-        if let forwardList = forwardList {
+        if let forwardList {
             newState.forwardList = forwardList
         }
-        if let error = error {
+        if let error {
             newState.error = error
         }
         //        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
+        
+        if pageURLChanged {
+            onURLChanged?(newState)
+        }
+            
         return newState
     }
 }
@@ -328,7 +336,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     backList: wk.backForwardList.backList,
                     forwardList: wk.backForwardList.forwardList
                 )
-                onURLChanged?(newState)
             }
             return
         } else if message.name == "swiftUIWebViewImageUpdated" {
@@ -495,7 +502,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             forwardList: webView.backForwardList.forwardList,
             error: error
         )
-        onURLChanged?(newState)
     }
     
     @MainActor
@@ -542,7 +548,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
-        onURLChanged?(newState)
     }
     
     @MainActor
