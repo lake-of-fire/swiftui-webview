@@ -684,6 +684,14 @@ enum ScriptCallerError: Error {
 
 @MainActor
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
+    struct JavaScriptEvaluationResult: @unchecked Sendable {
+        let value: Any?
+
+        init(_ value: Any?) {
+            self.value = value
+        }
+    }
+
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
@@ -693,7 +701,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         [String: any Sendable]?,
                         WKFrameInfo?,
                         WKContentWorld?
-                       ) async throws -> sending Any?
+                       ) async throws -> JavaScriptEvaluationResult
     )? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
@@ -710,12 +718,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         in frame: WKFrameInfo? = nil,
         duplicateInMultiTargetFrames: Bool = false,
         in world: WKContentWorld? = nil
-    ) async throws -> sending Any? {
+    ) async throws -> Any? {
         guard let asyncCaller else {
             print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
             throw ScriptCallerError.evaluationTimedOut
         }
-        
+
         let primitiveArguments: [String: any Sendable]? = arguments?.mapValues {
             if let set = $0 as? Set<AnyHashable> {
                 return Array(set) as! any Sendable
@@ -724,15 +732,15 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
         var primaryError: Error?
         var result: Any?
-        
+
         //        debugPrint("# eval async", js.prefix(100))
         do {
             //            result = try await asyncCaller(js, primitiveArguments, frame, world)
-            result = try await asyncCaller(js, primitiveArguments, frame, world)
+            result = try await asyncCaller(js, primitiveArguments, frame, world).value
         } catch {
             primaryError = error
         }
-        
+
         if duplicateInMultiTargetFrames {
             await { @MainActor [weak self] in
                 guard let self else { return }
@@ -753,9 +761,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         guard let result else {
             return nil
         }
-        // Safe force-unwrap because all plist types are Sendable.
-        // swift-format-ignore: NeverForceUnwrap
-        return result as! any Sendable
+        return result
     }
     
     /// Returns whether the frame was already added.
@@ -1389,16 +1395,14 @@ public struct WebView: UIViewControllerRepresentable {
         //            webView.evaluateJavaScript($0, completionHandler: $1)
         //        }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
-            let world = world ?? .page
+            let resolvedWorld = world ?? .page
             //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args {
-                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world ?? .page)
+                let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
             } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world ?? .page)
-                if result == nil {
-                    return nil
-                }
-                return result as! any Sendable
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(result)
             }
         }
         context.coordinator.textSelection = $textSelection
@@ -1592,16 +1596,14 @@ public struct WebView: NSViewRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> Any? in
-            let world = world ?? .page
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
+            let resolvedWorld = world ?? .page
             if let args {
-                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
+                let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
             } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
-                if result == nil {
-                    return nil
-                }
-                return result as! any Sendable
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(result)
             }
         }
         
