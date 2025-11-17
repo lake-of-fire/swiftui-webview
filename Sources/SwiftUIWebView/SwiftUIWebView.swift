@@ -361,6 +361,11 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     webView.state = targetState
                 }
             }
+        } else if message.name == "swiftUIWebViewUnhandledTap" {
+            withAnimation(.easeOut(duration: 0.18)) {
+                hideNavigationDueToScroll.wrappedValue.toggle()
+            }
+            return
         } else if message.name == "swiftUIWebViewTextSelection" {
             guard let body = message.body as? [String: String], let text = body["text"] as? String else {
                 return
@@ -1000,6 +1005,62 @@ fileprivate struct PageIconChangeUserScript {
             source: contents,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true,
+            in: .page
+        )
+    }
+}
+
+@MainActor
+fileprivate struct UnhandledTapUserScript {
+    let userScript: WebViewUserScript
+    
+    init() {
+        let contents = """
+(function() {
+    const handlerName = 'swiftUIWebViewUnhandledTap';
+    if (!window.webkit?.messageHandlers?.[handlerName]) {
+        return;
+    }
+
+    const interactiveSelectors = 'a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+
+    function isLikelyInteractive(element) {
+        if (!element || !(element instanceof Element)) {
+            return false;
+        }
+        if (element.matches(interactiveSelectors) || element.closest(interactiveSelectors)) {
+            return true;
+        }
+        if (element.hasAttribute('onclick')) {
+            return true;
+        }
+        if (element.tabIndex >= 0 && element.getAttribute('tabindex') !== '-1') {
+            return true;
+        }
+        const style = window.getComputedStyle(element);
+        return style?.cursor === 'pointer';
+    }
+
+    function handleClick(event) {
+        if (event.defaultPrevented || event.button !== 0) {
+            return;
+        }
+        const path = event.composedPath ? event.composedPath() : [];
+        if (path.some(node => node instanceof Element && isLikelyInteractive(node))) {
+            return;
+        }
+        window.webkit.messageHandlers[handlerName].postMessage({
+            frame: window === window.top ? 'top' : 'child'
+        });
+    }
+
+    window.addEventListener('click', handleClick, { capture: false, passive: true });
+})();
+"""
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false,
             in: .page
         )
     }
@@ -1756,6 +1817,7 @@ extension WebView {
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
+        UnhandledTapUserScript().userScript,
         PageIconChangeUserScript().userScript,
         TextSelectionUserScript().userScript,
     ]
@@ -1766,6 +1828,7 @@ extension WebView {
         "swiftUIWebViewImageUpdated",
         "swiftUIWebViewPageIconUpdated",
         "swiftUIWebViewTextSelection",
+        "swiftUIWebViewUnhandledTap",
     ]
 }
 
