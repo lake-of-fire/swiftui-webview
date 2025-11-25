@@ -284,7 +284,7 @@ public class WebViewCoordinator: NSObject {
         var pageURLChanged = false
         if let pageURL {
             if pageURL != webView.state.pageURL {
-                pageURLChanged
+                pageURLChanged = true
             }
             newState.pageURL = pageURL
         }
@@ -440,6 +440,9 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        debugPrint("# READER webView.nav.finish",
+                   "url=\(webView.url?.absoluteString ?? "<nil>")",
+                   "isLoading=\(webView.isLoading)")
         //                debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
             false,
@@ -531,6 +534,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         Task {
             await scriptCaller?.removeAllMultiTargetFrames()
         }
+        debugPrint("# READER webView.nav.commit",
+                   "url=\(webView.url?.absoluteString ?? "<nil>")",
+                   "isLoading=\(webView.isLoading)")
         var newState = setLoading(
             true,
             pageURL: webView.url,
@@ -546,6 +552,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        debugPrint("# READER webView.nav.start",
+                   "url=\(webView.url?.absoluteString ?? "<nil>")",
+                   "isLoading=\(webView.isLoading)")
         let newState = setLoading(
             true,
             isProvisionallyNavigating: true,
@@ -557,6 +566,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
+        debugPrint("# READER webView.nav.decide",
+                   "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
+                   "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)
@@ -593,6 +605,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
+        if let response = navigationResponse.response as? HTTPURLResponse {
+            debugPrint(
+                "# READER webView.nav.response",
+                "url=\(response.url?.absoluteString ?? "<nil>")",
+                "mimeType=\(response.mimeType ?? "<nil>")",
+                "status=\(response.statusCode)",
+                "expectedLength=\(response.expectedContentLength)"
+            )
+        }
         return .allow
     }
 }
@@ -640,6 +661,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
             print("Warning: WebViewScriptCaller.loadHTML() called before webView is set.")
             return
         }
+        debugPrint(
+            "# READER navigator.load.data",
+            "bytes=\(data.count)",
+            "mimeType=\(mimeType)",
+            "baseURL=\(baseURL.absoluteString)"
+        )
         webView.load(
             data,
             mimeType: mimeType,
@@ -708,12 +735,59 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         WKContentWorld?
                        ) async throws -> JavaScriptEvaluationResult
     )? = nil
+
+    /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
+    public var hasAsyncCaller: Bool { asyncCaller != nil }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
+    private var framesByCanonicalURL = [String: WKFrameInfo]()
+    private var lastKnownMainFrame: WKFrameInfo?
     
     //    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
     //        return lhs.id == rhs.id
     //    }
+
+    private func canonicalizedURL(_ url: URL) -> URL {
+        if url.scheme?.lowercased() == "internal",
+           url.host?.lowercased() == "local",
+           url.path == "/load/reader",
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let readerURLValue = components.queryItems?.first(where: { $0.name == "reader-url" })?.value {
+            if let decoded = readerURLValue.removingPercentEncoding, let resolved = URL(string: decoded) {
+                return resolved
+            } else if let resolved = URL(string: readerURLValue) {
+                return resolved
+            }
+        }
+        return url
+    }
+
+    private func canonicalFrameKey(for url: URL?) -> String? {
+        guard let url else { return nil }
+        let resolved = canonicalizedURL(url)
+        var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
+        components?.fragment = nil
+        return components?.string ?? resolved.absoluteString
+    }
+
+    private func normalizeJavaScriptResult(_ value: Any?) -> Any? {
+        switch value {
+        case nil, is NSNull:
+            return nil
+        case let string as NSString:
+            return String(string)
+        case let url as URL:
+            return url.absoluteString
+        case let number as NSNumber:
+            return number
+        case let dict as NSDictionary:
+            return dict as? [String: Any]
+        case let array as NSArray:
+            return array as? [Any]
+        default:
+            return value
+        }
+    }
     
     //    @MainActor
     @discardableResult
@@ -738,7 +812,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         var primaryError: Error?
         var result: Any?
 
-        //        debugPrint("# eval async", js.prefix(100))
         do {
             //            result = try await asyncCaller(js, primitiveArguments, frame, world)
             result = try await asyncCaller(js, primitiveArguments, frame, world).value
@@ -763,26 +836,140 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 }
             }()
         }
-        guard let result else {
-            return nil
+        if var primaryError {
+            var handled = false
+            var nsError = primaryError as NSError
+            if nsError.domain == WKError.errorDomain,
+               nsError.code == WKError.javaScriptResultTypeIsUnsupported.rawValue {
+                // WK sometimes classifies simple primitives (e.g. window.location.href) as "unsupported";
+                // coerce them instead of aborting the readability pipeline.
+                let trimmed = js.trimmingCharacters(in: .whitespacesAndNewlines)
+                // Coerce common primitives (like window.location.href) instead of failing the whole pipeline.
+                if trimmed == "window.location.href" || trimmed.contains("window.location.href") {
+                    do {
+                        result = try await asyncCaller(
+                            "(function () { try { return String(window.location && window.location.href) } catch (_) { return null } })();",
+                            primitiveArguments,
+                            frame,
+                            world
+                        ).value
+                        handled = true
+                        debugPrint(
+                            "# READER scriptCaller.error.resultTypeUnsupported.coerced",
+                            "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
+                            "note=coerced to string for href"
+                        )
+                    } catch {
+                        primaryError = error
+                        nsError = error as NSError
+                    }
+                }
+                if !handled {
+                    // Treat unsupported result types as a benign nil so DOM snapshot can continue.
+                    result = nil
+                    handled = true
+                    debugPrint(
+                        "# READER scriptCaller.error.resultTypeUnsupported",
+                        "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
+                        "jsPrefix=\(js.prefix(80))",
+                        "note=treated as nil"
+                    )
+                }
+            } else if nsError.domain == WKError.errorDomain,
+                      nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
+                // Stale WKFrameInfo from a prior navigation can trigger "invalid frame" even after we pick a URL match.
+                // Drop the cached main frame so we fall back to the current main frame next time instead of hard‑failing.
+                if let frame, frame == lastKnownMainFrame {
+                    lastKnownMainFrame = nil
+                }
+                result = nil
+                handled = true
+                debugPrint(
+                    "# READER scriptCaller.error.invalidFrame",
+                    "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
+                    "jsPrefix=\(js.prefix(80))",
+                    "note=cleared stale frame; returning nil"
+                )
+            }
+            if !handled {
+                debugPrint(
+                    "# READER scriptCaller.error",
+                    "code=\(nsError.code)",
+                    "domain=\(nsError.domain)",
+                    "description=\(nsError.localizedDescription)",
+                    "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
+                    "jsPrefix=\(js.prefix(80))"
+                )
+                throw primaryError
+            }
         }
-        return result
+        return normalizeJavaScriptResult(result)
     }
     
     /// Returns whether the frame was already added.
     @MainActor
-    public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String) -> Bool {
+    public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String, canonicalURL: URL? = nil) -> Bool {
         var inserted = true
         if multiTargetFrames.keys.contains(uuid) && multiTargetFrames[uuid]?.request.url == frame.request.url {
             inserted = false
         }
         multiTargetFrames[uuid] = frame
+        let resolvedCanonicalURL = canonicalURL ?? frame.request.mainDocumentURL ?? frame.request.url
+        if let key = canonicalFrameKey(for: resolvedCanonicalURL) {
+            framesByCanonicalURL[key] = frame
+        }
+        if frame.isMainFrame {
+            lastKnownMainFrame = frame
+        }
+        if frame.request.url == nil {
+            debugPrint(
+                "# READER scriptCaller.frame.nilURL",
+                "uuid=\(uuid)",
+                "debug=\(frame.debugDescription)",
+                "isMain=\(frame.isMainFrame)"
+            )
+        }
+        debugPrint(
+            "# READER scriptCaller.frame.add",
+            "uuid=\(uuid)",
+            "url=\(frame.request.url?.absoluteString ?? "<nil>")",
+            "canonical=\(canonicalFrameKey(for: resolvedCanonicalURL) ?? "<nil>")",
+            "isMain=\(frame.isMainFrame)",
+            "inserted=\(inserted)"
+        )
         return inserted
     }
     
     @MainActor
     public func removeAllMultiTargetFrames() {
+        if !multiTargetFrames.isEmpty || !framesByCanonicalURL.isEmpty {
+            debugPrint(
+                "# READER scriptCaller.frame.clear",
+                "byUUID=\(multiTargetFrames.count)",
+                "byCanonical=\(framesByCanonicalURL.count)"
+            )
+        }
         multiTargetFrames.removeAll()
+        framesByCanonicalURL.removeAll()
+    }
+
+    @MainActor
+    public func frame(for url: URL?) -> WKFrameInfo? {
+        if let key = canonicalFrameKey(for: url), let frame = framesByCanonicalURL[key] {
+            return frame
+        }
+        if let mainFrame = lastKnownMainFrame {
+            return mainFrame
+        }
+        if let anyFrame = multiTargetFrames.values.first {
+            return anyFrame
+        }
+        return nil
+    }
+
+    @MainActor
+    public var mainFrameInfo: WKFrameInfo? {
+        lastKnownMainFrame
     }
     
     public init() {
@@ -1011,6 +1198,61 @@ fileprivate struct PageIconChangeUserScript {
 }
 
 @MainActor
+fileprivate struct ReaderDocStateUserScript {
+    let userScript: WebViewUserScript
+
+    init() {
+        let contents = """
+(function () {
+    try {
+        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.readerDocState;
+        if (!handler || typeof handler.postMessage !== "function") { return; }
+        handler.postMessage({
+            href: window.location.href,
+            readyState: document.readyState,
+            hasBody: !!document.body,
+            hasReaderContent: !!document.getElementById('reader-content'),
+            hasReadabilityGlobal: typeof window.manabi_readability === 'function'
+        });
+    } catch (e) { /* noop */ }
+})();
+"""
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: true,
+            in: .page
+        )
+    }
+}
+
+@MainActor
+fileprivate struct ReaderBootstrapPingUserScript {
+    let userScript: WebViewUserScript
+
+    init() {
+        let contents = """
+(function () {
+    try {
+        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.readerBootstrapPing;
+        if (!handler || typeof handler.postMessage !== "function") { return; }
+        handler.postMessage({
+            href: window.location.href,
+            readyState: document.readyState
+        });
+    } catch (e) { /* noop */ }
+})();
+"""
+        userScript = WebViewUserScript(
+            source: contents,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
+    }
+}
+
+@MainActor
 fileprivate struct UnhandledTapUserScript {
     let userScript: WebViewUserScript
     
@@ -1023,8 +1265,19 @@ fileprivate struct UnhandledTapUserScript {
     }
 
     const interactiveSelectors = 'a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+    const MOVE_THRESHOLD = 8;
+    const LONG_PRESS_THRESHOLD_MS = 450;
+    const activePointers = new Map();
 
-    function isLikelyInteractive(element) {
+    function selectionText() {
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) {
+            return '';
+        }
+        return sel.toString() || '';
+    }
+
+    function elementLooksInteractive(element) {
         if (!element || !(element instanceof Element)) {
             return false;
         }
@@ -1038,15 +1291,58 @@ fileprivate struct UnhandledTapUserScript {
             return true;
         }
         const style = window.getComputedStyle(element);
-        return style?.cursor === 'pointer';
+        if (style && style.cursor === 'pointer') {
+            return true;
+        }
+        return false;
     }
 
-    function handleClick(event) {
-        if (event.defaultPrevented || event.button !== 0) {
+    function pathContainsInteractive(path) {
+        if (!Array.isArray(path)) return false;
+        return path.some(node => elementLooksInteractive(node));
+    }
+
+    function registerPointer(event) {
+        const path = event.composedPath ? event.composedPath() : [];
+        if (pathContainsInteractive(path)) {
             return;
         }
-        const path = event.composedPath ? event.composedPath() : [];
-        if (path.some(node => node instanceof Element && isLikelyInteractive(node))) {
+        activePointers.set(event.pointerId, {
+            startX: event.clientX ?? 0,
+            startY: event.clientY ?? 0,
+            moved: false,
+            startTime: performance.now(),
+            startSelection: selectionText(),
+        });
+    }
+
+    function handlePointerDown(event) {
+        if (event.defaultPrevented || event.button > 0) {
+            return;
+        }
+        registerPointer(event);
+    }
+
+    function handlePointerMove(event) {
+        const entry = activePointers.get(event.pointerId);
+        if (!entry) return;
+        const dx = (event.clientX ?? 0) - entry.startX;
+        const dy = (event.clientY ?? 0) - entry.startY;
+        if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
+            entry.moved = true;
+        }
+    }
+
+    function handlePointerUp(event) {
+        const entry = activePointers.get(event.pointerId);
+        activePointers.delete(event.pointerId);
+        if (!entry || event.defaultPrevented) {
+            return;
+        }
+        const duration = performance.now() - entry.startTime;
+        const newSelection = selectionText();
+        const selectionChanged = newSelection.length > 0 && newSelection !== entry.startSelection;
+        if (entry.moved || duration > LONG_PRESS_THRESHOLD_MS || selectionChanged) {
             return;
         }
         window.webkit.messageHandlers[handlerName].postMessage({
@@ -1054,7 +1350,14 @@ fileprivate struct UnhandledTapUserScript {
         });
     }
 
-    window.addEventListener('click', handleClick, { capture: false, passive: true });
+    function handlePointerCancel(event) {
+        activePointers.delete(event.pointerId);
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown, { capture: true, passive: true });
+    window.addEventListener('pointermove', handlePointerMove, { capture: true, passive: true });
+    window.addEventListener('pointerup', handlePointerUp, { capture: true, passive: true });
+    window.addEventListener('pointercancel', handlePointerCancel, { capture: true, passive: true });
 })();
 """
         userScript = WebViewUserScript(
@@ -1658,13 +1961,50 @@ public struct WebView: NSViewRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
+            let jsPrefix = js.prefix(120)
+            let frameURL = frame?.request.url?.absoluteString ?? "nil"
+            let isMainFrame = frame?.isMainFrame ?? true
+            let currentURL = webView.url?.absoluteString ?? "nil"
             let resolvedWorld = world ?? .page
-            if let args {
-                let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+            let startedAt = Date()
+            print("# READER scriptCaller.call.start",
+                  "url=\(currentURL)",
+                  "frameURL=\(frameURL)",
+                  "isMainFrame=\(isMainFrame)",
+                  "world=\(resolvedWorld.name)",
+                  "args=\(args?.count ?? 0)",
+                  "jsPrefix=\(jsPrefix)")
+            do {
+                let value: Any?
+                if let args {
+                    value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+                } else {
+                    value = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
+                }
+                let elapsed = Date().timeIntervalSince(startedAt)
+                let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
+                let stringLength = (value as? String)?.count
+                print("# READER scriptCaller.call.finish",
+                      "url=\(currentURL)",
+                      "frameURL=\(frameURL)",
+                      "isMainFrame=\(isMainFrame)",
+                      "world=\(resolvedWorld.name)",
+                      "jsPrefix=\(jsPrefix)",
+                      "type=\(typeDescription)",
+                      "stringLength=\(stringLength.map(String.init) ?? "nil")",
+                      String(format: "elapsed=%.3fs", elapsed))
                 return WebViewScriptCaller.JavaScriptEvaluationResult(value)
-            } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
-                return WebViewScriptCaller.JavaScriptEvaluationResult(result)
+            } catch {
+                let elapsed = Date().timeIntervalSince(startedAt)
+                print("# READER scriptCaller.call.error",
+                      "url=\(currentURL)",
+                      "frameURL=\(frameURL)",
+                      "isMainFrame=\(isMainFrame)",
+                      "world=\(resolvedWorld.name)",
+                      "jsPrefix=\(jsPrefix)",
+                      "error=\(error)",
+                      String(format: "elapsed=%.3fs", elapsed))
+                throw error
             }
         }
         
@@ -1810,6 +2150,7 @@ extension WebView {
                 userContentController.addUserScript(script.webKitUserScript)
             }
         }
+        debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
         //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
     
@@ -1817,6 +2158,8 @@ extension WebView {
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
+        ReaderBootstrapPingUserScript().userScript,
+        ReaderDocStateUserScript().userScript,
         UnhandledTapUserScript().userScript,
         PageIconChangeUserScript().userScript,
         TextSelectionUserScript().userScript,
@@ -1828,6 +2171,8 @@ extension WebView {
         "swiftUIWebViewImageUpdated",
         "swiftUIWebViewPageIconUpdated",
         "swiftUIWebViewTextSelection",
+        "readerBootstrapPing",
+        "readerDocState",
         "swiftUIWebViewUnhandledTap",
     ]
 }
