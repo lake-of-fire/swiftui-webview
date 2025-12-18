@@ -1698,14 +1698,22 @@ public struct WebView: UIViewControllerRepresentable {
             }
             
             web = EnhancedWKWebView(frame: .zero, configuration: configuration)
-            web?.isOpaque = false
-            web?.backgroundColor = .clear
+            web?.isOpaque = config.isOpaque
+            if #available(iOS 14.0, *) {
+                web?.backgroundColor = UIColor(config.backgroundColor)
+                web?.scrollView.backgroundColor = UIColor(config.backgroundColor)
+            } else {
+                web?.backgroundColor = config.isOpaque ? .systemBackground : .clear
+                web?.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+            }
+            web?.scrollView.isOpaque = config.isOpaque
+            if #available(iOS 15.0, *) {
+                web?.underPageBackgroundColor = UIColor(config.backgroundColor)
+            }
             
             if let id = id {
                 Self.webViewCache[id] = web
             }
-            
-            web?.backgroundColor = .white
         }
         guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
         
@@ -1744,6 +1752,15 @@ public struct WebView: UIViewControllerRepresentable {
             webView.backgroundColor = UIColor(config.backgroundColor)
         } else {
             webView.backgroundColor = .clear
+        }
+        if #available(iOS 14.0, *) {
+            webView.scrollView.backgroundColor = UIColor(config.backgroundColor)
+        } else {
+            webView.scrollView.backgroundColor = .clear
+        }
+        webView.scrollView.isOpaque = config.isOpaque
+        if #available(iOS 15.0, *) {
+            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
         }
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
@@ -1801,6 +1818,10 @@ public struct WebView: UIViewControllerRepresentable {
         controller.webView.buildMenu = buildMenu
         controller.webView.scrollView.bounces = bounces
         controller.webView.scrollView.alwaysBounceVertical = bounces
+        controller.webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        controller.webView.pageZoom = config.pageZoom
+        applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
@@ -1940,7 +1961,8 @@ public struct WebView: NSViewRepresentable {
         //        let dataStore = WKWebsiteDataStore.nonPersistent()
         //        configuration.websiteDataStore = dataStore
         
-        configuration.setValue(drawsBackground, forKey: "drawsBackground")
+        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+        configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
@@ -1951,7 +1973,11 @@ public struct WebView: NSViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.pageZoom = config.pageZoom
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
-        webView.layer?.backgroundColor = .white
+        if #available(macOS 11.0, *) {
+            webView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
+        } else {
+            webView.layer?.backgroundColor = NSColor.clear.cgColor
+        }
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
@@ -2034,7 +2060,13 @@ public struct WebView: NSViewRepresentable {
         
         refreshDarkModeSetting(webView: uiView)
         
-        uiView.setValue(drawsBackground, forKey: "drawsBackground")
+        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+        uiView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+        if #available(macOS 11.0, *) {
+            uiView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
+        } else {
+            uiView.layer?.backgroundColor = NSColor.clear.cgColor
+        }
         
     }
     
@@ -2060,6 +2092,30 @@ extension WebView {
         webView.appearance = config.darkModeSetting == .darkModeOverride ? NSAppearance(named: .darkAqua) : nil
 #endif
     }
+
+    #if os(iOS)
+    @MainActor
+    func applyVisualConfiguration(webView: WKWebView, containerView: UIView?) {
+        webView.isOpaque = config.isOpaque
+        webView.scrollView.isOpaque = config.isOpaque
+
+        if #available(iOS 14.0, *) {
+            let resolvedColor = UIColor(config.backgroundColor)
+            webView.backgroundColor = resolvedColor
+            webView.scrollView.backgroundColor = resolvedColor
+            containerView?.backgroundColor = config.isOpaque ? nil : resolvedColor
+        } else {
+            let resolvedColor: UIColor = config.isOpaque ? .systemBackground : .clear
+            webView.backgroundColor = resolvedColor
+            webView.scrollView.backgroundColor = resolvedColor
+            containerView?.backgroundColor = config.isOpaque ? nil : resolvedColor
+        }
+
+        if #available(iOS 15.0, *) {
+            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+        }
+    }
+    #endif
     
 //    @MainActor
 //    func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
