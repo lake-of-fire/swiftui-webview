@@ -15,7 +15,6 @@ let package = Package(
             targets: ["SwiftUIWebView"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/weichsel/ZIPFoundation.git", branch: "development"),
         .package(url: "https://github.com/apple/swift-collections.git", branch: "main"),
 //        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
     ],
@@ -23,7 +22,6 @@ let package = Package(
         .target(
             name: "SwiftUIWebView",
             dependencies: [
-                .product(name: "ZIPFoundation", package: "ZipFoundation"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
 //                .product(name: "BookmarkStorage", package: "bookmark-storage"),
             ],

@@ -1,7 +1,6 @@
 import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
-import ZIPFoundation
 import OrderedCollections
 
 @globalActor
