@@ -65,6 +65,7 @@ public typealias BuildMenuType = (Any) -> Void
 public struct WebViewState: Equatable, Sendable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
+    public internal(set) var loadingProgress: Double?
     public internal(set) var pageURL: URL
     public internal(set) var pageTitle: String?
     public internal(set) var pageImageURL: URL?
@@ -79,6 +80,7 @@ public struct WebViewState: Equatable, Sendable {
     public static let empty = WebViewState(
         isLoading: false,
         isProvisionallyNavigating: false,
+        loadingProgress: nil,
         pageURL: URL(string: "about:blank")!,
         pageTitle: nil,
         pageImageURL: nil,
@@ -93,6 +95,7 @@ public struct WebViewState: Equatable, Sendable {
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
         && lhs.isProvisionallyNavigating == rhs.isProvisionallyNavigating
+        && lhs.loadingProgress == rhs.loadingProgress
         && lhs.pageURL == rhs.pageURL
         && lhs.pageTitle == rhs.pageTitle
         && lhs.pageImageURL == rhs.pageImageURL
@@ -190,9 +193,21 @@ public class WebViewCoordinator: NSObject {
     var scriptCaller: WebViewScriptCaller?
     var config: WebViewConfig
     var registeredMessageHandlerNames = Set<String>()
+    weak var lastUserContentController: WKUserContentController?
     //    var lastInstalledScriptsHash = -1
     var compiledContentRules = [String: WKContentRuleList]()
+    var lastAppliedContentRules: String?
+    var shouldReapplyContentRulesAfterLoad = false
     private var urlObservation: NSKeyValueObservation?
+    private var estimatedProgressObservation: NSKeyValueObservation?
+    private var isLoadingObservation: NSKeyValueObservation?
+    private var latestIsLoading = false
+    private var latestEstimatedProgress = 0.0
+    private var lastProgressUpdateTime: CFTimeInterval = 0
+    private var lastEmittedProgress: Double?
+    private var pendingProgressUpdateTask: Task<Void, Never>?
+    private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
+    private let progressUpdateMinimumDelta: Double = 0.01
     
     // UIScrollViewDelegate
     internal var lastContentOffset: CGFloat = 0
@@ -266,6 +281,28 @@ public class WebViewCoordinator: NSObject {
                     forwardList: webView.backForwardList.forwardList)
             }
         }
+
+        estimatedProgressObservation?.invalidate()
+        isLoadingObservation?.invalidate()
+        pendingProgressUpdateTask?.cancel()
+        lastEmittedProgress = nil
+        lastProgressUpdateTime = 0
+
+        estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
+            guard let self else { return }
+            let progress = change.newValue ?? webView.estimatedProgress
+            Task { @MainActor [weak self] in
+                self?.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+            }
+        }
+
+        isLoadingObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, change in
+            guard let self else { return }
+            let isLoading = change.newValue ?? webView.isLoading
+            Task { @MainActor [weak self] in
+                self?.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
+            }
+        }
     }
     
     @discardableResult func setLoading(
@@ -311,8 +348,73 @@ public class WebViewCoordinator: NSObject {
         if pageURLChanged {
             onURLChanged?(newState)
         }
+
+        updateLoadingProgress(isLoading: isLoading, estimatedProgress: navigator.webView?.estimatedProgress)
             
         return newState
+    }
+
+    @MainActor
+    private func updateLoadingProgress(isLoading: Bool?, estimatedProgress: Double?) {
+        if let isLoading {
+            latestIsLoading = isLoading
+        }
+        if let estimatedProgress {
+            latestEstimatedProgress = estimatedProgress
+        }
+
+        let clampedProgress = max(0, min(latestEstimatedProgress, 1))
+        let progress: Double? = latestIsLoading ? clampedProgress : nil
+        let now = CFAbsoluteTimeGetCurrent()
+
+        let shouldEmitImmediately: Bool
+        if progress == nil || lastEmittedProgress == nil {
+            shouldEmitImmediately = true
+        } else if let lastEmittedProgress, progress ?? 0 < lastEmittedProgress {
+            shouldEmitImmediately = true
+        } else if let lastEmittedProgress, abs((progress ?? 0) - lastEmittedProgress) >= progressUpdateMinimumDelta {
+            shouldEmitImmediately = true
+        } else {
+            let elapsed = now - lastProgressUpdateTime
+            shouldEmitImmediately = elapsed >= progressUpdateMinimumInterval
+        }
+
+        if shouldEmitImmediately {
+            emitLoadingProgress(progress, now: now)
+        } else {
+            scheduleLoadingProgressUpdate(progress, now: now)
+        }
+    }
+
+    @MainActor
+    private func scheduleLoadingProgressUpdate(_ progress: Double?, now: CFTimeInterval) {
+        pendingProgressUpdateTask?.cancel()
+        let elapsed = now - lastProgressUpdateTime
+        let delay = max(0, progressUpdateMinimumInterval - elapsed)
+        guard delay > 0 else {
+            emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            return
+        }
+
+        pendingProgressUpdateTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            self?.emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+        }
+    }
+
+    @MainActor
+    private func emitLoadingProgress(_ progress: Double?, now: CFTimeInterval) {
+        pendingProgressUpdateTask?.cancel()
+        pendingProgressUpdateTask = nil
+
+        guard webView.state.loadingProgress != progress else { return }
+
+        lastProgressUpdateTime = now
+        lastEmittedProgress = progress
+
+        var newState = webView.state
+        newState.loadingProgress = progress
+        webView.state = newState
     }
 }
 
@@ -461,6 +563,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
          */
         
         onNavigationFinished?(newState)
+
+        if shouldReapplyContentRulesAfterLoad {
+            shouldReapplyContentRulesAfterLoad = false
+            self.webView.refreshContentRules(
+                userContentController: webView.configuration.userContentController,
+                coordinator: self
+            )
+        }
         
         extractPageState(webView: webView)
     }
@@ -594,10 +704,22 @@ extension WebViewCoordinator: WKNavigationDelegate {
             self.webView.state = newState
         }
         
-        //        // TODO: Verify that restricting to main frame is correct. Recheck brave behavior.
-        //        if navigationAction.targetFrame?.isMainFrame ?? false {
-        //            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
-        //        }
+        // Only apply content rules for main frame navigations.
+        if navigationAction.targetFrame?.isMainFrame ?? false {
+            if navigator.consumeContentRulesBypass() {
+                shouldReapplyContentRulesAfterLoad = true
+                self.webView.refreshContentRules(
+                    userContentController: webView.configuration.userContentController,
+                    coordinator: self,
+                    overrideRules: nil
+                )
+            } else if lastAppliedContentRules != config.contentRules {
+                self.webView.refreshContentRules(
+                    userContentController: webView.configuration.userContentController,
+                    coordinator: self
+                )
+            }
+        }
         
         return (.allow, preferences)
     }
@@ -619,6 +741,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
 public class WebViewNavigator: NSObject, ObservableObject {
     private var pendingRequest: URLRequest?
+    @MainActor private var bypassContentRulesForNextNavigation = false
     
     @MainActor
     weak var webView: WKWebView? {
@@ -687,6 +810,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func reload() {
         webView?.reload()
+    }
+
+    @MainActor
+    public func reloadWithoutContentRules() {
+        bypassContentRulesForNextNavigation = true
+        webView?.reload()
+    }
+
+    @MainActor
+    func consumeContentRulesBypass() -> Bool {
+        let value = bypassContentRulesForNextNavigation
+        bypassContentRulesForNextNavigation = false
+        return value
+    }
+
+    @MainActor
+    func peekContentRulesBypass() -> Bool {
+        bypassContentRulesForNextNavigation
     }
     
     @MainActor
@@ -1668,6 +1809,9 @@ public struct WebView: UIViewControllerRepresentable {
             for messageHandlerName in coordinator.messageHandlerNames {
                 web?.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
             }
+            coordinator.registeredMessageHandlerNames.removeAll()
+            coordinator.lastEnvHandlerNames = nil
+            coordinator.lastUserContentController = web?.configuration.userContentController
         }
         if web == nil {
             let preferences = WKWebpagePreferences()
@@ -1733,11 +1877,9 @@ public struct WebView: UIViewControllerRepresentable {
             config: config,
             coordinator: context.coordinator
         )
-        refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
-        
-//        refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
-        
         webView.configuration.userContentController = userContentController
+        refreshMessageHandlers(userContentController: userContentController, context: context)
+        refreshContentRules(userContentController: userContentController, coordinator: context.coordinator)
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
@@ -1805,6 +1947,14 @@ public struct WebView: UIViewControllerRepresentable {
         context.coordinator.onURLChanged = onURLChanged
         
         refreshMessageHandlers(userContentController: controller.webView.configuration.userContentController, context: context)
+        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        if context.coordinator.lastAppliedContentRules != resolvedContentRules {
+            refreshContentRules(
+                userContentController: controller.webView.configuration.userContentController,
+                coordinator: context.coordinator,
+                overrideRules: resolvedContentRules
+            )
+        }
         refreshDarkModeSetting(webView: controller.webView)
         //        refreshMessageHandlers(context: context)
         //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
@@ -1954,6 +2104,7 @@ public struct WebView: NSViewRepresentable {
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
+        refreshContentRules(userContentController: configuration.userContentController, coordinator: context.coordinator)
         //        updateUserScripts(userContentController: configuration.userContentController, coordinator: context.coordinator, forDomain: nil, config: config)
         
         // For private mode later:
@@ -2049,9 +2200,15 @@ public struct WebView: NSViewRepresentable {
         
         //        refreshMessageHandlers(context: context)
         refreshMessageHandlers(userContentController: uiView.configuration.userContentController, context: context)
+        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        if context.coordinator.lastAppliedContentRules != resolvedContentRules {
+            refreshContentRules(
+                userContentController: uiView.configuration.userContentController,
+                coordinator: context.coordinator,
+                overrideRules: resolvedContentRules
+            )
+        }
         //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
-        
-        //        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
         
         // Can't disable on macOS.
         //        uiView.scrollView.bounces = bounces
@@ -2116,27 +2273,38 @@ extension WebView {
     }
     #endif
     
-//    @MainActor
-//    func refreshContentRules(userContentController: WKUserContentController, coordinator: Coordinator) {
-//        userContentController.removeAllContentRuleLists()
-//        guard let contentRules = config.contentRules else { return }
-//        if let ruleList = coordinator.compiledContentRules[contentRules] {
-//            userContentController.add(ruleList)
-//        } else {
-//            WKContentRuleListStore.default().compileContentRuleList(
-//                forIdentifier: "ContentBlockingRules",
-//                encodedContentRuleList: contentRules) { (ruleList, error) in
-//                    guard let ruleList = ruleList else {
-//                        if let error = error {
-//                            print(error)
-//                        }
-//                        return
-//                    }
-//                    userContentController.add(ruleList)
-//                    coordinator.compiledContentRules[contentRules] = ruleList
-//                }
-//        }
-//    }
+    @MainActor
+    func refreshContentRules(
+        userContentController: WKUserContentController,
+        coordinator: WebViewCoordinator,
+        overrideRules: String? = nil
+    ) {
+        userContentController.removeAllContentRuleLists()
+        let rules = (overrideRules ?? config.contentRules)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let contentRules = rules, !contentRules.isEmpty else {
+            coordinator.lastAppliedContentRules = nil
+            return
+        }
+        if let ruleList = coordinator.compiledContentRules[contentRules] {
+            userContentController.add(ruleList)
+            coordinator.lastAppliedContentRules = contentRules
+            return
+        }
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "ContentBlockingRules",
+            encodedContentRuleList: contentRules
+        ) { ruleList, error in
+            guard let ruleList else {
+                if let error {
+                    print("# contentRules.compile error", error)
+                }
+                return
+            }
+            userContentController.add(ruleList)
+            coordinator.compiledContentRules[contentRules] = ruleList
+            coordinator.lastAppliedContentRules = contentRules
+        }
+    }
     
     /// Refreshes the WKScriptMessageHandlers for the WebView.
     /// - Note: `systemMessageHandlers` are constant and never change.
@@ -2144,6 +2312,11 @@ extension WebView {
     /// - Performance: This function avoids unnecessary Set creation or handler updates if nothing changed.
     @MainActor
     func refreshMessageHandlers(userContentController: WKUserContentController, context: Context) {
+        if context.coordinator.lastUserContentController !== userContentController {
+            context.coordinator.registeredMessageHandlerNames.removeAll()
+            context.coordinator.lastEnvHandlerNames = nil
+            context.coordinator.lastUserContentController = userContentController
+        }
         // systemMessageHandlers never change, so only envHandlerNames matter.
         let envHandlerNames = webViewMessageHandlers.handlers.keys
         // Early exit if environment handler keys haven't changed
