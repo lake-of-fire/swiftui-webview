@@ -2,6 +2,15 @@ import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
 import OrderedCollections
+import LRUCache
+#if os(iOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
+
+@MainActor private var webViewCache: [String: EnhancedWKWebView] = [:]
+@MainActor private let webViewProcessPool = WKProcessPool()
 
 @globalActor
 public actor WebViewActor {
@@ -192,6 +201,8 @@ public class WebViewCoordinator: NSObject {
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
     var config: WebViewConfig
+    var lifecycleConfig: WebViewLifecycleConfig = .default
+    weak var webViewPool: WebViewPool?
     var registeredMessageHandlerNames = Set<String>()
     weak var lastUserContentController: WKUserContentController?
     //    var lastInstalledScriptsHash = -1
@@ -208,6 +219,14 @@ public class WebViewCoordinator: NSObject {
     private var pendingProgressUpdateTask: Task<Void, Never>?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
+#if os(iOS)
+    private weak var snapshotHostController: WebViewController?
+    private var awaitingSnapshotReload = false
+    private var snapshotReloadCommitted = false
+    private var snapshotReloadDocumentReady = false
+    private var pendingSnapshotRestore = false
+    private var activeSnapshotCacheKey: WebViewSnapshotCacheKey?
+#endif
     
     // UIScrollViewDelegate
     internal var lastContentOffset: CGFloat = 0
@@ -218,12 +237,121 @@ public class WebViewCoordinator: NSObject {
     var onNavigationFinished: ((WebViewState) -> Void)?
     var onNavigationFailed: ((WebViewState) -> Void)?
     var onURLChanged: ((WebViewState) -> Void)?
+    var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
     }
     var hideNavigationDueToScroll: Binding<Bool>
     var textSelection: Binding<String?>
+
+#if os(iOS)
+    private func logLookupPerf(_ message: String) {
+        let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+        print("# LOOKUPPERF", timestamp, message)
+    }
+
+    @MainActor
+    func unloadWebViewIfNeeded(controller: WebViewController) {
+        guard lifecycleConfig.autoUnloadOnDisappear else { return }
+        guard let pool = webViewPool else { return }
+        guard !controller.isWebViewUnloaded else { return }
+
+        Task { @MainActor in
+            logLookupPerf("webview.unload.start url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            let metrics = controller.snapshotSizeMetrics()
+            logLookupPerf(
+                "webview.unload.snapshot.prepare current=\(metrics.current) lastKnown=\(metrics.lastKnown) override=\(metrics.shouldOverride)"
+            )
+            let snapshot = await controller.captureSnapshot()
+            if let snapshot {
+                let size = snapshot.size
+                logLookupPerf("webview.unload.snapshot.captured size=\(size)")
+                if size.width > 2, size.height > 2 {
+                    controller.showSnapshotOverlay(snapshot)
+                    logLookupPerf("webview.unload.snapshot.overlay.shown")
+                    snapshotHostController = controller
+                    if let cacheKey = lifecycleConfig.snapshotCacheKey {
+                        WebViewSnapshotCache.storeSnapshot(snapshot, height: size.height, for: cacheKey)
+                        logLookupPerf(
+                            "webview.unload.snapshot.cached widthBucket=\(cacheKey.widthBucket) htmlLength=\(cacheKey.htmlLength) height=\(size.height)"
+                        )
+                    }
+                } else {
+                    logLookupPerf("webview.unload.snapshot.skipped size=\(size)")
+                }
+            }
+            navigator.webView = nil
+            controller.detachWebView()
+            pool.enqueue(controller.webView)
+            controller.isWebViewUnloaded = true
+            logLookupPerf("webview.unload.enqueued")
+        }
+    }
+
+    @MainActor
+    func prepareForReloadIfNeeded(controller: WebViewController) {
+        guard lifecycleConfig.autoUnloadOnDisappear else { return }
+        guard controller.isWebViewUnloaded else { return }
+        guard snapshotHostController != nil else { return }
+        logLookupPerf("webview.reload.prepare")
+        pendingSnapshotRestore = true
+        awaitingSnapshotReload = true
+        snapshotReloadCommitted = false
+        snapshotReloadDocumentReady = false
+        snapshotHostController = snapshotHostController ?? controller
+    }
+
+    @MainActor
+    private func cancelSnapshotReload() {
+        logLookupPerf("webview.reload.cancel")
+        pendingSnapshotRestore = false
+        awaitingSnapshotReload = false
+        snapshotReloadCommitted = false
+        snapshotReloadDocumentReady = false
+        snapshotHostController?.clearSnapshotOverlay()
+        snapshotHostController = nil
+    }
+
+    @MainActor
+    private func maybeHideSnapshotOverlay() {
+        guard awaitingSnapshotReload else { return }
+        guard snapshotReloadCommitted, snapshotReloadDocumentReady else { return }
+        logLookupPerf("webview.reload.snapshot.hide")
+        snapshotHostController?.clearSnapshotOverlay()
+        snapshotHostController = nil
+        awaitingSnapshotReload = false
+        snapshotReloadCommitted = false
+        snapshotReloadDocumentReady = false
+    }
+
+    @MainActor
+    func applyCachedSnapshotIfAvailable(controller: WebViewController) {
+        guard lifecycleConfig.autoUnloadOnDisappear else { return }
+        guard pendingSnapshotRestore else { return }
+        guard let cacheKey = lifecycleConfig.snapshotCacheKey else { return }
+        guard activeSnapshotCacheKey != cacheKey else { return }
+        guard let entry = WebViewSnapshotCache.entry(for: cacheKey),
+              let image = entry.image else { return }
+
+        logLookupPerf(
+            "webview.reload.snapshot.cacheHit widthBucket=\(cacheKey.widthBucket) htmlLength=\(cacheKey.htmlLength) height=\(entry.height.map { String(describing: $0) } ?? "nil")"
+        )
+        snapshotHostController = controller
+        controller.showSnapshotOverlay(image)
+        pendingSnapshotRestore = false
+        awaitingSnapshotReload = true
+        snapshotReloadCommitted = false
+        snapshotReloadDocumentReady = false
+        activeSnapshotCacheKey = cacheKey
+    }
+
+    @MainActor
+    func markSnapshotRestoreIfNeeded() {
+        guard lifecycleConfig.autoUnloadOnDisappear else { return }
+        pendingSnapshotRestore = true
+    }
+#endif
     
     init(
         webView: WebView,
@@ -235,6 +363,7 @@ public class WebViewCoordinator: NSObject {
         onNavigationFinished: ((WebViewState) -> Void)?,
         onNavigationFailed: ((WebViewState) -> Void)?,
         onURLChanged: ((WebViewState) -> Void)? = nil,
+        onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
         hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
@@ -247,6 +376,7 @@ public class WebViewCoordinator: NSObject {
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
+        self.onNavigationAction = onNavigationAction
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.textSelection = textSelection
         
@@ -571,6 +701,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 coordinator: self
             )
         }
+
+#if os(iOS)
+        if awaitingSnapshotReload {
+            snapshotReloadDocumentReady = true
+            logLookupPerf("webview.reload.nav.finish")
+            maybeHideSnapshotOverlay()
+        }
+#endif
         
         extractPageState(webView: webView)
     }
@@ -619,6 +757,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
             forwardList: webView.backForwardList.forwardList,
             error: error
         )
+#if os(iOS)
+        if awaitingSnapshotReload {
+            cancelSnapshotReload()
+        }
+#endif
     }
     
     @MainActor
@@ -636,6 +779,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         extractPageState(webView: webView)
         
         onNavigationFailed?(newState)
+#if os(iOS)
+        if awaitingSnapshotReload {
+            cancelSnapshotReload()
+        }
+#endif
     }
     
     @MainActor
@@ -657,6 +805,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
         newState.pageHTML = nil
         newState.error = nil
         onNavigationCommitted?(newState)
+#if os(iOS)
+        if awaitingSnapshotReload {
+            snapshotReloadCommitted = true
+            logLookupPerf("webview.reload.nav.commit")
+        }
+#endif
     }
     
     @MainActor
@@ -664,6 +818,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# READER webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+#if os(iOS)
+        pendingSnapshotRestore = false
+#endif
         let newState = setLoading(
             true,
             isProvisionallyNavigating: true,
@@ -678,6 +835,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# READER webView.nav.decide",
                    "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
+        if let decision = await onNavigationAction?(navigationAction) {
+            return (decision, preferences)
+        }
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)
@@ -741,6 +901,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
 public class WebViewNavigator: NSObject, ObservableObject {
     private var pendingRequest: URLRequest?
+    private var pendingHTML: (html: String, baseURL: URL?)?
+    private var lastLoadedRequest: URLRequest?
+    private var lastLoadedHTML: (html: String, baseURL: URL?)?
     @MainActor private var bypassContentRulesForNextNavigation = false
     
     @MainActor
@@ -750,6 +913,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
             if let request = pendingRequest {
                 webView.load(request)
                 pendingRequest = nil
+                return
+            }
+            if let pendingHTML {
+                webView.loadHTMLString(pendingHTML.html, baseURL: pendingHTML.baseURL)
+                self.pendingHTML = nil
                 return
             }
             if let blankURL = URL(string: "about:blank") {
@@ -765,6 +933,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func load(_ request: URLRequest) {
+        lastLoadedRequest = request
+        lastLoadedHTML = nil
         if let webView = webView {
             if let url = request.url, url.isFileURL {
                 webView.loadFileURL(url, allowingReadAccessTo: url)
@@ -800,8 +970,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+        lastLoadedHTML = (html: html, baseURL: baseURL)
+        lastLoadedRequest = nil
         guard let webView else {
-            print("Warning: WebViewScriptCaller.loadHTML() called before webView is set.")
+            pendingHTML = (html: html, baseURL: baseURL)
             return
         }
         webView.loadHTMLString(html, baseURL: baseURL)
@@ -810,6 +982,28 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func reload() {
         webView?.reload()
+    }
+
+    @MainActor
+    public func reloadLast() {
+        if let lastLoadedHTML {
+            loadHTML(lastLoadedHTML.html, baseURL: lastLoadedHTML.baseURL)
+            return
+        }
+        if let lastLoadedRequest {
+            load(lastLoadedRequest)
+            return
+        }
+        reload()
+    }
+
+    @MainActor
+    func prepareForReloadAfterReattach() {
+        if let lastLoadedHTML {
+            pendingHTML = lastLoadedHTML
+        } else if let lastLoadedRequest {
+            pendingRequest = lastLoadedRequest
+        }
     }
 
     @MainActor
@@ -1607,6 +1801,114 @@ public struct WebViewConfig: Sendable {
     }
 }
 
+public struct WebViewLifecycleConfig: Sendable, Equatable {
+    public static let `default` = WebViewLifecycleConfig()
+
+    public var autoUnloadOnDisappear: Bool
+    public var snapshotCacheKey: WebViewSnapshotCacheKey?
+
+    public init(autoUnloadOnDisappear: Bool = false, snapshotCacheKey: WebViewSnapshotCacheKey? = nil) {
+        self.autoUnloadOnDisappear = autoUnloadOnDisappear
+        self.snapshotCacheKey = snapshotCacheKey
+    }
+}
+
+public enum WebViewSnapshotColorScheme: Int, Sendable {
+    case light
+    case dark
+    case unspecified
+}
+
+public struct WebViewSnapshotCacheKey: Hashable, Sendable {
+    public let htmlHash: Int
+    public let htmlLength: Int
+    public let widthBucket: Int
+    public let colorScheme: WebViewSnapshotColorScheme
+
+    public init(
+        htmlHash: Int,
+        htmlLength: Int,
+        width: CGFloat,
+        colorScheme: WebViewSnapshotColorScheme = .unspecified
+    ) {
+        self.htmlHash = htmlHash
+        self.htmlLength = htmlLength
+        self.widthBucket = Int((width * 10).rounded())
+        self.colorScheme = colorScheme
+    }
+
+    public init(htmlHash: Int, width: CGFloat, colorScheme: WebViewSnapshotColorScheme = .unspecified) {
+        self.init(htmlHash: htmlHash, htmlLength: 0, width: width, colorScheme: colorScheme)
+    }
+
+    public init(htmlHash: Int, width: CGFloat, colorScheme: ColorScheme) {
+        self.init(htmlHash: htmlHash, htmlLength: 0, width: width, colorScheme: colorScheme)
+    }
+
+    public init(htmlHash: Int, htmlLength: Int, width: CGFloat, colorScheme: ColorScheme) {
+        let scheme: WebViewSnapshotColorScheme
+        switch colorScheme {
+        case .light:
+            scheme = .light
+        case .dark:
+            scheme = .dark
+        @unknown default:
+            scheme = .unspecified
+        }
+        self.init(htmlHash: htmlHash, htmlLength: htmlLength, width: width, colorScheme: scheme)
+    }
+}
+
+#if os(iOS)
+public struct WebViewSnapshotCacheEntry {
+    public var image: UIImage?
+    public var height: CGFloat?
+    public var updatedAt: Date
+
+    public init(image: UIImage?, height: CGFloat?, updatedAt: Date = Date()) {
+        self.image = image
+        self.height = height
+        self.updatedAt = updatedAt
+    }
+}
+
+@MainActor private let webViewSnapshotCache = LRUCache<WebViewSnapshotCacheKey, WebViewSnapshotCacheEntry>()
+
+public enum WebViewSnapshotCache {
+    @MainActor
+    public static func entry(for key: WebViewSnapshotCacheKey) -> WebViewSnapshotCacheEntry? {
+        webViewSnapshotCache.value(forKey: key)
+    }
+
+    @MainActor
+    public static func snapshotImage(for key: WebViewSnapshotCacheKey) -> UIImage? {
+        webViewSnapshotCache.value(forKey: key)?.image
+    }
+
+    @MainActor
+    public static func cachedHeight(for key: WebViewSnapshotCacheKey) -> CGFloat? {
+        webViewSnapshotCache.value(forKey: key)?.height
+    }
+
+    @MainActor
+    public static func storeHeight(_ height: CGFloat, for key: WebViewSnapshotCacheKey) {
+        var entry = webViewSnapshotCache.value(forKey: key) ?? WebViewSnapshotCacheEntry(image: nil, height: nil)
+        entry.height = height
+        entry.updatedAt = Date()
+        webViewSnapshotCache.setValue(entry, forKey: key)
+    }
+
+    @MainActor
+    public static func storeSnapshot(_ image: UIImage, height: CGFloat, for key: WebViewSnapshotCacheKey) {
+        var entry = webViewSnapshotCache.value(forKey: key) ?? WebViewSnapshotCacheEntry(image: nil, height: nil)
+        entry.image = image
+        entry.height = height
+        entry.updatedAt = Date()
+        webViewSnapshotCache.setValue(entry, forKey: key)
+    }
+}
+#endif
+
 fileprivate let kLeftArrowKeyCode:  UInt16  = 123
 fileprivate let kRightArrowKeyCode: UInt16  = 124
 fileprivate let kDownArrowKeyCode:  UInt16  = 125
@@ -1641,8 +1943,15 @@ public class EnhancedWKWebView: WKWebView {
 
 #if os(iOS)
 public class WebViewController: UIViewController {
-    let webView: EnhancedWKWebView
+    var webView: EnhancedWKWebView
     let persistentWebViewID: String?
+    private var webViewConstraints: [NSLayoutConstraint] = []
+    private var snapshotImageView: UIImageView?
+    private var lastKnownWebViewSize: CGSize = .zero
+    var isWebViewUnloaded = false
+    var onViewDidAppear: (() -> Void)?
+    var onViewWillDisappear: (() -> Void)?
+    var onViewDidDisappear: (() -> Void)?
     var obscuredInsets = UIEdgeInsets.zero {
         didSet {
             updateObscuredInsets()
@@ -1653,14 +1962,7 @@ public class WebViewController: UIViewController {
         self.webView = webView
         self.persistentWebViewID = persistentWebViewID
         super.init(nibName: nil, bundle: nil)
-        webView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(webView)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: webView.topAnchor),
-            view.leftAnchor.constraint(equalTo: webView.leftAnchor),
-            view.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
-            view.rightAnchor.constraint(equalTo: webView.rightAnchor)
-        ])
+        attachWebView(webView)
     }
     
     required init?(coder: NSCoder) {
@@ -1670,6 +1972,25 @@ public class WebViewController: UIViewController {
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateObscuredInsets()
+        let size = webView.bounds.size
+        if size.width > 1, size.height > 1 {
+            lastKnownWebViewSize = size
+        }
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        onViewDidAppear?()
+    }
+
+    public override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        onViewDidDisappear?()
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        onViewWillDisappear?()
     }
     
     override public func viewSafeAreaInsetsDidChange() {
@@ -1678,7 +1999,7 @@ public class WebViewController: UIViewController {
     }
     
     private func updateObscuredInsets() {
-        guard let webView = view.subviews.first as? WKWebView else { return }
+        guard let webView = view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
         let insets = UIEdgeInsets(
             top: obscuredInsets.top,
             left: obscuredInsets.left,
@@ -1710,37 +2031,127 @@ public class WebViewController: UIViewController {
         //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
     }
-}
 
-public struct WebView: UIViewControllerRepresentable {
+    @MainActor
+    func replaceWebView(_ newWebView: EnhancedWKWebView) {
+        detachWebView()
+        webView = newWebView
+        attachWebView(newWebView)
+        isWebViewUnloaded = false
+        updateObscuredInsets()
+    }
+
+    @MainActor
+    func detachWebView() {
+        NSLayoutConstraint.deactivate(webViewConstraints)
+        webViewConstraints.removeAll()
+        webView.removeFromSuperview()
+    }
+
+    @MainActor
+    func showSnapshotOverlay(_ image: UIImage) {
+        clearSnapshotOverlay()
+        let imageView = UIImageView(image: image)
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.contentMode = .scaleToFill
+        view.addSubview(imageView)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: imageView.topAnchor),
+            view.leftAnchor.constraint(equalTo: imageView.leftAnchor),
+            view.bottomAnchor.constraint(equalTo: imageView.bottomAnchor),
+            view.rightAnchor.constraint(equalTo: imageView.rightAnchor)
+        ])
+        snapshotImageView = imageView
+    }
+
+    @MainActor
+    func clearSnapshotOverlay() {
+        snapshotImageView?.removeFromSuperview()
+        snapshotImageView = nil
+    }
+
+    @MainActor
+    func snapshotSizeMetrics() -> (current: CGSize, lastKnown: CGSize, shouldOverride: Bool) {
+        let current = webView.bounds.size
+        let lastKnown = lastKnownWebViewSize
+        let shouldOverride = (current.width < 2 || current.height < 2)
+            && lastKnown.width > 2
+            && lastKnown.height > 2
+        return (current, lastKnown, shouldOverride)
+    }
+
+    @MainActor
+    func captureSnapshot() async -> UIImage? {
+        let metrics = snapshotSizeMetrics()
+        let originalBounds = webView.bounds
+        var didOverride = false
+        if metrics.shouldOverride {
+            webView.bounds = CGRect(origin: .zero, size: metrics.lastKnown)
+            webView.layoutIfNeeded()
+            webView.scrollView.layoutIfNeeded()
+            didOverride = true
+        }
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = webView.bounds
+        let image = await withCheckedContinuation { continuation in
+            webView.takeSnapshot(with: configuration) { image, _ in
+                continuation.resume(returning: image)
+            }
+        }
+        if didOverride {
+            webView.bounds = originalBounds
+            webView.layoutIfNeeded()
+        }
+        return image
+    }
+
+    @MainActor
+    private func attachWebView(_ webView: EnhancedWKWebView) {
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        if let snapshotImageView {
+            view.insertSubview(webView, belowSubview: snapshotImageView)
+        } else {
+            view.addSubview(webView)
+        }
+        webViewConstraints = [
+            view.topAnchor.constraint(equalTo: webView.topAnchor),
+            view.leftAnchor.constraint(equalTo: webView.leftAnchor),
+            view.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            view.rightAnchor.constraint(equalTo: webView.rightAnchor)
+        ]
+        NSLayoutConstraint.activate(webViewConstraints)
+    }
+}
+#endif
+
+public struct WebView {
     private let config: WebViewConfig
     var navigator: WebViewNavigator
     @Binding var state: WebViewState
     var scriptCaller: WebViewScriptCaller?
     let blockedHosts: Set<String>?
     let htmlInState: Bool
+    let lifecycleConfig: WebViewLifecycleConfig
     let schemeHandlers: [(WKURLSchemeHandler, String)]
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let onNavigationFailed: ((WebViewState) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
+    let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
     var bounces = true
     let persistentWebViewID: String?
+    let webViewPool: WebViewPool?
     //    let onWarm: (() async -> Void)?
     
     @Environment(\.webViewMessageHandlers) internal var webViewMessageHandlers
     
-    private var userContentController = WKUserContentController()
     //    @State fileprivate var isWarm = false
     @State fileprivate var drawsBackground = false
     @State private var lastInstalledScripts = [WebViewUserScript]()
-    
-    private static var webViewCache: [String: EnhancedWKWebView] = [:]
-    private static let processPool = WKProcessPool()
     
     public init(config: WebViewConfig = .default,
                 navigator: WebViewNavigator,
@@ -1757,9 +2168,12 @@ public struct WebView: UIViewControllerRepresentable {
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
+                onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
-                textSelection: Binding<String?>? = nil
+                textSelection: Binding<String?>? = nil,
+                webViewPool: WebViewPool? = nil,
+                lifecycleConfig: WebViewLifecycleConfig? = nil
     ) {
         self.config = config
         _state = state
@@ -1776,13 +2190,17 @@ public struct WebView: UIViewControllerRepresentable {
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
+        self.onNavigationAction = onNavigationAction
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
+        self.webViewPool = webViewPool
+        self.lifecycleConfig = lifecycleConfig ?? .default
     }
     
+    @MainActor
     public func makeCoordinator() -> WebViewCoordinator {
-        return WebViewCoordinator(
+        let coordinator = WebViewCoordinator(
             webView: self,
             navigator: navigator,
             scriptCaller: scriptCaller,
@@ -1792,11 +2210,18 @@ public struct WebView: UIViewControllerRepresentable {
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
             onURLChanged: onURLChanged,
+            onNavigationAction: onNavigationAction,
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
+        coordinator.webViewPool = webViewPool
+        coordinator.lifecycleConfig = lifecycleConfig
+        return coordinator
     }
-    
+}
+
+#if os(iOS)
+extension WebView: UIViewControllerRepresentable {
     @MainActor
     private func makeWebView(
         id: String?,
@@ -1805,7 +2230,7 @@ public struct WebView: UIViewControllerRepresentable {
     ) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
         if let id = id {
-            web = Self.webViewCache[id] // it is UI thread so safe to access static
+            web = webViewCache[id] // it is UI thread so safe to access static
             for messageHandlerName in coordinator.messageHandlerNames {
                 web?.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
             }
@@ -1813,49 +2238,15 @@ public struct WebView: UIViewControllerRepresentable {
             coordinator.lastEnvHandlerNames = nil
             coordinator.lastUserContentController = web?.configuration.userContentController
         }
+        if web == nil, let webViewPool {
+            web = webViewPool.dequeue {
+                makeNewWebView(config: config)
+            }
+        }
         if web == nil {
-            let preferences = WKWebpagePreferences()
-            preferences.allowsContentJavaScript = config.javaScriptEnabled
-            
-            let configuration = WKWebViewConfiguration()
-            configuration.applicationNameForUserAgent = userAgent
-            configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
-            //        configuration.defaultWebpagePreferences.preferredContentMode = .mobile  // for font adjustment to work
-            //            configuration.mediaTypesRequiringUserActionForPlayback = config.mediaTypesRequiringUserActionForPlayback
-            if config.dataDetectorsEnabled {
-                configuration.dataDetectorTypes = [.all]
-            } else {
-                configuration.dataDetectorTypes = []
-            }
-            configuration.defaultWebpagePreferences = preferences
-            configuration.processPool = Self.processPool
-            //            configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
-            
-            configuration.websiteDataStore = WKWebsiteDataStore.default()
-            // For private mode later:
-            //            let dataStore = WKWebsiteDataStore.nonPersistent()
-            //            configuration.websiteDataStore = dataStore
-            
-            for (urlSchemeHandler, urlScheme) in schemeHandlers {
-                configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
-            }
-            
-            web = EnhancedWKWebView(frame: .zero, configuration: configuration)
-            web?.isOpaque = config.isOpaque
-            if #available(iOS 14.0, *) {
-                web?.backgroundColor = UIColor(config.backgroundColor)
-                web?.scrollView.backgroundColor = UIColor(config.backgroundColor)
-            } else {
-                web?.backgroundColor = config.isOpaque ? .systemBackground : .clear
-                web?.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
-            }
-            web?.scrollView.isOpaque = config.isOpaque
-            if #available(iOS 15.0, *) {
-                web?.underPageBackgroundColor = UIColor(config.backgroundColor)
-            }
-            
+            web = makeNewWebView(config: config)
             if let id = id {
-                Self.webViewCache[id] = web
+                webViewCache[id] = web
             }
         }
         guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
@@ -1866,28 +2257,62 @@ public struct WebView: UIViewControllerRepresentable {
         
         return web
     }
-    
+
     @MainActor
-    public func makeUIViewController(context: Context) -> WebViewController {
-        // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
-        //        preferences.setValue(true, forKey: "developerExtrasEnabled")
-        
-        let webView = makeWebView(
-            id: persistentWebViewID,
-            config: config,
-            coordinator: context.coordinator
+    private func makeNewWebView(config: WebViewConfig) -> EnhancedWKWebView {
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
+
+        let configuration = WKWebViewConfiguration()
+        configuration.applicationNameForUserAgent = userAgent
+        configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
+        if config.dataDetectorsEnabled {
+            configuration.dataDetectorTypes = [.all]
+        } else {
+            configuration.dataDetectorTypes = []
+        }
+        configuration.defaultWebpagePreferences = preferences
+        configuration.processPool = webViewProcessPool
+        configuration.websiteDataStore = WKWebsiteDataStore.default()
+
+        for (urlSchemeHandler, urlScheme) in schemeHandlers {
+            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+        }
+
+        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        webView.isOpaque = config.isOpaque
+        if #available(iOS 14.0, *) {
+            webView.backgroundColor = UIColor(config.backgroundColor)
+            webView.scrollView.backgroundColor = UIColor(config.backgroundColor)
+        } else {
+            webView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+            webView.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+        }
+        webView.scrollView.isOpaque = config.isOpaque
+        if #available(iOS 15.0, *) {
+            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+        }
+        return webView
+    }
+
+    @MainActor
+    private func configureWebView(
+        _ webView: EnhancedWKWebView,
+        controller: WebViewController,
+        context: Context
+    ) {
+        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        applyCommonConfiguration(
+            webView: webView,
+            context: context,
+            resolvedContentRules: resolvedContentRules
         )
-        webView.configuration.userContentController = userContentController
-        refreshMessageHandlers(userContentController: userContentController, context: context)
-        refreshContentRules(userContentController: userContentController, coordinator: context.coordinator)
         webView.allowsLinkPreview = true
-        webView.navigationDelegate = context.coordinator
-        webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
-        webView.scrollView.contentInsetAdjustmentBehavior = .always
-        //        webView.scrollView.contentInsetAdjustmentBehavior = .scrollableAxes
-        webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.uiDelegate = context.coordinator
-        webView.pageZoom = config.pageZoom
+        webView.scrollView.delegate = context.coordinator
+        webView.buildMenu = buildMenu
+        webView.scrollView.contentInsetAdjustmentBehavior = .always
+        webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             webView.backgroundColor = UIColor(config.backgroundColor)
@@ -1906,19 +2331,13 @@ public struct WebView: UIViewControllerRepresentable {
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
         }
-        
-        //        webView.setValue(drawsBackground, forKey: "drawsBackground")
-        
+
         context.coordinator.setWebView(webView)
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        //        context.coordinator.scriptCaller?.caller = {
-        //            webView.evaluateJavaScript($0, completionHandler: $1)
-        //        }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
             let resolvedWorld = world ?? .page
-            //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
             if let args {
                 let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
                 return WebViewScriptCaller.JavaScriptEvaluationResult(value)
@@ -1928,33 +2347,65 @@ public struct WebView: UIViewControllerRepresentable {
             }
         }
         context.coordinator.textSelection = $textSelection
-        
         refreshDarkModeSetting(webView: webView)
+        applyVisualConfiguration(webView: webView, containerView: controller.view)
+    }
+    
+    @MainActor
+    public func makeUIViewController(context: Context) -> WebViewController {
+        // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
+        //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
-        // In case we retrieved a cached web view that is already warm but we don't know it.
-        //        webView.evaluateJavaScript("window.webkit.messageHandlers.swiftUIWebViewIsWarm.postMessage({})")
-        
-        return WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
+        let webView = makeWebView(
+            id: persistentWebViewID,
+            config: config,
+            coordinator: context.coordinator
+        )
+        let controller = WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
+        configureWebView(webView, controller: controller, context: context)
+        context.coordinator.markSnapshotRestoreIfNeeded()
+        context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
+        controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
+            guard let coordinator, let controller else { return }
+            #if os(iOS)
+            let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+            print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            #endif
+            if coordinator.lifecycleConfig.autoUnloadOnDisappear, controller.isWebViewUnloaded {
+                coordinator.prepareForReloadIfNeeded(controller: controller)
+                coordinator.navigator.prepareForReloadAfterReattach()
+                let newWebView = makeWebView(id: persistentWebViewID, config: config, coordinator: coordinator)
+                controller.replaceWebView(newWebView)
+                configureWebView(newWebView, controller: controller, context: context)
+            }
+        }
+        controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
+            guard let coordinator, let controller else { return }
+            #if os(iOS)
+            let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+            print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            #endif
+            coordinator.unloadWebViewIfNeeded(controller: controller)
+        }
+        controller.onViewDidDisappear = { [weak controller] in
+            guard let controller else { return }
+            #if os(iOS)
+            let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+            print("# LOOKUPPERF", timestamp, "webview.viewDidDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            #endif
+        }
+        return controller
     }
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
-        context.coordinator.config = config
-        context.coordinator.messageHandlers = webViewMessageHandlers
-        context.coordinator.onNavigationCommitted = onNavigationCommitted
-        context.coordinator.onNavigationFinished = onNavigationFinished
-        context.coordinator.onNavigationFailed = onNavigationFailed
-        context.coordinator.onURLChanged = onURLChanged
-        
-        refreshMessageHandlers(userContentController: controller.webView.configuration.userContentController, context: context)
+        updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
-        if context.coordinator.lastAppliedContentRules != resolvedContentRules {
-            refreshContentRules(
-                userContentController: controller.webView.configuration.userContentController,
-                coordinator: context.coordinator,
-                overrideRules: resolvedContentRules
-            )
-        }
+        applyCommonConfiguration(
+            webView: controller.webView,
+            context: context,
+            resolvedContentRules: resolvedContentRules
+        )
         refreshDarkModeSetting(webView: controller.webView)
         //        refreshMessageHandlers(context: context)
         //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
@@ -1967,10 +2418,9 @@ public struct WebView: UIViewControllerRepresentable {
         controller.webView.buildMenu = buildMenu
         controller.webView.scrollView.bounces = bounces
         controller.webView.scrollView.alwaysBounceVertical = bounces
-        controller.webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
-        controller.webView.pageZoom = config.pageZoom
         applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
+        context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
@@ -1993,136 +2443,78 @@ public struct WebView: UIViewControllerRepresentable {
             right: 0
         )
         // _obscuredInsets ignores sides, probably
+        controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
+            guard let coordinator, let controller else { return }
+            #if os(iOS)
+            let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+            print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            #endif
+            if coordinator.lifecycleConfig.autoUnloadOnDisappear, controller.isWebViewUnloaded {
+                coordinator.prepareForReloadIfNeeded(controller: controller)
+                coordinator.navigator.prepareForReloadAfterReattach()
+                let newWebView = makeWebView(id: persistentWebViewID, config: config, coordinator: coordinator)
+                controller.replaceWebView(newWebView)
+                configureWebView(newWebView, controller: controller, context: context)
+            }
+        }
+        controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
+            guard let coordinator, let controller else { return }
+            #if os(iOS)
+            let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+            print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            #endif
+            coordinator.unloadWebViewIfNeeded(controller: controller)
+        }
+        controller.onViewDidDisappear = { [weak controller] in
+            guard let controller else { return }
+            #if os(iOS)
+            let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
+            print("# LOOKUPPERF", timestamp, "webview.viewDidDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
+            #endif
+        }
     }
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
-        controller.view.subviews.forEach { $0.removeFromSuperview() }
+        controller.clearSnapshotOverlay()
+        if let pool = coordinator.webViewPool {
+            if !controller.isWebViewUnloaded {
+                controller.detachWebView()
+                pool.enqueue(controller.webView)
+            }
+        } else {
+            controller.view.subviews.forEach { $0.removeFromSuperview() }
+        }
     }
 }
 #endif
 
 #if os(macOS)
-public struct WebView: NSViewRepresentable {
-    private let config: WebViewConfig
-    var navigator: WebViewNavigator
-    @Binding var state: WebViewState
-    var scriptCaller: WebViewScriptCaller?
-    let blockedHosts: Set<String>?
-    let htmlInState: Bool
-    //    let onWarm: (() -> Void)?
-    let schemeHandlers: [(WKURLSchemeHandler, String)]
-    let onNavigationCommitted: ((WebViewState) -> Void)?
-    let onNavigationFinished: ((WebViewState) -> Void)?
-    let onNavigationFailed: ((WebViewState) -> Void)?
-    let onURLChanged: ((WebViewState) -> Void)?
-    @Binding var hideNavigationDueToScroll: Bool
-    @Binding var textSelection: String?
-    /// Unused on macOS (for now?).
-    var obscuredInsets: EdgeInsets
-    var bounces = true
-    private var userContentController = WKUserContentController()
-    
-    @Environment(\.webViewMessageHandlers) private var webViewMessageHandlers
-    
-    //    @State fileprivate var isWarm = false
-    @State fileprivate var drawsBackground = false
-    @State private var lastInstalledScripts = [WebViewUserScript]()
-    
-    private static let processPool = WKProcessPool()
-    
-    /// `persistentWebViewID` is only used on iOS, not macOS.
-    public init(config: WebViewConfig = .default,
-                navigator: WebViewNavigator,
-                state: Binding<WebViewState>,
-                scriptCaller: WebViewScriptCaller? = nil,
-                blockedHosts: Set<String>? = nil,
-                htmlInState: Bool = false,
-                obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
-                bounces: Bool = true,
-                persistentWebViewID: String? = nil,
-                //                onWarm: (() -> Void)? = nil,
-                schemeHandlers: [(WKURLSchemeHandler, String)] = [],
-                onNavigationCommitted: ((WebViewState) -> Void)? = nil,
-                onNavigationFinished: ((WebViewState) -> Void)? = nil,
-                onNavigationFailed: ((WebViewState) -> Void)? = nil,
-                onURLChanged: ((WebViewState) -> Void)? = nil,
-                buildMenu: BuildMenuType? = nil,
-                hideNavigationDueToScroll: Binding<Bool> = .constant(false),
-                textSelection: Binding<String?>? = nil
-    ) {
-        self.config = config
-        self.navigator = navigator
-        _state = state
-        self.scriptCaller = scriptCaller
-        self.blockedHosts = blockedHosts
-        self.htmlInState = htmlInState
-        self.obscuredInsets = obscuredInsets
-        self.bounces = bounces
-        //        self.onWarm = onWarm
-        self.schemeHandlers = schemeHandlers
-        self.onNavigationCommitted = onNavigationCommitted
-        self.onNavigationFinished = onNavigationFinished
-        self.onNavigationFailed = onNavigationFailed
-        self.onURLChanged = onURLChanged
-        _hideNavigationDueToScroll = hideNavigationDueToScroll
-        _textSelection = textSelection ?? .constant(nil)
-        
-        // TODO: buildMenu macOS...
-    }
-    
-    public func makeCoordinator() -> WebViewCoordinator {
-        return WebViewCoordinator(
-            webView: self,
-            navigator: navigator,
-            scriptCaller: scriptCaller,
-            config: config,
-            messageHandlers: webViewMessageHandlers,
-            onNavigationCommitted: onNavigationCommitted,
-            onNavigationFinished: onNavigationFinished,
-            onNavigationFailed: onNavigationFailed,
-            onURLChanged: onURLChanged,
-            hideNavigationDueToScroll: $hideNavigationDueToScroll,
-            textSelection: $textSelection
-        )
-    }
-    
+extension WebView: NSViewRepresentable {
     @MainActor
     public func makeNSView(context: Context) -> EnhancedWKWebView {
-        let preferences = WKWebpagePreferences()
-        preferences.allowsContentJavaScript = config.javaScriptEnabled
-        
-        // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
-        //        preferences.setValue(true, forKey: "developerExtrasEnabled") // Wasn't working - revisit, because it would be great to have.
-        
-        let configuration = WKWebViewConfiguration()
-        configuration.applicationNameForUserAgent = userAgent
-        configuration.defaultWebpagePreferences = preferences
-        configuration.websiteDataStore = WKWebsiteDataStore.default()
-        // For private mode later:
-        //            let dataStore = WKWebsiteDataStore.nonPersistent()
-        //            configuration.websiteDataStore = dataStore
-        configuration.processPool = Self.processPool
-        configuration.userContentController = userContentController
-        refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
-        refreshContentRules(userContentController: configuration.userContentController, coordinator: context.coordinator)
-        //        updateUserScripts(userContentController: configuration.userContentController, coordinator: context.coordinator, forDomain: nil, config: config)
-        
-        // For private mode later:
-        //        let dataStore = WKWebsiteDataStore.nonPersistent()
-        //        configuration.websiteDataStore = dataStore
-        
-        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-        configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
-        
-        for (urlSchemeHandler, urlScheme) in schemeHandlers {
-            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+        if let webViewPool {
+            webViewPool.setCreationClosureIfNeeded {
+                makeNewWebView(context: context)
+            }
         }
-        
-        let webView = EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
-        webView.navigationDelegate = context.coordinator
-        webView.uiDelegate = context.coordinator
-        webView.pageZoom = config.pageZoom
-        webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+
+        let webView: EnhancedWKWebView
+        if let webViewPool {
+            webView = webViewPool.dequeue {
+                makeNewWebView(context: context)
+            }
+        } else {
+            webView = makeNewWebView(context: context)
+        }
+
+        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        applyCommonConfiguration(
+            webView: webView,
+            context: context,
+            resolvedContentRules: resolvedContentRules
+        )
+        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+        webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
             webView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
         } else {
@@ -2188,26 +2580,36 @@ public struct WebView: NSViewRepresentable {
         
         return webView
     }
+
+    @MainActor
+    private func makeNewWebView(context: Context) -> EnhancedWKWebView {
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
+
+        let configuration = WKWebViewConfiguration()
+        configuration.applicationNameForUserAgent = userAgent
+        configuration.defaultWebpagePreferences = preferences
+        configuration.websiteDataStore = WKWebsiteDataStore.default()
+        configuration.processPool = webViewProcessPool
+        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+        configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+
+        for (urlSchemeHandler, urlScheme) in schemeHandlers {
+            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+        }
+
+        return EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
+    }
     
     @MainActor
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
-        context.coordinator.config = config
-        context.coordinator.messageHandlers = webViewMessageHandlers
-        context.coordinator.onNavigationCommitted = onNavigationCommitted
-        context.coordinator.onNavigationFinished = onNavigationFinished
-        context.coordinator.onNavigationFailed = onNavigationFailed
-        context.coordinator.onURLChanged = onURLChanged
-        
-        //        refreshMessageHandlers(context: context)
-        refreshMessageHandlers(userContentController: uiView.configuration.userContentController, context: context)
+        updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
-        if context.coordinator.lastAppliedContentRules != resolvedContentRules {
-            refreshContentRules(
-                userContentController: uiView.configuration.userContentController,
-                coordinator: context.coordinator,
-                overrideRules: resolvedContentRules
-            )
-        }
+        applyCommonConfiguration(
+            webView: uiView,
+            context: context,
+            resolvedContentRules: resolvedContentRules
+        )
         //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
         
         // Can't disable on macOS.
@@ -2230,6 +2632,9 @@ public struct WebView: NSViewRepresentable {
         for messageHandlerName in coordinator.messageHandlerNames {
             nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
         }
+        if let pool = coordinator.webViewPool {
+            pool.enqueue(nsView)
+        }
     }
 }
 #endif
@@ -2240,6 +2645,41 @@ extension WebView {
         return "Version/18.4 Safari/605.1.15"
     }
     
+    @MainActor
+    func applyCommonConfiguration(
+        webView: WKWebView,
+        context: Context,
+        resolvedContentRules: String?
+    ) {
+        refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
+        if context.coordinator.lastAppliedContentRules != resolvedContentRules {
+            refreshContentRules(
+                userContentController: webView.configuration.userContentController,
+                coordinator: context.coordinator,
+                overrideRules: resolvedContentRules
+            )
+        }
+        webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
+        webView.pageZoom = config.pageZoom
+        webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+    }
+
+    @MainActor
+    func updateCoordinatorBindings(context: Context) {
+        context.coordinator.config = config
+        context.coordinator.messageHandlers = webViewMessageHandlers
+        context.coordinator.onNavigationCommitted = onNavigationCommitted
+        context.coordinator.onNavigationFinished = onNavigationFinished
+        context.coordinator.onNavigationFailed = onNavigationFailed
+        context.coordinator.onURLChanged = onURLChanged
+        context.coordinator.onNavigationAction = onNavigationAction
+        context.coordinator.webViewPool = webViewPool
+        context.coordinator.lifecycleConfig = lifecycleConfig
+        context.coordinator.hideNavigationDueToScroll = $hideNavigationDueToScroll
+        context.coordinator.textSelection = $textSelection
+    }
+
     @MainActor
     func refreshDarkModeSetting(webView: WKWebView) {
 #if os(iOS)
@@ -2382,7 +2822,7 @@ extension WebView {
         //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
     
-    fileprivate static let systemScripts = [
+    @MainActor fileprivate static let systemScripts = [
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,

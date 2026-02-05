@@ -16,6 +16,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-collections.git", branch: "main"),
+        .package(url: "https://github.com/nicklockwood/LRUCache.git", from: "1.1.2"),
 //        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
     ],
     targets: [
@@ -23,6 +24,7 @@ let package = Package(
             name: "SwiftUIWebView",
             dependencies: [
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "LRUCache", package: "LRUCache"),
 //                .product(name: "BookmarkStorage", package: "bookmark-storage"),
             ],
             resources: [
