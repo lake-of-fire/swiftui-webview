@@ -181,6 +181,7 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
 public enum DarkModeSetting: String, CaseIterable, Identifiable, Sendable {
     case system
     case darkModeOverride
+    case alwaysLightMode
     
     public var id: String { self.rawValue }
     
@@ -190,6 +191,8 @@ public enum DarkModeSetting: String, CaseIterable, Identifiable, Sendable {
             return "Use System Setting"
         case .darkModeOverride:
             return "Always Dark Mode"
+        case .alwaysLightMode:
+            return "Always Light Mode"
         }
     }
 }
@@ -283,7 +286,7 @@ public class WebViewCoordinator: NSObject {
             }
             navigator.webView = nil
             controller.detachWebView()
-            pool.enqueue(controller.webView)
+            pool.enqueue(controller.webView, resetURL: lifecycleConfig.idleLoadURL)
             controller.isWebViewUnloaded = true
             logLookupPerf("webview.unload.enqueued")
         }
@@ -593,6 +596,13 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
+#if DEBUG
+            debugPrint(
+                "# TABBAR webUnhandledTapHideNav",
+                "current=\(hideNavigationDueToScroll.wrappedValue)",
+                "next=\(!hideNavigationDueToScroll.wrappedValue)"
+            )
+#endif
             withAnimation(.easeOut(duration: 0.18)) {
                 hideNavigationDueToScroll.wrappedValue.toggle()
             }
@@ -905,6 +915,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     private var lastLoadedRequest: URLRequest?
     private var lastLoadedHTML: (html: String, baseURL: URL?)?
     @MainActor private var bypassContentRulesForNextNavigation = false
+    public var attachFallbackURL: URL?
+    public var shouldLoadFallbackOnAttach = true
     
     @MainActor
     weak var webView: WKWebView? {
@@ -920,8 +932,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 self.pendingHTML = nil
                 return
             }
-            if let blankURL = URL(string: "about:blank") {
-                webView.load(URLRequest(url: blankURL))
+            guard shouldLoadFallbackOnAttach else {
+                return
+            }
+            if let fallbackURL = attachFallbackURL {
+                webView.load(URLRequest(url: fallbackURL))
+            } else {
+                webView.load(URLRequest(url: URL(string: "about:blank")!))
             }
         }
     }
@@ -1806,10 +1823,16 @@ public struct WebViewLifecycleConfig: Sendable, Equatable {
 
     public var autoUnloadOnDisappear: Bool
     public var snapshotCacheKey: WebViewSnapshotCacheKey?
+    public var idleLoadURL: URL?
 
-    public init(autoUnloadOnDisappear: Bool = false, snapshotCacheKey: WebViewSnapshotCacheKey? = nil) {
+    public init(
+        autoUnloadOnDisappear: Bool = false,
+        snapshotCacheKey: WebViewSnapshotCacheKey? = nil,
+        idleLoadURL: URL? = nil
+    ) {
         self.autoUnloadOnDisappear = autoUnloadOnDisappear
         self.snapshotCacheKey = snapshotCacheKey
+        self.idleLoadURL = idleLoadURL
     }
 }
 
@@ -2145,6 +2168,7 @@ public struct WebView {
     var bounces = true
     let persistentWebViewID: String?
     let webViewPool: WebViewPool?
+    let webViewPrewarmer: WebViewPrewarmer?
     //    let onWarm: (() async -> Void)?
     
     @Environment(\.webViewMessageHandlers) internal var webViewMessageHandlers
@@ -2173,6 +2197,7 @@ public struct WebView {
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
                 webViewPool: WebViewPool? = nil,
+                webViewPrewarmer: WebViewPrewarmer? = nil,
                 lifecycleConfig: WebViewLifecycleConfig? = nil
     ) {
         self.config = config
@@ -2195,6 +2220,7 @@ public struct WebView {
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
         self.webViewPool = webViewPool
+        self.webViewPrewarmer = webViewPrewarmer
         self.lifecycleConfig = lifecycleConfig ?? .default
     }
     
@@ -2214,8 +2240,9 @@ public struct WebView {
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
-        coordinator.webViewPool = webViewPool
+        coordinator.webViewPool = resolvedWebViewPool
         coordinator.lifecycleConfig = lifecycleConfig
+        coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
         return coordinator
     }
 }
@@ -2238,8 +2265,8 @@ extension WebView: UIViewControllerRepresentable {
             coordinator.lastEnvHandlerNames = nil
             coordinator.lastUserContentController = web?.configuration.userContentController
         }
-        if web == nil, let webViewPool {
-            web = webViewPool.dequeue {
+        if web == nil, let resolvedWebViewPool {
+            web = resolvedWebViewPool.dequeue {
                 makeNewWebView(config: config)
             }
         }
@@ -2479,7 +2506,7 @@ extension WebView: UIViewControllerRepresentable {
         if let pool = coordinator.webViewPool {
             if !controller.isWebViewUnloaded {
                 controller.detachWebView()
-                pool.enqueue(controller.webView)
+                pool.enqueue(controller.webView, resetURL: coordinator.lifecycleConfig.idleLoadURL)
             }
         } else {
             controller.view.subviews.forEach { $0.removeFromSuperview() }
@@ -2492,15 +2519,15 @@ extension WebView: UIViewControllerRepresentable {
 extension WebView: NSViewRepresentable {
     @MainActor
     public func makeNSView(context: Context) -> EnhancedWKWebView {
-        if let webViewPool {
-            webViewPool.setCreationClosureIfNeeded {
+        if let resolvedWebViewPool {
+            resolvedWebViewPool.setCreationClosureIfNeeded {
                 makeNewWebView(context: context)
             }
         }
 
         let webView: EnhancedWKWebView
-        if let webViewPool {
-            webView = webViewPool.dequeue {
+        if let resolvedWebViewPool {
+            webView = resolvedWebViewPool.dequeue {
                 makeNewWebView(context: context)
             }
         } else {
@@ -2640,6 +2667,10 @@ extension WebView: NSViewRepresentable {
 #endif
 
 extension WebView {
+    private var resolvedWebViewPool: WebViewPool? {
+        webViewPrewarmer?.pool ?? webViewPool
+    }
+
     var userAgent: String {
         //        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
         return "Version/18.4 Safari/605.1.15"
@@ -2674,8 +2705,9 @@ extension WebView {
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
-        context.coordinator.webViewPool = webViewPool
+        context.coordinator.webViewPool = resolvedWebViewPool
         context.coordinator.lifecycleConfig = lifecycleConfig
+        context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
         context.coordinator.hideNavigationDueToScroll = $hideNavigationDueToScroll
         context.coordinator.textSelection = $textSelection
     }
@@ -2683,9 +2715,23 @@ extension WebView {
     @MainActor
     func refreshDarkModeSetting(webView: WKWebView) {
 #if os(iOS)
-        webView.overrideUserInterfaceStyle = config.darkModeSetting == .darkModeOverride ? .dark : .unspecified
+        switch config.darkModeSetting {
+        case .system:
+            webView.overrideUserInterfaceStyle = .unspecified
+        case .darkModeOverride:
+            webView.overrideUserInterfaceStyle = .dark
+        case .alwaysLightMode:
+            webView.overrideUserInterfaceStyle = .light
+        }
 #elseif os(macOS)
-        webView.appearance = config.darkModeSetting == .darkModeOverride ? NSAppearance(named: .darkAqua) : nil
+        switch config.darkModeSetting {
+        case .system:
+            webView.appearance = nil
+        case .darkModeOverride:
+            webView.appearance = NSAppearance(named: .darkAqua)
+        case .alwaysLightMode:
+            webView.appearance = NSAppearance(named: .aqua)
+        }
 #endif
     }
 
