@@ -3,6 +3,7 @@ import WebKit
 import UniformTypeIdentifiers
 import OrderedCollections
 import LRUCache
+import Foundation
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -284,7 +285,7 @@ public class WebViewCoordinator: NSObject {
                     logLookupPerf("webview.unload.snapshot.skipped size=\(size)")
                 }
             }
-            navigator.webView = nil
+            tearDownBindingsForDetachedWebView(controller.webView)
             controller.detachWebView()
             pool.enqueue(controller.webView, resetURL: lifecycleConfig.idleLoadURL)
             controller.isWebViewUnloaded = true
@@ -395,11 +396,57 @@ public class WebViewCoordinator: NSObject {
     deinit {
         urlObservation?.invalidate()
     }
+
+    @MainActor
+    private func invalidateWebViewObservations() {
+        urlObservation?.invalidate()
+        urlObservation = nil
+        estimatedProgressObservation?.invalidate()
+        estimatedProgressObservation = nil
+        isLoadingObservation?.invalidate()
+        isLoadingObservation = nil
+        pendingProgressUpdateTask?.cancel()
+        pendingProgressUpdateTask = nil
+        lastEmittedProgress = nil
+        lastProgressUpdateTime = 0
+    }
+
+    @MainActor
+    private func clearScriptCallerBinding() {
+        scriptCaller?.asyncCaller = nil
+    }
+
+    @MainActor
+    private func removeMessageHandlers(for webView: WKWebView?) {
+        guard let userContentController = webView?.configuration.userContentController else {
+            registeredMessageHandlerNames.removeAll()
+            lastEnvHandlerNames = nil
+            lastUserContentController = nil
+            return
+        }
+        for messageHandlerName in registeredMessageHandlerNames {
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
+        }
+        registeredMessageHandlerNames.removeAll()
+        lastEnvHandlerNames = nil
+        lastUserContentController = nil
+    }
+
+    @MainActor
+    func tearDownBindingsForDetachedWebView(_ webView: WKWebView?) {
+        removeMessageHandlers(for: webView)
+        navigator.webView = nil
+        clearScriptCallerBinding()
+        invalidateWebViewObservations()
+    }
     
     @MainActor
     func setWebView(_ webView: WKWebView) {
         navigator.webView = webView
-        
+
+        invalidateWebViewObservations()
+
         urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, change in
             guard let self else { return }
             Task { @MainActor [weak self] in
@@ -414,12 +461,6 @@ public class WebViewCoordinator: NSObject {
                     forwardList: webView.backForwardList.forwardList)
             }
         }
-
-        estimatedProgressObservation?.invalidate()
-        isLoadingObservation?.invalidate()
-        pendingProgressUpdateTask?.cancel()
-        lastEmittedProgress = nil
-        lastProgressUpdateTime = 0
 
         estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
@@ -1055,7 +1096,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public func goForward() {
         webView?.goForward()
     }
-    
+
     public override init() {
         super.init()
     }
@@ -1139,7 +1180,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return value
         }
     }
-    
+
     //    @MainActor
     @discardableResult
     public func evaluateJavaScript(
@@ -1938,6 +1979,14 @@ fileprivate let kDownArrowKeyCode:  UInt16  = 125
 fileprivate let kUpArrowKeyCode:    UInt16  = 126
 
 public class EnhancedWKWebView: WKWebView {
+    public override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+    }
+
+    public required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
 #if os(iOS)
     var buildMenu: BuildMenuType?
 #endif
@@ -2363,7 +2412,10 @@ extension WebView: UIViewControllerRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] js, args, frame, world in
+            guard let webView else {
+                throw ScriptCallerError.evaluationTimedOut
+            }
             let resolvedWorld = world ?? .page
             if let args {
                 let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
@@ -2503,6 +2555,7 @@ extension WebView: UIViewControllerRepresentable {
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         controller.clearSnapshotOverlay()
+        coordinator.tearDownBindingsForDetachedWebView(controller.webView)
         if let pool = coordinator.webViewPool {
             if !controller.isWebViewUnloaded {
                 controller.detachWebView()
@@ -2555,7 +2608,10 @@ extension WebView: NSViewRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
+            guard let webView else {
+                throw ScriptCallerError.evaluationTimedOut
+            }
             let jsPrefix = js.prefix(120)
             let frameURL = frame?.request.url?.absoluteString ?? "nil"
             let isMainFrame = frame?.isMainFrame ?? true
@@ -2656,9 +2712,7 @@ extension WebView: NSViewRepresentable {
     }
     
     public static func dismantleNSView(_ nsView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
-        for messageHandlerName in coordinator.messageHandlerNames {
-            nsView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
-        }
+        coordinator.tearDownBindingsForDetachedWebView(nsView)
         if let pool = coordinator.webViewPool {
             pool.enqueue(nsView)
         }
