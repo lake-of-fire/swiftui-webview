@@ -233,8 +233,14 @@ public class WebViewCoordinator: NSObject {
 #endif
     
     // UIScrollViewDelegate
-    internal var lastContentOffset: CGFloat = 0
+    internal enum NavigationScrollAxis: Equatable {
+        case vertical
+        case horizontal
+    }
+    internal var lastContentOffset: CGPoint = .zero
     internal var accumulatedScrollOffset: CGFloat = 0
+    internal var navigationScrollAxis: NavigationScrollAxis = .vertical
+    internal var horizontalForwardSign: CGFloat = 1
     internal var lastEnvHandlerNames: OrderedSet<String>? = nil
     
     var onNavigationCommitted: ((WebViewState) -> Void)?
