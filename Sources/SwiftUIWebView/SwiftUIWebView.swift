@@ -1869,15 +1869,18 @@ public struct WebViewLifecycleConfig: Sendable, Equatable {
     public static let `default` = WebViewLifecycleConfig()
 
     public var autoUnloadOnDisappear: Bool
+    public var unloadOnlyWhenRemovedFromHierarchy: Bool
     public var snapshotCacheKey: WebViewSnapshotCacheKey?
     public var idleLoadURL: URL?
 
     public init(
         autoUnloadOnDisappear: Bool = false,
+        unloadOnlyWhenRemovedFromHierarchy: Bool = false,
         snapshotCacheKey: WebViewSnapshotCacheKey? = nil,
         idleLoadURL: URL? = nil
     ) {
         self.autoUnloadOnDisappear = autoUnloadOnDisappear
+        self.unloadOnlyWhenRemovedFromHierarchy = unloadOnlyWhenRemovedFromHierarchy
         self.snapshotCacheKey = snapshotCacheKey
         self.idleLoadURL = idleLoadURL
     }
@@ -2030,6 +2033,7 @@ public class WebViewController: UIViewController {
     var onViewDidAppear: (() -> Void)?
     var onViewWillDisappear: (() -> Void)?
     var onViewDidDisappear: (() -> Void)?
+    var onWillMoveToNoParent: (() -> Void)?
     var obscuredInsets = UIEdgeInsets.zero {
         didSet {
             updateObscuredInsets()
@@ -2069,6 +2073,12 @@ public class WebViewController: UIViewController {
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         onViewWillDisappear?()
+    }
+
+    public override func willMove(toParent parent: UIViewController?) {
+        super.willMove(toParent: parent)
+        guard parent == nil else { return }
+        onWillMoveToNoParent?()
     }
     
     override public func viewSafeAreaInsetsDidChange() {
@@ -2470,6 +2480,12 @@ extension WebView: UIViewControllerRepresentable {
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
+            guard !coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy else { return }
+            coordinator.unloadWebViewIfNeeded(controller: controller)
+        }
+        controller.onWillMoveToNoParent = { [weak coordinator = context.coordinator, weak controller] in
+            guard let coordinator, let controller else { return }
+            guard coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy else { return }
             coordinator.unloadWebViewIfNeeded(controller: controller)
         }
         controller.onViewDidDisappear = { [weak controller] in
@@ -2548,6 +2564,12 @@ extension WebView: UIViewControllerRepresentable {
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
+            guard !coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy else { return }
+            coordinator.unloadWebViewIfNeeded(controller: controller)
+        }
+        controller.onWillMoveToNoParent = { [weak coordinator = context.coordinator, weak controller] in
+            guard let coordinator, let controller else { return }
+            guard coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy else { return }
             coordinator.unloadWebViewIfNeeded(controller: controller)
         }
         controller.onViewDidDisappear = { [weak controller] in
