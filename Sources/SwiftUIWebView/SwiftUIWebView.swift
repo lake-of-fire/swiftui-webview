@@ -441,6 +441,16 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     func tearDownBindingsForDetachedWebView(_ webView: WKWebView?) {
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.detach.bindings",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView?.url?.absoluteString ?? "nil"
+                ] as [String : Any]
+            )
+        }
         removeMessageHandlers(for: webView)
         navigator.webView = nil
         clearScriptCallerBinding()
@@ -449,6 +459,16 @@ public class WebViewCoordinator: NSObject {
     
     @MainActor
     func setWebView(_ webView: WKWebView) {
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.bind.setWebView",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView.url?.absoluteString ?? "nil"
+                ] as [String : Any]
+            )
+        }
         navigator.webView = webView
 
         invalidateWebViewObservations()
@@ -728,6 +748,17 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.nav.finish",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView.url?.absoluteString ?? "nil",
+                    "isLoading": webView.isLoading
+                ] as [String : Any]
+            )
+        }
         debugPrint("# READER webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
@@ -804,6 +835,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
         Task {
             await scriptCaller?.removeAllMultiTargetFrames()
         }
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.nav.failProvisional",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView.url?.absoluteString ?? "nil",
+                    "isLoading": webView.isLoading,
+                    "error": String(describing: error)
+                ] as [String : Any]
+            )
+        }
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -831,6 +874,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
         Task {
             await scriptCaller?.removeAllMultiTargetFrames()
         }
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.nav.fail",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView.url?.absoluteString ?? "nil",
+                    "isLoading": webView.isLoading,
+                    "error": String(describing: error)
+                ] as [String : Any]
+            )
+        }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         
         extractPageState(webView: webView)
@@ -847,6 +902,17 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         Task {
             await scriptCaller?.removeAllMultiTargetFrames()
+        }
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.nav.commit",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView.url?.absoluteString ?? "nil",
+                    "isLoading": webView.isLoading
+                ] as [String : Any]
+            )
         }
         debugPrint("# READER webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -872,6 +938,17 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.nav.start",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "url": webView.url?.absoluteString ?? "nil",
+                    "isLoading": webView.isLoading
+                ] as [String : Any]
+            )
+        }
         debugPrint("# READER webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
@@ -961,6 +1038,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     private var pendingHTML: (html: String, baseURL: URL?)?
     private var lastLoadedRequest: URLRequest?
     private var lastLoadedHTML: (html: String, baseURL: URL?)?
+    @Published public private(set) var hasAttachedWebView = false
+    public var debugIdentifier: String?
     @MainActor private var bypassContentRulesForNextNavigation = false
     public var attachFallbackURL: URL?
     public var shouldLoadFallbackOnAttach = true
@@ -968,13 +1047,47 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
+            hasAttachedWebView = webView != nil
+            if !shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# LOOKUPSMAR6",
+                    [
+                        "stage": "sharedWebView.navigator.attach",
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "hasAttachedWebView": webView != nil,
+                        "hasPendingHTML": pendingHTML != nil,
+                        "hasPendingRequest": pendingRequest != nil
+                    ] as [String : Any]
+                )
+            }
             guard let webView else { return }
             if let request = pendingRequest {
+                if !shouldLoadFallbackOnAttach {
+                    debugPrint(
+                        "# LOOKUPSMAR6",
+                        [
+                            "stage": "sharedWebView.navigator.flushPendingRequest",
+                            "navigatorID": debugIdentifier ?? "nil",
+                            "url": request.url?.absoluteString ?? "nil"
+                        ] as [String : Any]
+                    )
+                }
                 webView.load(request)
                 pendingRequest = nil
                 return
             }
             if let pendingHTML {
+                if !shouldLoadFallbackOnAttach {
+                    debugPrint(
+                        "# LOOKUPSMAR6",
+                        [
+                            "stage": "sharedWebView.navigator.flushPendingHTML",
+                            "navigatorID": debugIdentifier ?? "nil",
+                            "htmlLength": pendingHTML.html.count,
+                            "baseURL": pendingHTML.baseURL?.absoluteString ?? "nil"
+                        ] as [String : Any]
+                    )
+                }
                 webView.loadHTMLString(pendingHTML.html, baseURL: pendingHTML.baseURL)
                 self.pendingHTML = nil
                 return
@@ -1037,8 +1150,30 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
         guard let webView else {
+            if !shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# LOOKUPSMAR6",
+                    [
+                        "stage": "sharedWebView.navigator.queueHTML",
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "htmlLength": html.count,
+                        "baseURL": baseURL?.absoluteString ?? "nil"
+                    ] as [String : Any]
+                )
+            }
             pendingHTML = (html: html, baseURL: baseURL)
             return
+        }
+        if !shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.navigator.loadHTML",
+                    "navigatorID": debugIdentifier ?? "nil",
+                    "htmlLength": html.count,
+                    "baseURL": baseURL?.absoluteString ?? "nil"
+                ] as [String : Any]
+            )
         }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
@@ -2393,6 +2528,17 @@ extension WebView: UIViewControllerRepresentable {
         controller: WebViewController,
         context: Context
     ) {
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.configure",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "controller": String(describing: ObjectIdentifier(controller)),
+                    "webView": String(describing: ObjectIdentifier(webView))
+                ] as [String : Any]
+            )
+        }
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
@@ -2457,6 +2603,17 @@ extension WebView: UIViewControllerRepresentable {
             coordinator: context.coordinator
         )
         let controller = WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
+        if !context.coordinator.navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.lifecycle.makeUIViewController",
+                    "navigatorID": context.coordinator.navigator.debugIdentifier ?? "nil",
+                    "controller": String(describing: ObjectIdentifier(controller)),
+                    "webView": String(describing: ObjectIdentifier(webView))
+                ] as [String : Any]
+            )
+        }
         configureWebView(webView, controller: controller, context: context)
         context.coordinator.markSnapshotRestoreIfNeeded()
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
@@ -2476,6 +2633,19 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
+            if !coordinator.navigator.shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# LOOKUPSMAR6",
+                    [
+                        "stage": "sharedWebView.lifecycle.viewWillDisappear",
+                        "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
+                        "url": controller.webView.url?.absoluteString ?? "nil",
+                        "isWebViewUnloaded": controller.isWebViewUnloaded,
+                        "autoUnloadOnDisappear": coordinator.lifecycleConfig.autoUnloadOnDisappear,
+                        "unloadOnlyWhenRemovedFromHierarchy": coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy
+                    ] as [String : Any]
+                )
+            }
             #if os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
@@ -2485,6 +2655,19 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onWillMoveToNoParent = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
+            if !coordinator.navigator.shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# LOOKUPSMAR6",
+                    [
+                        "stage": "sharedWebView.lifecycle.willMoveToNoParent",
+                        "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
+                        "url": controller.webView.url?.absoluteString ?? "nil",
+                        "isWebViewUnloaded": controller.isWebViewUnloaded,
+                        "autoUnloadOnDisappear": coordinator.lifecycleConfig.autoUnloadOnDisappear,
+                        "unloadOnlyWhenRemovedFromHierarchy": coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy
+                    ] as [String : Any]
+                )
+            }
             guard coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy else { return }
             coordinator.unloadWebViewIfNeeded(controller: controller)
         }
@@ -2500,6 +2683,18 @@ extension WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
+        if !context.coordinator.navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.lifecycle.updateUIViewController",
+                    "navigatorID": context.coordinator.navigator.debugIdentifier ?? "nil",
+                    "controller": String(describing: ObjectIdentifier(controller)),
+                    "webView": String(describing: ObjectIdentifier(controller.webView)),
+                    "isWebViewUnloaded": controller.isWebViewUnloaded
+                ] as [String : Any]
+            )
+        }
         updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
@@ -2582,6 +2777,19 @@ extension WebView: UIViewControllerRepresentable {
     }
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
+        if !coordinator.navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.lifecycle.dismantleUIViewController",
+                    "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
+                    "controller": String(describing: ObjectIdentifier(controller)),
+                    "webView": String(describing: ObjectIdentifier(controller.webView)),
+                    "url": controller.webView.url?.absoluteString ?? "nil",
+                    "isWebViewUnloaded": controller.isWebViewUnloaded
+                ] as [String : Any]
+            )
+        }
         controller.clearSnapshotOverlay()
         coordinator.tearDownBindingsForDetachedWebView(controller.webView)
         if let pool = coordinator.webViewPool {
