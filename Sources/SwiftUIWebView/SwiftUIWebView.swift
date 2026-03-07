@@ -447,6 +447,7 @@ public class WebViewCoordinator: NSObject {
                 [
                     "stage": "sharedWebView.detach.bindings",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
                     "url": webView?.url?.absoluteString ?? "nil"
                 ] as [String : Any]
             )
@@ -465,6 +466,8 @@ public class WebViewCoordinator: NSObject {
                 [
                     "stage": "sharedWebView.bind.setWebView",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
+                    "webView": String(describing: ObjectIdentifier(webView)),
                     "url": webView.url?.absoluteString ?? "nil"
                 ] as [String : Any]
             )
@@ -754,6 +757,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 [
                     "stage": "sharedWebView.nav.finish",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
                     "url": webView.url?.absoluteString ?? "nil",
                     "isLoading": webView.isLoading
                 ] as [String : Any]
@@ -841,6 +845,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 [
                     "stage": "sharedWebView.nav.failProvisional",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
                     "url": webView.url?.absoluteString ?? "nil",
                     "isLoading": webView.isLoading,
                     "error": String(describing: error)
@@ -880,6 +885,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 [
                     "stage": "sharedWebView.nav.fail",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
                     "url": webView.url?.absoluteString ?? "nil",
                     "isLoading": webView.isLoading,
                     "error": String(describing: error)
@@ -909,6 +915,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 [
                     "stage": "sharedWebView.nav.commit",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
                     "url": webView.url?.absoluteString ?? "nil",
                     "isLoading": webView.isLoading
                 ] as [String : Any]
@@ -944,6 +951,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 [
                     "stage": "sharedWebView.nav.start",
                     "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": navigator.debugObjectID,
                     "url": webView.url?.absoluteString ?? "nil",
                     "isLoading": webView.isLoading
                 ] as [String : Any]
@@ -1040,6 +1048,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
     private var lastLoadedHTML: (html: String, baseURL: URL?)?
     @Published public private(set) var hasAttachedWebView = false
     public var debugIdentifier: String?
+    public var debugObjectID: String {
+        String(describing: ObjectIdentifier(self))
+    }
     @MainActor private var bypassContentRulesForNextNavigation = false
     public var attachFallbackURL: URL?
     public var shouldLoadFallbackOnAttach = true
@@ -1054,6 +1065,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     [
                         "stage": "sharedWebView.navigator.attach",
                         "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
                         "hasAttachedWebView": webView != nil,
                         "hasPendingHTML": pendingHTML != nil,
                         "hasPendingRequest": pendingRequest != nil
@@ -1068,6 +1080,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         [
                             "stage": "sharedWebView.navigator.flushPendingRequest",
                             "navigatorID": debugIdentifier ?? "nil",
+                            "navigatorObjectID": debugObjectID,
                             "url": request.url?.absoluteString ?? "nil"
                         ] as [String : Any]
                     )
@@ -1083,6 +1096,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         [
                             "stage": "sharedWebView.navigator.flushPendingHTML",
                             "navigatorID": debugIdentifier ?? "nil",
+                            "navigatorObjectID": debugObjectID,
                             "htmlLength": pendingHTML.html.count,
                             "baseURL": pendingHTML.baseURL?.absoluteString ?? "nil"
                         ] as [String : Any]
@@ -1156,6 +1170,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     [
                         "stage": "sharedWebView.navigator.queueHTML",
                         "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
                         "htmlLength": html.count,
                         "baseURL": baseURL?.absoluteString ?? "nil"
                     ] as [String : Any]
@@ -1170,6 +1185,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 [
                     "stage": "sharedWebView.navigator.loadHTML",
                     "navigatorID": debugIdentifier ?? "nil",
+                    "navigatorObjectID": debugObjectID,
                     "htmlLength": html.count,
                     "baseURL": baseURL?.absoluteString ?? "nil"
                 ] as [String : Any]
@@ -2609,6 +2625,8 @@ extension WebView: UIViewControllerRepresentable {
                 [
                     "stage": "sharedWebView.lifecycle.makeUIViewController",
                     "navigatorID": context.coordinator.navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": context.coordinator.navigator.debugObjectID,
+                    "coordinator": String(describing: ObjectIdentifier(context.coordinator)),
                     "controller": String(describing: ObjectIdentifier(controller)),
                     "webView": String(describing: ObjectIdentifier(webView))
                 ] as [String : Any]
@@ -2639,7 +2657,10 @@ extension WebView: UIViewControllerRepresentable {
                     [
                         "stage": "sharedWebView.lifecycle.viewWillDisappear",
                         "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
+                        "navigatorObjectID": coordinator.navigator.debugObjectID,
                         "url": controller.webView.url?.absoluteString ?? "nil",
+                        "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
+                        "window": String(describing: controller.view.window.map(ObjectIdentifier.init)),
                         "isWebViewUnloaded": controller.isWebViewUnloaded,
                         "autoUnloadOnDisappear": coordinator.lifecycleConfig.autoUnloadOnDisappear,
                         "unloadOnlyWhenRemovedFromHierarchy": coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy
@@ -2661,7 +2682,10 @@ extension WebView: UIViewControllerRepresentable {
                     [
                         "stage": "sharedWebView.lifecycle.willMoveToNoParent",
                         "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
+                        "navigatorObjectID": coordinator.navigator.debugObjectID,
                         "url": controller.webView.url?.absoluteString ?? "nil",
+                        "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
+                        "window": String(describing: controller.view.window.map(ObjectIdentifier.init)),
                         "isWebViewUnloaded": controller.isWebViewUnloaded,
                         "autoUnloadOnDisappear": coordinator.lifecycleConfig.autoUnloadOnDisappear,
                         "unloadOnlyWhenRemovedFromHierarchy": coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy
@@ -2689,9 +2713,13 @@ extension WebView: UIViewControllerRepresentable {
                 [
                     "stage": "sharedWebView.lifecycle.updateUIViewController",
                     "navigatorID": context.coordinator.navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": context.coordinator.navigator.debugObjectID,
+                    "coordinator": String(describing: ObjectIdentifier(context.coordinator)),
                     "controller": String(describing: ObjectIdentifier(controller)),
                     "webView": String(describing: ObjectIdentifier(controller.webView)),
-                    "isWebViewUnloaded": controller.isWebViewUnloaded
+                    "isWebViewUnloaded": controller.isWebViewUnloaded,
+                    "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
+                    "window": String(describing: controller.view.window.map(ObjectIdentifier.init))
                 ] as [String : Any]
             )
         }
@@ -2783,10 +2811,14 @@ extension WebView: UIViewControllerRepresentable {
                 [
                     "stage": "sharedWebView.lifecycle.dismantleUIViewController",
                     "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
+                    "navigatorObjectID": coordinator.navigator.debugObjectID,
+                    "coordinator": String(describing: ObjectIdentifier(coordinator)),
                     "controller": String(describing: ObjectIdentifier(controller)),
                     "webView": String(describing: ObjectIdentifier(controller.webView)),
                     "url": controller.webView.url?.absoluteString ?? "nil",
-                    "isWebViewUnloaded": controller.isWebViewUnloaded
+                    "isWebViewUnloaded": controller.isWebViewUnloaded,
+                    "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
+                    "window": String(describing: controller.view.window.map(ObjectIdentifier.init))
                 ] as [String : Any]
             )
         }
