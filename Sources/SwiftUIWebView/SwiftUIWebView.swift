@@ -990,13 +990,20 @@ extension WebViewCoordinator: WKNavigationDelegate {
         // ePub loader
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         
-        if navigationAction.targetFrame?.isMainFrame ?? false, let mainDocumentURL = navigationAction.request.mainDocumentURL {
-            // TODO: this is missing all our config.userScripts, make sure it inherits those...
-            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
-            
+        let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
+
+        if isMainDocumentNavigation {
+            let effectiveMainDocumentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
+            self.webView.updateUserScripts(
+                userContentController: webView.configuration.userContentController,
+                coordinator: self,
+                forDomain: effectiveMainDocumentURL,
+                config: config
+            )
+
             await scriptCaller?.removeAllMultiTargetFrames()
             var newState = self.webView.state
-            newState.pageURL = mainDocumentURL
+            newState.pageURL = effectiveMainDocumentURL ?? newState.pageURL
             newState.pageTitle = nil
             newState.isProvisionallyNavigating = false
             newState.pageImageURL = nil
@@ -1007,7 +1014,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         
         // Only apply content rules for main frame navigations.
-        if navigationAction.targetFrame?.isMainFrame ?? false {
+        if isMainDocumentNavigation {
             if navigator.consumeContentRulesBypass() {
                 shouldReapplyContentRulesAfterLoad = true
                 self.webView.refreshContentRules(
@@ -1042,10 +1049,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
 }
 
 public class WebViewNavigator: NSObject, ObservableObject {
-    private var pendingRequest: URLRequest?
-    private var pendingHTML: (html: String, baseURL: URL?)?
-    private var lastLoadedRequest: URLRequest?
-    private var lastLoadedHTML: (html: String, baseURL: URL?)?
+    fileprivate var pendingRequest: URLRequest?
+    fileprivate var pendingHTML: (html: String, baseURL: URL?)?
+    fileprivate var pendingDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
+    fileprivate var lastLoadedRequest: URLRequest?
+    fileprivate var lastLoadedHTML: (html: String, baseURL: URL?)?
+    fileprivate var lastLoadedDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
     @Published public private(set) var hasAttachedWebView = false
     public var debugIdentifier: String?
     public var debugObjectID: String {
@@ -1068,7 +1077,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         "navigatorObjectID": debugObjectID,
                         "hasAttachedWebView": webView != nil,
                         "hasPendingHTML": pendingHTML != nil,
-                        "hasPendingRequest": pendingRequest != nil
+                        "hasPendingRequest": pendingRequest != nil,
+                        "hasPendingDataLoad": pendingDataLoad != nil
                     ] as [String : Any]
                 )
             }
@@ -1087,6 +1097,29 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 }
                 webView.load(request)
                 pendingRequest = nil
+                return
+            }
+            if let pendingDataLoad {
+                if !shouldLoadFallbackOnAttach {
+                    debugPrint(
+                        "# LOOKUPSMAR6",
+                        [
+                            "stage": "sharedWebView.navigator.flushPendingDataLoad",
+                            "navigatorID": debugIdentifier ?? "nil",
+                            "navigatorObjectID": debugObjectID,
+                            "bytes": pendingDataLoad.data.count,
+                            "mimeType": pendingDataLoad.mimeType,
+                            "baseURL": pendingDataLoad.baseURL.absoluteString
+                        ] as [String : Any]
+                    )
+                }
+                webView.load(
+                    pendingDataLoad.data,
+                    mimeType: pendingDataLoad.mimeType,
+                    characterEncodingName: pendingDataLoad.characterEncodingName,
+                    baseURL: pendingDataLoad.baseURL
+                )
+                self.pendingDataLoad = nil
                 return
             }
             if let pendingHTML {
@@ -1126,6 +1159,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public func load(_ request: URLRequest) {
         lastLoadedRequest = request
         lastLoadedHTML = nil
+        lastLoadedDataLoad = nil
         if let webView = webView {
             if let url = request.url, url.isFileURL {
                 webView.loadFileURL(url, allowingReadAccessTo: url)
@@ -1139,9 +1173,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
-        //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
+        lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
+        lastLoadedRequest = nil
+        lastLoadedHTML = nil
         guard let webView else {
-            print("Warning: WebViewScriptCaller.loadHTML() called before webView is set.")
+            if !shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# LOOKUPSMAR6",
+                    [
+                        "stage": "sharedWebView.navigator.queueDataLoad",
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "bytes": data.count,
+                        "mimeType": mimeType,
+                        "baseURL": baseURL.absoluteString
+                    ] as [String : Any]
+                )
+            }
+            pendingDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
             return
         }
         debugPrint(
@@ -1163,6 +1212,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
+        lastLoadedDataLoad = nil
         guard let webView else {
             if !shouldLoadFallbackOnAttach {
                 debugPrint(
@@ -1205,6 +1255,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
             loadHTML(lastLoadedHTML.html, baseURL: lastLoadedHTML.baseURL)
             return
         }
+        if let lastLoadedDataLoad {
+            load(
+                lastLoadedDataLoad.data,
+                mimeType: lastLoadedDataLoad.mimeType,
+                characterEncodingName: lastLoadedDataLoad.characterEncodingName,
+                baseURL: lastLoadedDataLoad.baseURL
+            )
+            return
+        }
         if let lastLoadedRequest {
             load(lastLoadedRequest)
             return
@@ -1216,6 +1275,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     func prepareForReloadAfterReattach() {
         if let lastLoadedHTML {
             pendingHTML = lastLoadedHTML
+        } else if let lastLoadedDataLoad {
+            pendingDataLoad = lastLoadedDataLoad
         } else if let lastLoadedRequest {
             pendingRequest = lastLoadedRequest
         }
@@ -2174,6 +2235,46 @@ public class EnhancedWKWebView: WKWebView {
 }
 
 #if os(iOS)
+private final class WebViewTouchProbeGestureRecognizer: UIGestureRecognizer {
+    var onTouchBegan: ((CGPoint) -> Void)?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let touch = touches.first, let view else {
+            state = .failed
+            return
+        }
+        onTouchBegan?(touch.location(in: view))
+        state = .failed
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .failed
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .failed
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        state = .cancelled
+    }
+
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+}
+
 public class WebViewController: UIViewController {
     var webView: EnhancedWKWebView
     let persistentWebViewID: String?
@@ -2360,6 +2461,7 @@ public class WebViewController: UIViewController {
         ]
         NSLayoutConstraint.activate(webViewConstraints)
     }
+
 }
 #endif
 
@@ -2460,6 +2562,32 @@ public struct WebView {
         coordinator.lifecycleConfig = lifecycleConfig
         coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
         return coordinator
+    }
+
+    @MainActor
+    private func resolvedUserScriptDomain(currentURL: URL?) -> URL? {
+        if let currentURL {
+            return currentURL
+        }
+        if let pendingRequestURL = navigator.pendingRequest?.url {
+            return pendingRequestURL
+        }
+        if let lastLoadedRequestURL = navigator.lastLoadedRequest?.url {
+            return lastLoadedRequestURL
+        }
+        if let pendingHTMLBaseURL = navigator.pendingHTML?.baseURL {
+            return pendingHTMLBaseURL
+        }
+        if let lastLoadedHTMLBaseURL = navigator.lastLoadedHTML?.baseURL {
+            return lastLoadedHTMLBaseURL
+        }
+        if let pendingDataLoadBaseURL = navigator.pendingDataLoad?.baseURL {
+            return pendingDataLoadBaseURL
+        }
+        if let lastLoadedDataLoadBaseURL = navigator.lastLoadedDataLoad?.baseURL {
+            return lastLoadedDataLoadBaseURL
+        }
+        return state.pageURL.absoluteString == "about:blank" ? nil : state.pageURL
     }
 }
 
@@ -2586,6 +2714,12 @@ extension WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
 
+        updateUserScripts(
+            userContentController: webView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
+            config: config
+        )
         context.coordinator.setWebView(webView)
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
@@ -2731,8 +2865,12 @@ extension WebView: UIViewControllerRepresentable {
             resolvedContentRules: resolvedContentRules
         )
         refreshDarkModeSetting(webView: controller.webView)
-        //        refreshMessageHandlers(context: context)
-        //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
+        updateUserScripts(
+            userContentController: controller.webView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: controller.webView.url),
+            config: config
+        )
         
         //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
@@ -2961,7 +3099,12 @@ extension WebView: NSViewRepresentable {
             context: context,
             resolvedContentRules: resolvedContentRules
         )
-        //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
+        updateUserScripts(
+            userContentController: uiView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: uiView.url),
+            config: config
+        )
         
         // Can't disable on macOS.
         //        uiView.scrollView.bounces = bounces
