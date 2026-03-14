@@ -2517,6 +2517,93 @@ public class WebViewController: UIViewController {
     }
 
     @MainActor
+    private func logLookupSmar10ViewportDOMProbe(source: String) {
+        guard webView.url?.absoluteString != "about:blank" else { return }
+        let pointInWebView = CGPoint(x: webView.bounds.midX, y: webView.bounds.midY)
+        guard webView.bounds.contains(pointInWebView) else { return }
+        let x = pointInWebView.x
+        let y = pointInWebView.y
+        let js = """
+        (function() {
+          const viewportX = \(x);
+          const viewportY = \(y);
+          const elementAtCenter = document.elementFromPoint(viewportX, viewportY);
+          const firstVisibleButton = Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).find((button) => {
+            const style = getComputedStyle(button);
+            return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
+          }) ?? null;
+          const firstSegment = document.querySelector('manabi-segment');
+          const firstSurface = document.querySelector('manabi-surface');
+          const describe = (node) => {
+            if (!node) return null;
+            const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+            const style = getComputedStyle(node);
+            return {
+              tag: node.tagName ?? null,
+              id: node.id ?? null,
+              className: typeof node.className === 'string' ? node.className : null,
+              textSample: (node.textContent || '').trim().slice(0, 80),
+              pointerEvents: style.pointerEvents ?? null,
+              userSelect: style.userSelect ?? null,
+              touchAction: style.touchAction ?? null,
+              opacity: style.opacity ?? null,
+              display: style.display ?? null,
+              visibility: style.visibility ?? null,
+              backgroundColor: style.backgroundColor ?? null,
+              color: style.color ?? null,
+              rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
+            };
+          };
+          return JSON.stringify({
+            source: \(String(reflecting: source)),
+            viewportX,
+            viewportY,
+            bodyClassName: document.body?.className ?? null,
+            readerContentClassName: document.getElementById('reader-content')?.className ?? null,
+            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).filter((button) => {
+              const style = getComputedStyle(button);
+              return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
+            }).length,
+            sectionCount: document.querySelectorAll('.manabi-tracking-section').length,
+            segmentCount: document.querySelectorAll('manabi-segment').length,
+            elementAtCenter: describe(elementAtCenter),
+            centerClosestSegment: describe(elementAtCenter?.closest?.('manabi-segment') ?? null),
+            centerClosestSurface: describe(elementAtCenter?.closest?.('manabi-surface') ?? null),
+            firstVisibleButton: describe(firstVisibleButton),
+            firstSegment: describe(firstSegment),
+            firstSurface: describe(firstSurface)
+            });
+        })()
+        """
+        webView.evaluateJavaScript(js) { result, error in
+            var payload: [String: Any] = [
+                "stage": "native.webView.viewport.domProbe",
+                "pageURL": self.webView.url?.absoluteString ?? "nil"
+            ]
+            if let error {
+                payload["error"] = error.localizedDescription
+                debugPrint("# LOOKUPSMAR10", payload)
+                return
+            }
+            if let string = result as? String,
+               let data = string.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                self.appendFlattenedLookupSmar10Probe(object, into: &payload)
+                debugPrint("# LOOKUPSMAR10", payload)
+                return
+            }
+            payload["error"] = result == nil ? "nilResult" : "unexpectedResultType"
+            payload["type"] = result.map { String(describing: type(of: $0)) } ?? "nil"
+            debugPrint("# LOOKUPSMAR10", payload)
+        }
+    }
+
+    @MainActor
+    func logLookupSmar10ViewportDOMProbeFromHost(source: String) {
+        logLookupSmar10ViewportDOMProbe(source: source)
+    }
+
+    @MainActor
     private func logLookupSmar10Touch(pointInController: CGPoint) {
         let hitView = view.hitTest(pointInController, with: nil)
         let pointInWebView = view.convert(pointInController, to: webView)
@@ -2543,6 +2630,107 @@ public class WebViewController: UIViewController {
             "isWebViewUnloaded": isWebViewUnloaded
         ]
         debugPrint("# LOOKUPSMAR10", payload)
+        logLookupSmar10TouchDOMProbe(pointInWebView: pointInWebView)
+    }
+
+    @MainActor
+    private func appendFlattenedLookupSmar10Probe(_ object: [String: Any], into payload: inout [String: Any]) {
+        func stringify(_ value: Any?) -> String {
+            guard let value else { return "nil" }
+            if let string = value as? String { return string }
+            if let number = value as? NSNumber { return number.stringValue }
+            if let dictionary = value as? [String: Any],
+               let data = try? JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys]),
+               let string = String(data: data, encoding: .utf8) {
+                return string
+            }
+            if let array = value as? [Any],
+               let data = try? JSONSerialization.data(withJSONObject: array, options: [.sortedKeys]),
+               let string = String(data: data, encoding: .utf8) {
+                return string
+            }
+            return String(describing: value)
+        }
+
+        for (key, value) in object {
+            payload[key] = stringify(value)
+        }
+    }
+
+    @MainActor
+    private func logLookupSmar10TouchDOMProbe(pointInWebView: CGPoint) {
+        guard webView.url?.absoluteString != "about:blank" else { return }
+        guard webView.bounds.contains(pointInWebView) else { return }
+        let x = pointInWebView.x
+        let y = pointInWebView.y
+        let js = """
+        (function() {
+          const x = \(x);
+          const y = \(y);
+          const element = document.elementFromPoint(x, y);
+          const closestSegment = element?.closest?.('manabi-segment') ?? null;
+          const closestSurface = element?.closest?.('manabi-surface') ?? null;
+          const closestButton = element?.closest?.('.manabi-mark-section-as-read-button') ?? null;
+          const firstVisibleButton = Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).find((button) => {
+            const style = getComputedStyle(button);
+            return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
+          }) ?? null;
+          const describe = (node) => {
+            if (!node) return null;
+            const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
+            const style = getComputedStyle(node);
+            return {
+              tag: node.tagName ?? null,
+              id: node.id ?? null,
+              className: typeof node.className === 'string' ? node.className : null,
+              textSample: (node.textContent || '').trim().slice(0, 80),
+              pointerEvents: style.pointerEvents ?? null,
+              userSelect: style.userSelect ?? null,
+              touchAction: style.touchAction ?? null,
+              opacity: style.opacity ?? null,
+              display: style.display ?? null,
+              visibility: style.visibility ?? null,
+              rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
+            };
+          };
+          return JSON.stringify({
+            pointX: x,
+            pointY: y,
+            bodyClassName: document.body?.className ?? null,
+            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).filter((button) => {
+              const style = getComputedStyle(button);
+              return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
+            }).length,
+            segmentCount: document.querySelectorAll('manabi-segment').length,
+            element: describe(element),
+            closestSegment: describe(closestSegment),
+            closestSurface: describe(closestSurface),
+            closestButton: describe(closestButton),
+            firstVisibleButton: describe(firstVisibleButton)
+          });
+        })()
+        """
+        webView.evaluateJavaScript(js) { result, error in
+            var payload: [String: Any] = [
+                "stage": "native.webView.touch.domProbe",
+                "pageURL": self.webView.url?.absoluteString ?? "nil"
+            ]
+            if let error {
+                payload["error"] = error.localizedDescription
+                debugPrint("# LOOKUPSMAR10", payload)
+                return
+            }
+            if let string = result as? String,
+               let data = string.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                self.appendFlattenedLookupSmar10Probe(object, into: &payload)
+                debugPrint("# LOOKUPSMAR10", payload)
+                return
+            }
+            payload["error"] = result == nil ? "nilResult" : "unexpectedResultType"
+            payload["type"] = result.map { String(describing: type(of: $0)) } ?? "nil"
+            debugPrint("# LOOKUPSMAR10", payload)
+        }
     }
 
 }
