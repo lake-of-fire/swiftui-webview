@@ -4,9 +4,49 @@ import UniformTypeIdentifiers
 import ZIPFoundation
 import OrderedCollections
 
+private func evaluateJavaScriptCompat(
+    webView: WKWebView,
+    js: String,
+    arguments: [String: any Sendable]? = nil
+) async throws -> Any? {
+    let statement: String
+    if let arguments, !arguments.isEmpty {
+        let jsonCompatibleArguments = arguments.reduce(into: [String: Any]()) { partialResult, item in
+            if let set = item.value as? Set<AnyHashable> {
+                partialResult[item.key] = Array(set)
+            } else {
+                partialResult[item.key] = item.value
+            }
+        }
+        let jsonObject = try JSONSerialization.data(withJSONObject: jsonCompatibleArguments)
+        guard let jsonString = String(data: jsonObject, encoding: .utf8) else {
+            throw NSError(domain: "SwiftUIWebView", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unable to encode JavaScript arguments"])
+        }
+        statement = """
+        (() => {
+            const arguments = \(jsonString);
+            \(js)
+        })()
+        """
+    } else {
+        statement = js
+    }
+    
+    return try await withCheckedThrowingContinuation { continuation in
+        webView.evaluateJavaScript(statement) { result, error in
+            _ = result
+            if let error {
+                continuation.resume(throwing: error)
+            } else {
+                continuation.resume(returning: nil)
+            }
+        }
+    }
+}
+
 @globalActor
 public actor WebViewActor {
-    public static var shared = WebViewActor()
+    public static let shared = WebViewActor()
 }
 
 public struct WebViewMessageHandlersKey: EnvironmentKey {
@@ -546,11 +586,17 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
     
     @MainActor
-    public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
+    public func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        preferences: WKWebpagePreferences,
+        decisionHandler: @escaping (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
+    ) {
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)
-                return (.cancel, preferences)
+                decisionHandler(.cancel, preferences)
+                return
             }
         }
         
@@ -561,7 +607,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
             // TODO: this is missing all our config.userScripts, make sure it inherits those...
             self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
             
-            await scriptCaller?.removeAllMultiTargetFrames()
+            Task { @MainActor [weak scriptCaller] in
+                await scriptCaller?.removeAllMultiTargetFrames()
+            }
             var newState = self.webView.state
             newState.pageURL = mainDocumentURL
             newState.pageTitle = nil
@@ -578,12 +626,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
         //            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
         //        }
         
-        return (.allow, preferences)
+        decisionHandler(.allow, preferences)
     }
     
     @MainActor
-    public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
-        return .allow
+    public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(.allow)
     }
 }
 
@@ -1353,17 +1401,11 @@ public struct WebView: UIViewControllerRepresentable {
         //            webView.evaluateJavaScript($0, completionHandler: $1)
         //        }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor js, args, frame, world in
-            let world = world ?? .page
-            //            debugPrint("# JS", js.prefix(60), args?.debugDescription.prefix(30))
-            if let args {
-                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world ?? .page)
-            } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world ?? .page)
-                if result == nil {
-                    return nil
-                }
-                return result as! any Sendable
-            }
+            _ = frame
+            _ = world
+            let result = try await evaluateJavaScriptCompat(webView: webView, js: js, arguments: args)
+            guard let result else { return nil }
+            return result as! any Sendable
         }
         context.coordinator.textSelection = $textSelection
         
@@ -1546,16 +1588,11 @@ public struct WebView: NSViewRepresentable {
             context.coordinator.scriptCaller = scriptCaller
         }
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> Any? in
-            let world = world ?? .page
-            if let args {
-                return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
-            } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
-                if result == nil {
-                    return nil
-                }
-                return result as! any Sendable
-            }
+            _ = frame
+            _ = world
+            let result = try await evaluateJavaScriptCompat(webView: webView, js: js, arguments: args)
+            guard let result else { return nil }
+            return result as! any Sendable
         }
         
         refreshDarkModeSetting(webView: webView)
