@@ -2280,6 +2280,7 @@ public class WebViewController: UIViewController {
     let persistentWebViewID: String?
     private var webViewConstraints: [NSLayoutConstraint] = []
     private var snapshotImageView: UIImageView?
+    private var touchProbeGestureRecognizer: WebViewTouchProbeGestureRecognizer?
     private var lastKnownWebViewSize: CGSize = .zero
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
@@ -2296,6 +2297,7 @@ public class WebViewController: UIViewController {
         self.webView = webView
         self.persistentWebViewID = persistentWebViewID
         super.init(nibName: nil, bundle: nil)
+        installTouchProbeIfNeeded()
         attachWebView(webView)
     }
     
@@ -2315,6 +2317,12 @@ public class WebViewController: UIViewController {
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         onViewDidAppear?()
+        logLookupSmar10SurfaceState(source: "native.webView.surfaceState.viewDidAppear")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            self.logLookupSmar10SurfaceState(source: "native.webView.surfaceState.viewDidAppear.delayed")
+        }
     }
 
     public override func viewDidDisappear(_ animated: Bool) {
@@ -2460,6 +2468,81 @@ public class WebViewController: UIViewController {
             view.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(webViewConstraints)
+    }
+
+    @MainActor
+    private func installTouchProbeIfNeeded() {
+        guard touchProbeGestureRecognizer == nil else { return }
+        let recognizer = WebViewTouchProbeGestureRecognizer()
+        recognizer.onTouchBegan = { [weak self] point in
+            self?.logLookupSmar10Touch(pointInController: point)
+        }
+        view.addGestureRecognizer(recognizer)
+        touchProbeGestureRecognizer = recognizer
+    }
+
+    @MainActor
+    private func colorDescription(_ color: UIColor?) -> String {
+        guard let color else { return "nil" }
+        return String(describing: color)
+    }
+
+    @MainActor
+    private func logLookupSmar10SurfaceState(source: String) {
+        let snapshotOverlay = snapshotImageView
+        let payload: [String: Any] = [
+            "stage": source,
+            "pageURL": webView.url?.absoluteString ?? "nil",
+            "liveWebViewURL": webView.url?.absoluteString ?? "nil",
+            "controllerFrame": NSCoder.string(for: view.frame),
+            "controllerBounds": NSCoder.string(for: view.bounds),
+            "controllerHidden": view.isHidden,
+            "controllerAlpha": view.alpha,
+            "viewBackgroundColor": colorDescription(view.backgroundColor),
+            "webViewFrame": NSCoder.string(for: webView.frame),
+            "webViewBounds": NSCoder.string(for: webView.bounds),
+            "webViewHidden": webView.isHidden,
+            "webViewAlpha": webView.alpha,
+            "window": String(describing: view.window.map(ObjectIdentifier.init)),
+            "subviewCount": view.subviews.count,
+            "subviewTypes": view.subviews.map { String(describing: type(of: $0)) },
+            "snapshotOverlayPresent": snapshotOverlay != nil,
+            "snapshotOverlayHidden": snapshotOverlay?.isHidden ?? false,
+            "snapshotOverlayAlpha": snapshotOverlay?.alpha ?? 0,
+            "snapshotOverlayFrame": snapshotOverlay.map { NSCoder.string(for: $0.frame) } ?? "nil",
+            "snapshotOverlayUserInteractionEnabled": snapshotOverlay?.isUserInteractionEnabled ?? false,
+            "isWebViewUnloaded": isWebViewUnloaded
+        ]
+        debugPrint("# LOOKUPSMAR10", payload)
+    }
+
+    @MainActor
+    private func logLookupSmar10Touch(pointInController: CGPoint) {
+        let hitView = view.hitTest(pointInController, with: nil)
+        let pointInWebView = view.convert(pointInController, to: webView)
+        let webViewHitView = webView.hitTest(pointInWebView, with: nil)
+        let payload: [String: Any] = [
+            "stage": "native.webView.touch",
+            "pageURL": webView.url?.absoluteString ?? "nil",
+            "liveWebViewURL": webView.url?.absoluteString ?? "nil",
+            "controllerFrame": NSCoder.string(for: view.frame),
+            "controllerBounds": NSCoder.string(for: view.bounds),
+            "controllerHidden": view.isHidden,
+            "controllerAlpha": view.alpha,
+            "controllerWindow": String(describing: view.window.map(ObjectIdentifier.init)),
+            "pointInController": NSCoder.string(for: pointInController),
+            "webViewFrame": NSCoder.string(for: webView.frame),
+            "webViewBounds": NSCoder.string(for: webView.bounds),
+            "webViewHidden": webView.isHidden,
+            "webViewAlpha": webView.alpha,
+            "webViewWindow": String(describing: webView.window.map(ObjectIdentifier.init)),
+            "pointInWebView": NSCoder.string(for: pointInWebView),
+            "hitViewClass": hitView.map { String(describing: type(of: $0)) } ?? "nil",
+            "webViewHitViewClass": webViewHitView.map { String(describing: type(of: $0)) } ?? "nil",
+            "hitInsideWebView": webView.bounds.contains(pointInWebView),
+            "isWebViewUnloaded": isWebViewUnloaded
+        ]
+        debugPrint("# LOOKUPSMAR10", payload)
     }
 
 }
