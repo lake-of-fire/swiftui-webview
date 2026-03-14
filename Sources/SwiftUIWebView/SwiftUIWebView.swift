@@ -670,6 +670,20 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingRequest = request
         }
     }
+
+    @MainActor
+    public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
+        guard let webView else {
+            print("Warning: WebViewNavigator.load(_:mimeType:characterEncodingName:baseURL:) called before webView is set.")
+            return
+        }
+        webView.load(
+            data,
+            mimeType: mimeType,
+            characterEncodingName: characterEncodingName,
+            baseURL: baseURL
+        )
+    }
     
     @MainActor
     public func loadHTML(_ html: String, baseURL: URL? = nil) {
