@@ -641,6 +641,27 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
+            let isAttached = webView != nil
+            if hasAttachedWebView != isAttached {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.hasAttachedWebView = isAttached
+                }
+            }
+            if !shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# LOOKUPSMAR6",
+                    [
+                        "stage": "sharedWebView.navigator.attach",
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "hasAttachedWebView": webView != nil,
+                        "hasPendingHTML": pendingHTML != nil,
+                        "hasPendingRequest": pendingRequest != nil,
+                        "hasPendingDataLoad": pendingDataLoad != nil
+                    ] as [String : Any]
+                )
+            }
             guard let webView else { return }
             if let request = pendingRequest {
                 webView.load(request)
@@ -1372,6 +1393,125 @@ public struct WebView: UIViewControllerRepresentable {
         
         return web
     }
+    @MainActor
+    private func makeNewWebView(config: WebViewConfig) -> EnhancedWKWebView {
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
+
+        let configuration = WKWebViewConfiguration()
+        configuration.applicationNameForUserAgent = userAgent
+        configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
+        if config.dataDetectorsEnabled {
+            configuration.dataDetectorTypes = [.all]
+        } else {
+            configuration.dataDetectorTypes = []
+        }
+        configuration.defaultWebpagePreferences = preferences
+        configuration.processPool = webViewProcessPool
+        configuration.websiteDataStore = WKWebsiteDataStore.default()
+
+        for (urlSchemeHandler, urlScheme) in schemeHandlers {
+            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+        }
+
+        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        webView.isOpaque = config.isOpaque
+        if #available(iOS 14.0, *) {
+            webView.backgroundColor = UIColor(config.backgroundColor)
+            webView.scrollView.backgroundColor = UIColor(config.backgroundColor)
+        } else {
+            webView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+            webView.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+        }
+        webView.scrollView.isOpaque = config.isOpaque
+        if #available(iOS 15.0, *) {
+            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+        }
+        return webView
+    }
+
+    @MainActor
+    private func configureWebView(
+        _ webView: EnhancedWKWebView,
+        controller: WebViewController,
+        context: Context
+    ) {
+        print(
+            "# LOOKUPSMAR15 SwiftUIWebView.configureWebView",
+            "existingUserScripts=\(webView.configuration.userContentController.userScripts.count)",
+            "configUserScripts=\(config.userScripts.count)",
+            "systemScripts=\(Self.systemScripts.count)",
+            "resolvedDomain=\(resolvedUserScriptDomain(currentURL: webView.url)?.absoluteString ?? "nil")"
+        )
+        if !navigator.shouldLoadFallbackOnAttach {
+            debugPrint(
+                "# LOOKUPSMAR6",
+                [
+                    "stage": "sharedWebView.configure",
+                    "navigatorID": navigator.debugIdentifier ?? "nil",
+                    "controller": String(describing: ObjectIdentifier(controller)),
+                    "webView": String(describing: ObjectIdentifier(webView))
+                ] as [String : Any]
+            )
+        }
+        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        applyCommonConfiguration(
+            webView: webView,
+            context: context,
+            resolvedContentRules: resolvedContentRules
+        )
+        webView.allowsLinkPreview = true
+        webView.uiDelegate = context.coordinator
+        webView.scrollView.delegate = context.coordinator
+        webView.buildMenu = buildMenu
+        webView.scrollView.contentInsetAdjustmentBehavior = .always
+        webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        webView.isOpaque = config.isOpaque
+        if #available(iOS 14.0, *) {
+            webView.backgroundColor = UIColor(config.backgroundColor)
+        } else {
+            webView.backgroundColor = .clear
+        }
+        if #available(iOS 14.0, *) {
+            webView.scrollView.backgroundColor = UIColor(config.backgroundColor)
+        } else {
+            webView.scrollView.backgroundColor = .clear
+        }
+        webView.scrollView.isOpaque = config.isOpaque
+        if #available(iOS 15.0, *) {
+            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+        }
+        if #available(iOS 16.4, *) {
+            webView.isInspectable = true
+        }
+
+        updateUserScripts(
+            userContentController: webView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
+            config: config
+        )
+        context.coordinator.setWebView(webView)
+        if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
+            context.coordinator.scriptCaller = scriptCaller
+        }
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] js, args, frame, world in
+            guard let webView else {
+                throw ScriptCallerError.evaluationTimedOut
+            }
+            let resolvedWorld = world ?? .page
+            if let args {
+                let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
+            } else {
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(result)
+            }
+        }
+        context.coordinator.textSelection = $textSelection
+        refreshDarkModeSetting(webView: webView)
+        applyVisualConfiguration(webView: webView, containerView: controller.view)
+    }
     
     @MainActor
     public func makeUIViewController(context: Context) -> WebViewController {
@@ -1726,9 +1866,21 @@ extension WebView {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
         var allScripts = Self.systemScripts + scripts
+        let scriptSummaries = allScripts.enumerated().map { index, script in
+            "#\(index):time=\(script.injectionTime.rawValue) mainFrameOnly=\(script.isForMainFrameOnly) domains=\(Array(script.allowedDomains).sorted()) prefix=\(script.source.prefix(48).replacingOccurrences(of: "\n", with: " "))"
+        }
+        print(
+            "# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts",
+            "domain=\(domain?.absoluteString ?? "nil")",
+            "filteredScripts=\(scripts.count)",
+            "allScripts=\(allScripts.count)",
+            "existingUserScripts=\(userContentController.userScripts.count)",
+            "summaries=\(scriptSummaries)"
+        )
         //        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
         
         if allScripts.isEmpty && !userContentController.userScripts.isEmpty {
+            print("# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts removingAll existingCount=\(userContentController.userScripts.count)")
             userContentController.removeAllUserScripts()
             return
         }
@@ -1746,10 +1898,18 @@ extension WebView {
                 return false
             })
         }) || userContentController.userScripts.contains(where: { !matchedExistingScripts.contains($0) }) {
+            print(
+                "# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts reinstalling",
+                "oldCount=\(userContentController.userScripts.count)",
+                "newCount=\(allScripts.count)"
+            )
             userContentController.removeAllUserScripts()
             for var script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
             }
+            print("# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts installedCount=\(userContentController.userScripts.count)")
+        } else {
+            print("# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts noChange installedCount=\(userContentController.userScripts.count)")
         }
         //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
