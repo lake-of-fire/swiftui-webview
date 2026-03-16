@@ -1386,10 +1386,16 @@ public struct WebView: UIViewControllerRepresentable {
             config: config,
             coordinator: context.coordinator
         )
-        refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
+        refreshMessageHandlers(userContentController: userContentController, context: context)
         
-        refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
-        
+        refreshContentRules(userContentController: userContentController, coordinator: context.coordinator)
+        updateUserScripts(
+            userContentController: userContentController,
+            coordinator: context.coordinator,
+            forDomain: webView.url,
+            config: config
+        )
+
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
@@ -1445,8 +1451,12 @@ public struct WebView: UIViewControllerRepresentable {
         
         refreshMessageHandlers(userContentController: controller.webView.configuration.userContentController, context: context)
         refreshDarkModeSetting(webView: controller.webView)
-        //        refreshMessageHandlers(context: context)
-        //        updateUserScripts(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator, forDomain: controller.webView.url, config: config)
+        updateUserScripts(
+            userContentController: controller.webView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: controller.webView.url,
+            config: config
+        )
         
         //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
@@ -1578,6 +1588,12 @@ public struct WebView: NSViewRepresentable {
         configuration.processPool = Self.processPool
         configuration.userContentController = userContentController
         refreshMessageHandlers(userContentController: configuration.userContentController, context: context)
+        updateUserScripts(
+            userContentController: configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: nil,
+            config: config
+        )
         //        updateUserScripts(userContentController: configuration.userContentController, coordinator: context.coordinator, forDomain: nil, config: config)
         
         // For private mode later:
@@ -1626,9 +1642,13 @@ public struct WebView: NSViewRepresentable {
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
         
-        //        refreshMessageHandlers(context: context)
         refreshMessageHandlers(userContentController: uiView.configuration.userContentController, context: context)
-        //        updateUserScripts(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator, forDomain: uiView.url, config: config)
+        updateUserScripts(
+            userContentController: uiView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: uiView.url,
+            config: config
+        )
         
         //        refreshContentRules(userContentController: uiView.configuration.userContentController, coordinator: context.coordinator)
         
