@@ -210,6 +210,7 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
 public enum DarkModeSetting: String, CaseIterable, Identifiable, Sendable {
     case system
     case darkModeOverride
+    case alwaysLightMode
     
     public var id: String { self.rawValue }
     
@@ -219,6 +220,8 @@ public enum DarkModeSetting: String, CaseIterable, Identifiable, Sendable {
             return "Use System Setting"
         case .darkModeOverride:
             return "Always Dark Mode"
+        case .alwaysLightMode:
+            return "Always Light Mode"
         }
     }
 }
@@ -641,13 +644,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
-            let isAttached = webView != nil
-            if hasAttachedWebView != isAttached {
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.hasAttachedWebView = isAttached
-                }
-            }
+            hasAttachedWebView = webView != nil
             if !shouldLoadFallbackOnAttach {
                 debugPrint(
                     "# LOOKUPSMAR6",
@@ -1436,13 +1433,6 @@ public struct WebView: UIViewControllerRepresentable {
         controller: WebViewController,
         context: Context
     ) {
-        print(
-            "# LOOKUPSMAR15 SwiftUIWebView.configureWebView",
-            "existingUserScripts=\(webView.configuration.userContentController.userScripts.count)",
-            "configUserScripts=\(config.userScripts.count)",
-            "systemScripts=\(Self.systemScripts.count)",
-            "resolvedDomain=\(resolvedUserScriptDomain(currentURL: webView.url)?.absoluteString ?? "nil")"
-        )
         if !navigator.shouldLoadFallbackOnAttach {
             debugPrint(
                 "# LOOKUPSMAR6",
@@ -1796,9 +1786,23 @@ extension WebView {
     @MainActor
     func refreshDarkModeSetting(webView: WKWebView) {
 #if os(iOS)
-        webView.overrideUserInterfaceStyle = config.darkModeSetting == .darkModeOverride ? .dark : .unspecified
+        switch config.darkModeSetting {
+        case .system:
+            webView.overrideUserInterfaceStyle = .unspecified
+        case .darkModeOverride:
+            webView.overrideUserInterfaceStyle = .dark
+        case .alwaysLightMode:
+            webView.overrideUserInterfaceStyle = .light
+        }
 #elseif os(macOS)
-        webView.appearance = config.darkModeSetting == .darkModeOverride ? NSAppearance(named: .darkAqua) : nil
+        switch config.darkModeSetting {
+        case .system:
+            webView.appearance = nil
+        case .darkModeOverride:
+            webView.appearance = NSAppearance(named: .darkAqua)
+        case .alwaysLightMode:
+            webView.appearance = NSAppearance(named: .aqua)
+        }
 #endif
     }
     
@@ -1866,21 +1870,9 @@ extension WebView {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
         var allScripts = Self.systemScripts + scripts
-        let scriptSummaries = allScripts.enumerated().map { index, script in
-            "#\(index):time=\(script.injectionTime.rawValue) mainFrameOnly=\(script.isForMainFrameOnly) domains=\(Array(script.allowedDomains).sorted()) prefix=\(script.source.prefix(48).replacingOccurrences(of: "\n", with: " "))"
-        }
-        print(
-            "# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts",
-            "domain=\(domain?.absoluteString ?? "nil")",
-            "filteredScripts=\(scripts.count)",
-            "allScripts=\(allScripts.count)",
-            "existingUserScripts=\(userContentController.userScripts.count)",
-            "summaries=\(scriptSummaries)"
-        )
         //        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
         
         if allScripts.isEmpty && !userContentController.userScripts.isEmpty {
-            print("# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts removingAll existingCount=\(userContentController.userScripts.count)")
             userContentController.removeAllUserScripts()
             return
         }
@@ -1898,19 +1890,12 @@ extension WebView {
                 return false
             })
         }) || userContentController.userScripts.contains(where: { !matchedExistingScripts.contains($0) }) {
-            print(
-                "# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts reinstalling",
-                "oldCount=\(userContentController.userScripts.count)",
-                "newCount=\(allScripts.count)"
-            )
             userContentController.removeAllUserScripts()
             for var script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
             }
-            print("# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts installedCount=\(userContentController.userScripts.count)")
-        } else {
-            print("# LOOKUPSMAR15 SwiftUIWebView.updateUserScripts noChange installedCount=\(userContentController.userScripts.count)")
         }
+        debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
         //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
     }
     
