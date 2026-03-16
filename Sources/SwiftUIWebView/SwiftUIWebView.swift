@@ -10,6 +10,16 @@ import UIKit
 import AppKit
 #endif
 
+@inline(__always)
+private func lookupSmar10NativeWebViewLog(_ stage: String, _ metadata: [String: Any] = [:]) {
+    #if DEBUG
+    guard ProcessInfo.processInfo.environment["MANABI_LOOKUPSMAR10_NATIVE"] == "1" else { return }
+    var payload = metadata
+    payload["stage"] = stage
+    Swift.debugPrint("# LOOKUPSMAR10", payload)
+    #endif
+}
+
 @MainActor private var webViewCache: [String: EnhancedWKWebView] = [:]
 @MainActor private let webViewProcessPool = WKProcessPool()
 
@@ -2513,7 +2523,7 @@ public class WebViewController: UIViewController {
             "snapshotOverlayUserInteractionEnabled": snapshotOverlay?.isUserInteractionEnabled ?? false,
             "isWebViewUnloaded": isWebViewUnloaded
         ]
-        debugPrint("# LOOKUPSMAR10", payload)
+        lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
     }
 
     @MainActor
@@ -2582,19 +2592,19 @@ public class WebViewController: UIViewController {
             ]
             if let error {
                 payload["error"] = error.localizedDescription
-                debugPrint("# LOOKUPSMAR10", payload)
+                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
                 return
             }
             if let string = result as? String,
                let data = string.data(using: .utf8),
                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 self.appendFlattenedLookupSmar10Probe(object, into: &payload)
-                debugPrint("# LOOKUPSMAR10", payload)
+                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
                 return
             }
             payload["error"] = result == nil ? "nilResult" : "unexpectedResultType"
             payload["type"] = result.map { String(describing: type(of: $0)) } ?? "nil"
-            debugPrint("# LOOKUPSMAR10", payload)
+            lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
         }
     }
 
@@ -2629,7 +2639,7 @@ public class WebViewController: UIViewController {
             "hitInsideWebView": webView.bounds.contains(pointInWebView),
             "isWebViewUnloaded": isWebViewUnloaded
         ]
-        debugPrint("# LOOKUPSMAR10", payload)
+        lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
         logLookupSmar10TouchDOMProbe(pointInWebView: pointInWebView)
     }
 
@@ -2717,19 +2727,19 @@ public class WebViewController: UIViewController {
             ]
             if let error {
                 payload["error"] = error.localizedDescription
-                debugPrint("# LOOKUPSMAR10", payload)
+                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
                 return
             }
             if let string = result as? String,
                let data = string.data(using: .utf8),
                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 self.appendFlattenedLookupSmar10Probe(object, into: &payload)
-                debugPrint("# LOOKUPSMAR10", payload)
+                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
                 return
             }
             payload["error"] = result == nil ? "nilResult" : "unexpectedResultType"
             payload["type"] = result.map { String(describing: type(of: $0)) } ?? "nil"
-            debugPrint("# LOOKUPSMAR10", payload)
+            lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
         }
     }
 
