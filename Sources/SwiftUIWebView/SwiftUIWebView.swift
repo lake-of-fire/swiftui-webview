@@ -1077,7 +1077,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
-            hasAttachedWebView = webView != nil
+            let nextHasAttachedWebView = webView != nil
+            if hasAttachedWebView != nextHasAttachedWebView {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.hasAttachedWebView = nextHasAttachedWebView
+                }
+            }
             if !shouldLoadFallbackOnAttach {
                 debugPrint(
                     "# LOOKUPSMAR6",
