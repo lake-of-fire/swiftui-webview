@@ -54,11 +54,13 @@ public final class WebViewPool: ObservableObject {
     }
 
     deinit {
-        for webView in warmedUpObjects {
-            onDequeue?(webView)
-            webView.resetForReuse(resetURL: nil)
+        MainActor.assumeIsolated {
+            for webView in warmedUpObjects {
+                onDequeue?(webView)
+                webView.resetForReuse(resetURL: nil)
+            }
+            warmedUpObjects.removeAll()
         }
-        warmedUpObjects.removeAll()
     }
 
     public func setCreationClosureIfNeeded(_ closure: @escaping () -> EnhancedWKWebView) {
