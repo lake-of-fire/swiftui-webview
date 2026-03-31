@@ -30,5 +30,9 @@ let package = Package(
             resources: [
 //                .process("Resources"),
             ]),
+        .testTarget(
+            name: "SwiftUIWebViewTests",
+            dependencies: ["SwiftUIWebView"]
+        ),
     ]
 )

@@ -81,6 +81,194 @@ public typealias BuildMenuType = (UIMenuBuilder) -> Void
 public typealias BuildMenuType = (Any) -> Void
 #endif
 
+public enum WebViewPaginationMode: Int, CaseIterable, Sendable {
+    case unpaginated = 0
+    case leftToRight = 1
+    case rightToLeft = 2
+    case topToBottom = 3
+    case bottomToTop = 4
+
+    public var usesViewHeightAsPageLength: Bool {
+        switch self {
+        case .leftToRight, .rightToLeft, .unpaginated:
+            true
+        case .topToBottom, .bottomToTop:
+            false
+        }
+    }
+
+    public var isPaginated: Bool {
+        self != .unpaginated
+    }
+}
+
+public struct WebViewPaginationConfiguration: Equatable, Sendable {
+    public static let disabled = WebViewPaginationConfiguration(mode: .unpaginated)
+
+    public let mode: WebViewPaginationMode
+    public let storedPageLength: CGFloat
+    public let effectivePageLength: CGFloat
+    public let gapBetweenPages: CGFloat
+    public let behavesLikeColumns: Bool
+    public let layoutSize: CGSize
+
+    public init(
+        mode: WebViewPaginationMode,
+        storedPageLength: CGFloat = 0,
+        effectivePageLength: CGFloat = 0,
+        gapBetweenPages: CGFloat = 0,
+        behavesLikeColumns: Bool = true,
+        layoutSize: CGSize = .zero
+    ) {
+        self.mode = mode
+        self.storedPageLength = storedPageLength
+        self.effectivePageLength = effectivePageLength
+        self.gapBetweenPages = gapBetweenPages
+        self.behavesLikeColumns = behavesLikeColumns
+        self.layoutSize = layoutSize
+    }
+
+    public var usesViewLength: Bool {
+        storedPageLength == 0
+    }
+
+    public func resolvingEffectivePageLength(using fallbackLayoutSize: CGSize) -> WebViewPaginationConfiguration {
+        let resolvedLayoutSize = resolvedLayoutSize(using: fallbackLayoutSize)
+        let resolvedEffectivePageLength: CGFloat
+        if !mode.isPaginated {
+            resolvedEffectivePageLength = 0
+        } else if storedPageLength == 0 {
+            resolvedEffectivePageLength = mode.usesViewHeightAsPageLength
+                ? resolvedLayoutSize.height
+                : resolvedLayoutSize.width
+        } else {
+            resolvedEffectivePageLength = storedPageLength
+        }
+        return WebViewPaginationConfiguration(
+            mode: mode,
+            storedPageLength: mode.isPaginated ? storedPageLength : 0,
+            effectivePageLength: resolvedEffectivePageLength,
+            gapBetweenPages: mode.isPaginated ? gapBetweenPages : 0,
+            behavesLikeColumns: mode.isPaginated ? behavesLikeColumns : true,
+            layoutSize: resolvedLayoutSize
+        )
+    }
+
+    public func structuralIdentity(using fallbackLayoutSize: CGSize) -> WebViewPaginationStructuralIdentity {
+        let resolved = resolvingEffectivePageLength(using: fallbackLayoutSize)
+        return WebViewPaginationStructuralIdentity(
+            mode: resolved.mode,
+            storedPageLength: resolved.storedPageLength,
+            gapBetweenPages: resolved.gapBetweenPages,
+            behavesLikeColumns: resolved.behavesLikeColumns,
+            layoutSize: resolved.layoutSize
+        )
+    }
+
+    public var dictionaryRepresentation: [String: String] {
+        [
+            "mode": "\(mode.rawValue)",
+            "storedPageLength": "\(storedPageLength)",
+            "effectivePageLength": "\(effectivePageLength)",
+            "gapBetweenPages": "\(gapBetweenPages)",
+            "behavesLikeColumns": "\(behavesLikeColumns)",
+            "layoutWidth": "\(layoutSize.width)",
+            "layoutHeight": "\(layoutSize.height)",
+            "usesViewLength": "\(usesViewLength)"
+        ]
+    }
+
+    private func resolvedLayoutSize(using fallbackLayoutSize: CGSize) -> CGSize {
+        let candidate = layoutSize == .zero ? fallbackLayoutSize : layoutSize
+        return CGSize(width: max(0, candidate.width), height: max(0, candidate.height))
+    }
+}
+
+public struct WebViewPaginationStructuralIdentity: Equatable, Sendable {
+    public let mode: WebViewPaginationMode
+    public let storedPageLength: CGFloat
+    public let gapBetweenPages: CGFloat
+    public let behavesLikeColumns: Bool
+    public let layoutSize: CGSize
+}
+
+public struct WebViewPaginationState: Equatable, Sendable {
+    public let desiredConfiguration: WebViewPaginationConfiguration
+    public let appliedConfiguration: WebViewPaginationConfiguration?
+    public let pageCount: Int?
+    public let mountedHostIdentifier: String?
+    public let appliedHostIdentifier: String?
+    public let isAppliedToMountedHost: Bool
+    public let usedViewLengthInference: Bool
+    public let lastApplyReason: String?
+    public let lastUpdatedAt: Date?
+
+    public init(
+        desiredConfiguration: WebViewPaginationConfiguration,
+        appliedConfiguration: WebViewPaginationConfiguration?,
+        pageCount: Int?,
+        mountedHostIdentifier: String?,
+        appliedHostIdentifier: String?,
+        isAppliedToMountedHost: Bool,
+        usedViewLengthInference: Bool,
+        lastApplyReason: String?,
+        lastUpdatedAt: Date?
+    ) {
+        self.desiredConfiguration = desiredConfiguration
+        self.appliedConfiguration = appliedConfiguration
+        self.pageCount = pageCount
+        self.mountedHostIdentifier = mountedHostIdentifier
+        self.appliedHostIdentifier = appliedHostIdentifier
+        self.isAppliedToMountedHost = isAppliedToMountedHost
+        self.usedViewLengthInference = usedViewLengthInference
+        self.lastApplyReason = lastApplyReason
+        self.lastUpdatedAt = lastUpdatedAt
+    }
+
+    public var dictionaryRepresentation: [String: String] {
+        var values = desiredConfiguration.dictionaryRepresentation
+        values["pageCount"] = pageCount.map(String.init) ?? "nil"
+        values["mountedHostIdentifier"] = mountedHostIdentifier ?? "nil"
+        values["appliedHostIdentifier"] = appliedHostIdentifier ?? "nil"
+        values["isAppliedToMountedHost"] = "\(isAppliedToMountedHost)"
+        values["lastApplyReason"] = lastApplyReason ?? "nil"
+        values["lastUpdatedAt"] = lastUpdatedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "nil"
+        return values
+    }
+
+    public static func == (lhs: WebViewPaginationState, rhs: WebViewPaginationState) -> Bool {
+        lhs.desiredConfiguration == rhs.desiredConfiguration
+        && lhs.appliedConfiguration == rhs.appliedConfiguration
+        && lhs.pageCount == rhs.pageCount
+        && lhs.mountedHostIdentifier == rhs.mountedHostIdentifier
+        && lhs.appliedHostIdentifier == rhs.appliedHostIdentifier
+        && lhs.isAppliedToMountedHost == rhs.isAppliedToMountedHost
+        && lhs.usedViewLengthInference == rhs.usedViewLengthInference
+        && lhs.lastApplyReason == rhs.lastApplyReason
+    }
+}
+
+public enum WebViewPaginationError: Error, LocalizedError {
+    case missingSelector(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingSelector(let selectorName):
+            "Missing WKWebView pagination selector: \(selectorName)"
+        }
+    }
+}
+
+@inline(__always)
+private func webViewPaginationDebugLog(_ stage: String, _ metadata: [String: Any] = [:]) {
+    #if DEBUG
+    guard ProcessInfo.processInfo.environment["MANABI_WEBVIEW_PAGINATION_DEBUG"] == "1" else { return }
+    var payload = metadata
+    payload["stage"] = stage
+    Swift.debugPrint("# WEBVIEWPAGINATION", payload)
+    #endif
+}
+
 public struct WebViewState: Equatable, Sendable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -95,6 +283,7 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var canGoForward: Bool
     public internal(set) var backList: [WKBackForwardListItem]
     public internal(set) var forwardList: [WKBackForwardListItem]
+    public internal(set) var paginationState: WebViewPaginationState?
     
     public static let empty = WebViewState(
         isLoading: false,
@@ -109,7 +298,8 @@ public struct WebViewState: Equatable, Sendable {
         canGoBack: false,
         canGoForward: false,
         backList: [],
-        forwardList: [])
+        forwardList: [],
+        paginationState: nil)
     
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
@@ -125,6 +315,7 @@ public struct WebViewState: Equatable, Sendable {
         && lhs.canGoForward == rhs.canGoForward
         && lhs.backList == rhs.backList
         && lhs.forwardList == rhs.forwardList
+        && lhs.paginationState == rhs.paginationState
     }
 }
 
@@ -208,6 +399,160 @@ public enum DarkModeSetting: String, CaseIterable, Identifiable, Sendable {
 }
 
 @MainActor
+public final class WebViewPaginationController {
+    private weak var webView: WKWebView?
+    private(set) public var desiredConfiguration: WebViewPaginationConfiguration = .disabled
+    private(set) public var lastAppliedConfiguration: WebViewPaginationConfiguration?
+    private(set) public var lastAppliedIdentity: WebViewPaginationStructuralIdentity?
+    private(set) public var lastAppliedHostIdentifier: String?
+    private(set) public var lastPageCount: Int?
+    private(set) public var lastApplyReason: String?
+    private(set) public var lastUpdatedAt: Date?
+
+    public init() {}
+
+    public func attach(webView: WKWebView) -> WebViewPaginationState {
+        self.webView = webView
+        return currentState(reason: "attach")
+    }
+
+    public func detach() -> WebViewPaginationState {
+        webView = nil
+        return currentState(reason: "detach")
+    }
+
+    public func apply(
+        _ configuration: WebViewPaginationConfiguration,
+        reason: String
+    ) throws -> WebViewPaginationState {
+        desiredConfiguration = configuration
+        lastApplyReason = reason
+        lastUpdatedAt = Date()
+
+        guard let webView else {
+            return currentState(reason: reason)
+        }
+
+        let hostIdentifier = Self.hostIdentifier(for: webView)
+        let resolved = configuration.resolvingEffectivePageLength(using: webView.bounds.size)
+        let identity = resolved.structuralIdentity(using: webView.bounds.size)
+        let shouldApply = identity != lastAppliedIdentity || hostIdentifier != lastAppliedHostIdentifier
+        if shouldApply {
+            try applySelectors(resolved, to: webView)
+            lastAppliedConfiguration = resolved
+            lastAppliedIdentity = identity
+            lastAppliedHostIdentifier = hostIdentifier
+            webViewPaginationDebugLog(
+                "apply",
+                [
+                    "host": hostIdentifier,
+                    "reason": reason,
+                    "mode": resolved.mode.rawValue,
+                    "storedPageLength": resolved.storedPageLength,
+                    "effectivePageLength": resolved.effectivePageLength,
+                    "gapBetweenPages": resolved.gapBetweenPages,
+                    "behavesLikeColumns": resolved.behavesLikeColumns,
+                    "layoutSize": "\(resolved.layoutSize.width)x\(resolved.layoutSize.height)"
+                ]
+            )
+        } else {
+            webViewPaginationDebugLog(
+                "apply.skipped",
+                [
+                    "host": hostIdentifier,
+                    "reason": reason,
+                    "mode": resolved.mode.rawValue
+                ]
+            )
+        }
+        lastPageCount = try queryPageCount(on: webView)
+        return currentState(reason: reason)
+    }
+
+    public func refreshReadback(reason: String) throws -> WebViewPaginationState {
+        lastApplyReason = reason
+        lastUpdatedAt = Date()
+        if let webView {
+            lastPageCount = try queryPageCount(on: webView)
+        } else {
+            lastPageCount = nil
+        }
+        return currentState(reason: reason)
+    }
+
+    public func currentState(reason: String? = nil) -> WebViewPaginationState {
+        let mountedHostIdentifier = webView.map(Self.hostIdentifier(for:))
+        return WebViewPaginationState(
+            desiredConfiguration: desiredConfiguration,
+            appliedConfiguration: lastAppliedConfiguration,
+            pageCount: lastPageCount,
+            mountedHostIdentifier: mountedHostIdentifier,
+            appliedHostIdentifier: lastAppliedHostIdentifier,
+            isAppliedToMountedHost: mountedHostIdentifier != nil && mountedHostIdentifier == lastAppliedHostIdentifier,
+            usedViewLengthInference: (lastAppliedConfiguration ?? desiredConfiguration).usesViewLength,
+            lastApplyReason: reason ?? lastApplyReason,
+            lastUpdatedAt: lastUpdatedAt
+        )
+    }
+
+    public static func hostIdentifier(for webView: WKWebView) -> String {
+        String(describing: ObjectIdentifier(webView))
+    }
+
+    private func applySelectors(_ configuration: WebViewPaginationConfiguration, to webView: WKWebView) throws {
+        try setInt(configuration.mode.rawValue, selectorName: "_setPaginationMode:", on: webView)
+        try setBool(configuration.behavesLikeColumns, selectorName: "_setPaginationBehavesLikeColumns:", on: webView)
+        try setDouble(configuration.storedPageLength, selectorName: "_setPageLength:", on: webView)
+        try setDouble(configuration.gapBetweenPages, selectorName: "_setGapBetweenPages:", on: webView)
+    }
+
+    private func queryPageCount(on webView: WKWebView) throws -> Int {
+        let selectorName = "_pageCount"
+        let selector = Selector(selectorName)
+        guard webView.responds(to: selector) else {
+            throw WebViewPaginationError.missingSelector(selectorName)
+        }
+        typealias Function = @convention(c) (AnyObject, Selector) -> Int
+        let implementation = webView.method(for: selector)
+        let function = unsafeBitCast(implementation, to: Function.self)
+        return function(webView, selector)
+    }
+
+    private func setInt(_ value: Int, selectorName: String, on webView: WKWebView) throws {
+        let selector = Selector(selectorName)
+        guard webView.responds(to: selector) else {
+            throw WebViewPaginationError.missingSelector(selectorName)
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, Int) -> Void
+        let implementation = webView.method(for: selector)
+        let function = unsafeBitCast(implementation, to: Function.self)
+        function(webView, selector, value)
+    }
+
+    private func setBool(_ value: Bool, selectorName: String, on webView: WKWebView) throws {
+        let selector = Selector(selectorName)
+        guard webView.responds(to: selector) else {
+            throw WebViewPaginationError.missingSelector(selectorName)
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, Bool) -> Void
+        let implementation = webView.method(for: selector)
+        let function = unsafeBitCast(implementation, to: Function.self)
+        function(webView, selector, value)
+    }
+
+    private func setDouble(_ value: CGFloat, selectorName: String, on webView: WKWebView) throws {
+        let selector = Selector(selectorName)
+        guard webView.responds(to: selector) else {
+            throw WebViewPaginationError.missingSelector(selectorName)
+        }
+        typealias Function = @convention(c) (AnyObject, Selector, Double) -> Void
+        let implementation = webView.method(for: selector)
+        let function = unsafeBitCast(implementation, to: Function.self)
+        function(webView, selector, Double(value))
+    }
+}
+
+@MainActor
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
     
@@ -218,7 +563,8 @@ public class WebViewCoordinator: NSObject {
     weak var webViewPool: WebViewPool?
     var registeredMessageHandlerNames = Set<String>()
     weak var lastUserContentController: WKUserContentController?
-    //    var lastInstalledScriptsHash = -1
+    weak var lastUserScriptsContentController: WKUserContentController?
+    var lastInstalledScriptsSignature: String?
     var compiledContentRules = [String: WKContentRuleList]()
     var lastAppliedContentRules: String?
     var shouldReapplyContentRulesAfterLoad = false
@@ -230,6 +576,9 @@ public class WebViewCoordinator: NSObject {
     private var lastProgressUpdateTime: CFTimeInterval = 0
     private var lastEmittedProgress: Double?
     private var pendingProgressUpdateTask: Task<Void, Never>?
+    private var pendingPaginationApplyTask: Task<Void, Never>?
+    private var pendingPaginationStateTask: Task<Void, Never>?
+    private var pendingWebViewBindingTask: Task<Void, Never>?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
@@ -251,6 +600,7 @@ public class WebViewCoordinator: NSObject {
     internal var navigationScrollAxis: NavigationScrollAxis = .vertical
     internal var horizontalForwardSign: CGFloat = 1
     internal var lastEnvHandlerNames: OrderedSet<String>? = nil
+    public let paginationController = WebViewPaginationController()
     
     var onNavigationCommitted: ((WebViewState) -> Void)?
     var onNavigationFinished: ((WebViewState) -> Void)?
@@ -422,6 +772,12 @@ public class WebViewCoordinator: NSObject {
         isLoadingObservation = nil
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
+        pendingPaginationApplyTask?.cancel()
+        pendingPaginationApplyTask = nil
+        pendingPaginationStateTask?.cancel()
+        pendingPaginationStateTask = nil
+        pendingWebViewBindingTask?.cancel()
+        pendingWebViewBindingTask = nil
         lastEmittedProgress = nil
         lastProgressUpdateTime = 0
     }
@@ -450,6 +806,8 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     func tearDownBindingsForDetachedWebView(_ webView: WKWebView?) {
+        pendingWebViewBindingTask?.cancel()
+        pendingWebViewBindingTask = nil
         if !navigator.shouldLoadFallbackOnAttach {
             debugPrint(
                 "# LOOKUPSMAR6",
@@ -462,9 +820,60 @@ public class WebViewCoordinator: NSObject {
             )
         }
         removeMessageHandlers(for: webView)
+        lastUserScriptsContentController = nil
+        lastInstalledScriptsSignature = nil
         navigator.webView = nil
         clearScriptCallerBinding()
         invalidateWebViewObservations()
+        self.webView.state.paginationState = paginationController.detach()
+    }
+
+    @MainActor
+    private func schedulePaginationStateUpdate(_ paginationState: WebViewPaginationState) {
+        pendingPaginationStateTask?.cancel()
+        pendingPaginationStateTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self else { return }
+            var newState = self.webView.state
+            newState.paginationState = paginationState
+            if newState != self.webView.state {
+                self.webView.state = newState
+            }
+            self.pendingPaginationStateTask = nil
+        }
+    }
+
+    @MainActor
+    func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) {
+        pendingWebViewBindingTask?.cancel()
+        pendingWebViewBindingTask = Task { @MainActor [weak self, weak webView] in
+            await Task.yield()
+            guard let self, let webView else { return }
+            self.setWebView(webView)
+            self.applyPaginationConfigurationIfNeeded(reason: paginationReason)
+            self.pendingWebViewBindingTask = nil
+        }
+    }
+
+    @MainActor
+    func schedulePaginationConfigurationApply(reason: String, for webView: WKWebView) {
+        let mountedHostIdentifier = paginationController.currentState().mountedHostIdentifier
+        let targetHostIdentifier = WebViewPaginationController.hostIdentifier(for: webView)
+        guard mountedHostIdentifier == targetHostIdentifier else { return }
+
+        pendingPaginationApplyTask?.cancel()
+        pendingPaginationApplyTask = Task { @MainActor [weak self, weak webView] in
+            await Task.yield()
+            guard let self, let webView else { return }
+            let currentMountedHostIdentifier = self.paginationController.currentState().mountedHostIdentifier
+            let currentTargetHostIdentifier = WebViewPaginationController.hostIdentifier(for: webView)
+            guard currentMountedHostIdentifier == currentTargetHostIdentifier else {
+                self.pendingPaginationApplyTask = nil
+                return
+            }
+            self.applyPaginationConfigurationIfNeeded(reason: reason)
+            self.pendingPaginationApplyTask = nil
+        }
     }
     
     @MainActor
@@ -482,6 +891,7 @@ public class WebViewCoordinator: NSObject {
             )
         }
         navigator.webView = webView
+        self.webView.state.paginationState = paginationController.attach(webView: webView)
 
         invalidateWebViewObservations()
 
@@ -514,6 +924,40 @@ public class WebViewCoordinator: NSObject {
             Task { @MainActor [weak self] in
                 self?.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
             }
+        }
+    }
+
+    @MainActor
+    func applyPaginationConfigurationIfNeeded(reason: String) {
+        do {
+            let paginationState = try paginationController.apply(config.paginationConfiguration, reason: reason)
+            schedulePaginationStateUpdate(paginationState)
+        } catch {
+            webViewPaginationDebugLog(
+                "apply.error",
+                [
+                    "reason": reason,
+                    "error": error.localizedDescription,
+                    "host": paginationController.currentState().mountedHostIdentifier ?? "nil"
+                ]
+            )
+        }
+    }
+
+    @MainActor
+    func refreshPaginationReadback(reason: String) {
+        do {
+            let paginationState = try paginationController.refreshReadback(reason: reason)
+            schedulePaginationStateUpdate(paginationState)
+        } catch {
+            webViewPaginationDebugLog(
+                "readback.error",
+                [
+                    "reason": reason,
+                    "error": error.localizedDescription,
+                    "host": paginationController.currentState().mountedHostIdentifier ?? "nil"
+                ]
+            )
         }
     }
     
@@ -812,6 +1256,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #endif
         
         extractPageState(webView: webView)
+        refreshPaginationReadback(reason: "navigation-finished")
     }
     
     private func extractPageState(webView: WKWebView) {
@@ -950,6 +1395,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             logLookupPerf("webview.reload.nav.commit")
         }
 #endif
+        refreshPaginationReadback(reason: "navigation-committed")
     }
     
     @MainActor
@@ -1328,6 +1774,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func goForward() {
         webView?.goForward()
+    }
+
+    @MainActor
+    public func withAttachedWebView<T>(
+        _ operation: (WKWebView) async throws -> T
+    ) async rethrows -> T? {
+        guard let webView else { return nil }
+        return try await operation(webView)
     }
 
     public override init() {
@@ -2062,6 +2516,7 @@ public struct WebViewConfig: Sendable {
     public let backgroundColor: Color
     public let userScripts: [WebViewUserScript]
     public let darkModeSetting: DarkModeSetting
+    public let paginationConfiguration: WebViewPaginationConfiguration
     
     public init(
         javaScriptEnabled: Bool = true,
@@ -2075,7 +2530,8 @@ public struct WebViewConfig: Sendable {
         isOpaque: Bool = true,
         backgroundColor: Color = .clear,
         userScripts: [WebViewUserScript] = [],
-        darkModeSetting: DarkModeSetting = .system
+        darkModeSetting: DarkModeSetting = .system,
+        paginationConfiguration: WebViewPaginationConfiguration = .disabled
     ) {
         self.javaScriptEnabled = javaScriptEnabled
         self.contentRules = contentRules
@@ -2089,6 +2545,7 @@ public struct WebViewConfig: Sendable {
         self.backgroundColor = backgroundColor
         self.userScripts = userScripts
         self.darkModeSetting = darkModeSetting
+        self.paginationConfiguration = paginationConfiguration
     }
 }
 
@@ -2988,7 +3445,7 @@ extension WebView: UIViewControllerRepresentable {
             forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
         )
-        context.coordinator.setWebView(webView)
+        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "configure-webview")
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -3274,7 +3731,7 @@ extension WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        context.coordinator.setWebView(webView)
+        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -3423,6 +3880,7 @@ extension WebView {
         webView.uiDelegate = context.coordinator
         webView.pageZoom = config.pageZoom
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        context.coordinator.schedulePaginationConfigurationApply(reason: "apply-common-configuration", for: webView)
     }
 
     @MainActor
@@ -3568,10 +4026,21 @@ extension WebView {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
         var allScripts = Self.systemScripts + scripts
-        //        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
-        
+        let installedScriptsSignature = allScripts
+            .map { script in
+                "\(script.source.hashValue)|\(script.injectionTime.rawValue)|\(script.isForMainFrameOnly)"
+            }
+            .joined(separator: "||")
+
+        if coordinator.lastUserScriptsContentController === userContentController,
+           coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
+            return
+        }
+
         if allScripts.isEmpty && !userContentController.userScripts.isEmpty {
             userContentController.removeAllUserScripts()
+            coordinator.lastUserScriptsContentController = userContentController
+            coordinator.lastInstalledScriptsSignature = nil
             return
         }
         
@@ -3593,8 +4062,11 @@ extension WebView {
                 userContentController.addUserScript(script.webKitUserScript)
             }
         }
-        debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
-        //        coordinator.lastInstalledScriptsHash = allScripts.hashValue
+        coordinator.lastUserScriptsContentController = userContentController
+        if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
+            debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
+            coordinator.lastInstalledScriptsSignature = installedScriptsSignature
+        }
     }
     
     @MainActor fileprivate static let systemScripts = [
