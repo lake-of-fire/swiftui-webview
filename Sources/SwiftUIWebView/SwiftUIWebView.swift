@@ -20,7 +20,6 @@ private func lookupSmar10NativeWebViewLog(_ stage: String, _ metadata: [String: 
     #endif
 }
 
-@MainActor private var webViewCache: [String: EnhancedWKWebView] = [:]
 @MainActor private let webViewProcessPool = WKProcessPool()
 
 @globalActor
@@ -2293,7 +2292,6 @@ private final class WebViewTouchProbeGestureRecognizer: UIGestureRecognizer {
 
 public class WebViewController: UIViewController {
     var webView: EnhancedWKWebView
-    let persistentWebViewID: String?
     private var webViewConstraints: [NSLayoutConstraint] = []
     private var snapshotImageView: UIImageView?
     private var touchProbeGestureRecognizer: WebViewTouchProbeGestureRecognizer?
@@ -2309,9 +2307,8 @@ public class WebViewController: UIViewController {
         }
     }
     
-    public init(webView: EnhancedWKWebView, persistentWebViewID: String? = nil) {
+    public init(webView: EnhancedWKWebView) {
         self.webView = webView
-        self.persistentWebViewID = persistentWebViewID
         super.init(nibName: nil, bundle: nil)
         installTouchProbeIfNeeded()
         attachWebView(webView)
@@ -2771,7 +2768,6 @@ public struct WebView {
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
     var bounces = true
-    let persistentWebViewID: String?
     let webViewPool: WebViewPool?
     let webViewPrewarmer: WebViewPrewarmer?
     //    let onWarm: (() async -> Void)?
@@ -2790,7 +2786,6 @@ public struct WebView {
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
                 bounces: Bool = true,
-                persistentWebViewID: String? = nil,
                 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
@@ -2813,7 +2808,6 @@ public struct WebView {
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
         self.bounces = bounces
-        self.persistentWebViewID = persistentWebViewID
         //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
         self.onNavigationCommitted = onNavigationCommitted
@@ -2882,20 +2876,10 @@ public struct WebView {
 extension WebView: UIViewControllerRepresentable {
     @MainActor
     private func makeWebView(
-        id: String?,
         config: WebViewConfig,
         coordinator: WebViewCoordinator
     ) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
-        if let id = id {
-            web = webViewCache[id] // it is UI thread so safe to access static
-            for messageHandlerName in coordinator.messageHandlerNames {
-                web?.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
-            }
-            coordinator.registeredMessageHandlerNames.removeAll()
-            coordinator.lastEnvHandlerNames = nil
-            coordinator.lastUserContentController = web?.configuration.userContentController
-        }
         if web == nil, let resolvedWebViewPool {
             web = resolvedWebViewPool.dequeue {
                 makeNewWebView(config: config)
@@ -2903,9 +2887,6 @@ extension WebView: UIViewControllerRepresentable {
         }
         if web == nil {
             web = makeNewWebView(config: config)
-            if let id = id {
-                webViewCache[id] = web
-            }
         }
         guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
         
@@ -3034,12 +3015,8 @@ extension WebView: UIViewControllerRepresentable {
         // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
         //        preferences.setValue(true, forKey: "developerExtrasEnabled")
         
-        let webView = makeWebView(
-            id: persistentWebViewID,
-            config: config,
-            coordinator: context.coordinator
-        )
-        let controller = WebViewController(webView: webView, persistentWebViewID: persistentWebViewID)
+        let webView = makeWebView(config: config, coordinator: context.coordinator)
+        let controller = WebViewController(webView: webView)
         if !context.coordinator.navigator.shouldLoadFallbackOnAttach {
             debugPrint(
                 "# LOOKUPSMAR6",
@@ -3065,7 +3042,7 @@ extension WebView: UIViewControllerRepresentable {
             if coordinator.lifecycleConfig.autoUnloadOnDisappear, controller.isWebViewUnloaded {
                 coordinator.prepareForReloadIfNeeded(controller: controller)
                 coordinator.navigator.prepareForReloadAfterReattach()
-                let newWebView = makeWebView(id: persistentWebViewID, config: config, coordinator: coordinator)
+                let newWebView = makeWebView(config: config, coordinator: coordinator)
                 controller.replaceWebView(newWebView)
                 configureWebView(newWebView, controller: controller, context: context)
             }
@@ -3201,7 +3178,7 @@ extension WebView: UIViewControllerRepresentable {
             if coordinator.lifecycleConfig.autoUnloadOnDisappear, controller.isWebViewUnloaded {
                 coordinator.prepareForReloadIfNeeded(controller: controller)
                 coordinator.navigator.prepareForReloadAfterReattach()
-                let newWebView = makeWebView(id: persistentWebViewID, config: config, coordinator: coordinator)
+                let newWebView = makeWebView(config: config, coordinator: coordinator)
                 controller.replaceWebView(newWebView)
                 configureWebView(newWebView, controller: controller, context: context)
             }
