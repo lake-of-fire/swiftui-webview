@@ -319,11 +319,25 @@ public struct WebViewState: Equatable, Sendable {
     }
 }
 
-public struct WebViewMessage: Equatable {
+public struct WebViewMessage: Equatable, @unchecked Sendable {
     public let frameInfo: WKFrameInfo
     fileprivate let uuid: UUID
     public let name: String
     public let body: Any
+    public let isMainFrame: Bool
+    public let requestURL: URL?
+    public let mainDocumentURL: URL?
+
+    @MainActor
+    public init(frameInfo: WKFrameInfo, uuid: UUID, name: String, body: Any) {
+        self.frameInfo = frameInfo
+        self.uuid = uuid
+        self.name = name
+        self.body = body
+        self.isMainFrame = frameInfo.isMainFrame
+        self.requestURL = frameInfo.request.url
+        self.mainDocumentURL = frameInfo.request.mainDocumentURL
+    }
     
     public static func == (lhs: WebViewMessage, rhs: WebViewMessage) -> Bool {
         lhs.uuid == rhs.uuid
@@ -900,7 +914,7 @@ public class WebViewCoordinator: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard let maybeNewURL = change.newValue, let newURL = maybeNewURL, newURL != webView.url else { return }
-                let newState = setLoading(
+                _ = setLoading(
                     false,
                     pageURL: newURL,
                     canGoBack: webView.canGoBack,
@@ -912,7 +926,7 @@ public class WebViewCoordinator: NSObject {
 
         estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            let progress = change.newValue ?? webView.estimatedProgress
+            guard let progress = change.newValue else { return }
             Task { @MainActor [weak self] in
                 self?.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
             }
@@ -920,7 +934,7 @@ public class WebViewCoordinator: NSObject {
 
         isLoadingObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            let isLoading = change.newValue ?? webView.isLoading
+            guard let isLoading = change.newValue else { return }
             Task { @MainActor [weak self] in
                 self?.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
             }
@@ -1291,7 +1305,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         Task {
-            await scriptCaller?.removeAllMultiTargetFrames()
+            scriptCaller?.removeAllMultiTargetFrames()
         }
         if !navigator.shouldLoadFallbackOnAttach {
             debugPrint(
@@ -1306,7 +1320,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 ] as [String : Any]
             )
         }
-        let newState = setLoading(
+        _ = setLoading(
             false,
             pageURL: webView.url,
             isProvisionallyNavigating: false,
@@ -1331,7 +1345,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         Task {
-            await scriptCaller?.removeAllMultiTargetFrames()
+            scriptCaller?.removeAllMultiTargetFrames()
         }
         if !navigator.shouldLoadFallbackOnAttach {
             debugPrint(
@@ -1361,7 +1375,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         Task {
-            await scriptCaller?.removeAllMultiTargetFrames()
+            scriptCaller?.removeAllMultiTargetFrames()
         }
         if !navigator.shouldLoadFallbackOnAttach {
             debugPrint(
@@ -1418,7 +1432,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #if os(iOS)
         pendingSnapshotRestore = false
 #endif
-        let newState = setLoading(
+        _ = setLoading(
             true,
             isProvisionallyNavigating: true,
             canGoBack: webView.canGoBack,
@@ -1456,7 +1470,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 config: config
             )
 
-            await scriptCaller?.removeAllMultiTargetFrames()
+            scriptCaller?.removeAllMultiTargetFrames()
             var newState = self.webView.state
             newState.pageURL = effectiveMainDocumentURL ?? newState.pageURL
             newState.pageTitle = nil
@@ -1901,7 +1915,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         if duplicateInMultiTargetFrames {
             await { @MainActor [weak self] in
                 guard let self else { return }
-                for (uuid, targetFrame) in await multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
                     if targetFrame == frame { continue }
                     do {
                         _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
@@ -3749,7 +3763,7 @@ extension WebView: NSViewRepresentable {
                   "url=\(currentURL)",
                   "frameURL=\(frameURL)",
                   "isMainFrame=\(isMainFrame)",
-                  "world=\(resolvedWorld.name)",
+                  "world=\(String(describing: resolvedWorld.name))",
                   "args=\(args?.count ?? 0)",
                   "jsPrefix=\(jsPrefix)")
             do {
@@ -3766,7 +3780,7 @@ extension WebView: NSViewRepresentable {
                       "url=\(currentURL)",
                       "frameURL=\(frameURL)",
                       "isMainFrame=\(isMainFrame)",
-                      "world=\(resolvedWorld.name)",
+                      "world=\(String(describing: resolvedWorld.name))",
                       "jsPrefix=\(jsPrefix)",
                       "type=\(typeDescription)",
                       "stringLength=\(stringLength.map(String.init) ?? "nil")",
@@ -3778,7 +3792,7 @@ extension WebView: NSViewRepresentable {
                       "url=\(currentURL)",
                       "frameURL=\(frameURL)",
                       "isMainFrame=\(isMainFrame)",
-                      "world=\(resolvedWorld.name)",
+                      "world=\(String(describing: resolvedWorld.name))",
                       "jsPrefix=\(jsPrefix)",
                       "error=\(error)",
                       String(format: "elapsed=%.3fs", elapsed))
@@ -4025,7 +4039,7 @@ extension WebView {
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
-        var allScripts = Self.systemScripts + scripts
+        let allScripts = Self.systemScripts + scripts
         let installedScriptsSignature = allScripts
             .map { script in
                 "\(script.source.hashValue)|\(script.injectionTime.rawValue)|\(script.isForMainFrameOnly)"
