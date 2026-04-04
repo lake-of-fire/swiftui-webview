@@ -860,10 +860,10 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) {
         pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = Task { @MainActor [weak self, weak webView] in
+        self.setWebView(webView)
+        pendingWebViewBindingTask = Task { @MainActor [weak self] in
             await Task.yield()
-            guard let self, let webView else { return }
-            self.setWebView(webView)
+            guard let self else { return }
             self.applyPaginationConfigurationIfNeeded(reason: paginationReason)
             self.pendingWebViewBindingTask = nil
         }
@@ -905,7 +905,17 @@ public class WebViewCoordinator: NSObject {
             )
         }
         navigator.webView = webView
+        #if os(macOS)
+        (webView as? EnhancedWKWebView)?.onDidMoveToWindow = { [weak navigator, weak webView] isAttached in
+            guard let navigator, let webView else { return }
+            Task { @MainActor in
+                navigator.handleWindowAttachmentChanged(isAttached: isAttached, webView: webView)
+            }
+        }
+        navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
+        #endif
         self.webView.state.paginationState = paginationController.attach(webView: webView)
+        navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
 
         invalidateWebViewObservations()
 
@@ -1414,7 +1424,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        if !navigator.shouldLoadFallbackOnAttach {
+        if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
             debugPrint(
                 "# LOOKUPSMAR6",
                 [
@@ -1429,6 +1439,20 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# READER webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+        if navigator.pendingRequest?.url == webView.url {
+            if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
+                debugPrint(
+                    "# READER navigator.pendingRequest.clearedOnStart",
+                    [
+                        "navigatorID": navigator.debugIdentifier ?? "nil",
+                        "navigatorObjectID": navigator.debugObjectID,
+                        "url": webView.url?.absoluteString ?? "nil"
+                    ] as [String : Any]
+                )
+            }
+            navigator.pendingRequest = nil
+            navigator.cancelPendingRequestLoadTask()
+        }
 #if os(iOS)
         pendingSnapshotRestore = false
 #endif
@@ -1530,12 +1554,210 @@ public class WebViewNavigator: NSObject, ObservableObject {
         String(describing: ObjectIdentifier(self))
     }
     @MainActor private var bypassContentRulesForNextNavigation = false
+    @MainActor private var pendingRequestLoadGeneration: Int = 0
+    @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
     public var attachFallbackURL: URL?
     public var shouldLoadFallbackOnAttach = true
+
+    @MainActor
+    func cancelPendingRequestLoadTask() {
+        pendingRequestLoadGeneration &+= 1
+        pendingRequestLoadTask?.cancel()
+        pendingRequestLoadTask = nil
+    }
+
+    @MainActor
+    private func schedulePendingRequestLoadRetry(
+        request: URLRequest,
+        webView: WKWebView,
+        attempt: Int,
+        generation: Int
+    ) {
+        pendingRequestLoadTask?.cancel()
+        pendingRequestLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var currentAttempt = attempt
+            while currentAttempt <= 60 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled else { return }
+                guard self.pendingRequestLoadGeneration == generation else { return }
+                if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                    debugPrint(
+                        "# READER navigator.flushPendingRequest.retry.begin",
+                        [
+                            "navigatorID": self.debugIdentifier ?? "nil",
+                            "navigatorObjectID": self.debugObjectID,
+                            "url": request.url?.absoluteString ?? "nil",
+                            "attempt": currentAttempt
+                        ] as [String : Any]
+                    )
+                }
+                guard self.pendingRequest?.url == request.url else { return }
+                if webView.window != nil && webView.superview != nil {
+                    if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                        debugPrint(
+                            "# READER navigator.flushPendingRequest.retry",
+                            [
+                                "navigatorID": self.debugIdentifier ?? "nil",
+                                "navigatorObjectID": self.debugObjectID,
+                                "url": request.url?.absoluteString ?? "nil",
+                                "attempt": currentAttempt
+                            ] as [String : Any]
+                        )
+                    }
+                    if let url = request.url, url.isFileURL {
+                        webView.loadFileURL(url, allowingReadAccessTo: url)
+                    } else {
+                        webView.load(request)
+                    }
+                    self.pendingRequestLoadGeneration &+= 1
+                    self.pendingRequestLoadTask = nil
+                    return
+                }
+                currentAttempt += 1
+            }
+            if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.retry.exhausted",
+                    [
+                        "navigatorID": self.debugIdentifier ?? "nil",
+                        "navigatorObjectID": self.debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil"
+                    ] as [String : Any]
+                )
+            }
+            self.pendingRequestLoadTask = nil
+        }
+    }
+
+    @MainActor
+    private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
+        let shouldRestart = restartIfSameURL && webView.url == request.url && webView.isLoading && webView.estimatedProgress > 0
+        if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+            debugPrint(
+                "# READER navigator.flushPendingRequest.issue",
+                [
+                    "navigatorID": debugIdentifier ?? "nil",
+                    "navigatorObjectID": debugObjectID,
+                    "url": request.url?.absoluteString ?? "nil",
+                    "webViewURL": webView.url?.absoluteString ?? "nil",
+                    "webViewIsLoading": webView.isLoading,
+                    "webViewEstimatedProgress": webView.estimatedProgress,
+                    "restartIfSameURL": restartIfSameURL,
+                    "shouldRestart": shouldRestart,
+                    "reason": diagnosticsReason
+                ] as [String : Any]
+            )
+        }
+        if shouldRestart {
+            webView.stopLoading()
+            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.restart",
+                    [
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil",
+                        "reason": diagnosticsReason
+                    ] as [String : Any]
+                )
+            }
+            self.cancelPendingRequestLoadTask()
+            let nextGeneration = self.pendingRequestLoadGeneration
+            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.restart.fire",
+                    [
+                        "navigatorID": debugIdentifier ?? "nil",
+                    "navigatorObjectID": debugObjectID,
+                    "url": request.url?.absoluteString ?? "nil",
+                    "reason": diagnosticsReason,
+                    "webViewURL": webView.url?.absoluteString ?? "nil",
+                    "webViewIsLoading": webView.isLoading,
+                    "webViewEstimatedProgress": webView.estimatedProgress
+                ] as [String : Any]
+                )
+            }
+            if webView.url == request.url {
+                webView.reload()
+            } else if let url = request.url, url.isFileURL {
+                webView.loadFileURL(url, allowingReadAccessTo: url)
+            } else {
+                webView.load(request)
+            }
+            self.schedulePendingRequestLoadRetry(request: request, webView: webView, attempt: 1, generation: nextGeneration)
+            return
+        }
+        if let url = request.url, url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url)
+        } else {
+            webView.load(request)
+        }
+    }
+
+    @MainActor
+    func handleWindowAttachmentChanged(isAttached: Bool, webView: WKWebView) {
+        let isReadyForRequest = webView.window != nil && webView.superview != nil
+        if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+            debugPrint(
+                "# READER navigator.windowAttachmentChanged",
+                [
+                    "navigatorID": debugIdentifier ?? "nil",
+                    "navigatorObjectID": debugObjectID,
+                    "isAttached": isAttached,
+                    "isReadyForRequest": isReadyForRequest,
+                    "pendingURL": pendingRequest?.url?.absoluteString ?? "nil",
+                    "webViewURL": webView.url?.absoluteString ?? "nil"
+                ] as [String : Any]
+            )
+        }
+        guard isAttached, let request = pendingRequest else { return }
+        guard isReadyForRequest else {
+            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.deferredUntilFullyAttached",
+                    [
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil",
+                        "windowAttached": webView.window != nil,
+                        "superviewAttached": webView.superview != nil
+                    ] as [String : Any]
+                )
+            }
+            return
+        }
+        if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+            debugPrint(
+                "# READER navigator.flushPendingRequest.attached",
+                [
+                    "navigatorID": debugIdentifier ?? "nil",
+                    "navigatorObjectID": debugObjectID,
+                    "url": request.url?.absoluteString ?? "nil"
+                ] as [String : Any]
+            )
+        }
+        guard webView.navigationDelegate != nil else {
+            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.deferredUntilDelegate",
+                    [
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil"
+                    ] as [String : Any]
+                )
+            }
+            return
+        }
+        issuePendingRequestLoad(request, on: webView, restartIfSameURL: true, diagnosticsReason: "windowAttachmentChanged")
+    }
     
     @MainActor
     weak var webView: WKWebView? {
         didSet {
+            let shouldLogDiagnostics = ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1"
+            || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1"
             let nextHasAttachedWebView = webView != nil
             if hasAttachedWebView != nextHasAttachedWebView {
                 DispatchQueue.main.async { [weak self] in
@@ -1543,11 +1765,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     self.hasAttachedWebView = nextHasAttachedWebView
                 }
             }
-            if !shouldLoadFallbackOnAttach {
+            if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                 debugPrint(
-                    "# LOOKUPSMAR6",
+                    "# READER navigator.attach",
                     [
-                        "stage": "sharedWebView.navigator.attach",
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
                         "hasAttachedWebView": webView != nil,
@@ -1559,27 +1780,39 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             guard let webView else { return }
             if let request = pendingRequest {
-                if !shouldLoadFallbackOnAttach {
+                if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
-                        "# LOOKUPSMAR6",
+                        "# READER navigator.flushPendingRequest",
                         [
-                            "stage": "sharedWebView.navigator.flushPendingRequest",
                             "navigatorID": debugIdentifier ?? "nil",
                             "navigatorObjectID": debugObjectID,
                             "url": request.url?.absoluteString ?? "nil"
                         ] as [String : Any]
                     )
                 }
-                webView.load(request)
-                pendingRequest = nil
+                if webView.window == nil || webView.superview == nil {
+                    if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
+                        debugPrint(
+                            "# READER navigator.flushPendingRequest.deferred",
+                            [
+                                "navigatorID": debugIdentifier ?? "nil",
+                                "navigatorObjectID": debugObjectID,
+                                "url": request.url?.absoluteString ?? "nil",
+                                "windowAttached": webView.window != nil,
+                                "superviewAttached": webView.superview != nil
+                            ] as [String : Any]
+                        )
+                    }
+                    return
+                }
+                issuePendingRequestLoad(request, on: webView, restartIfSameURL: true, diagnosticsReason: "webViewDidSet.attached")
                 return
             }
             if let pendingDataLoad {
-                if !shouldLoadFallbackOnAttach {
+                if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
-                        "# LOOKUPSMAR6",
+                        "# READER navigator.flushPendingDataLoad",
                         [
-                            "stage": "sharedWebView.navigator.flushPendingDataLoad",
                             "navigatorID": debugIdentifier ?? "nil",
                             "navigatorObjectID": debugObjectID,
                             "bytes": pendingDataLoad.data.count,
@@ -1598,11 +1831,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 return
             }
             if let pendingHTML {
-                if !shouldLoadFallbackOnAttach {
+                if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
-                        "# LOOKUPSMAR6",
+                        "# READER navigator.flushPendingHTML",
                         [
-                            "stage": "sharedWebView.navigator.flushPendingHTML",
                             "navigatorID": debugIdentifier ?? "nil",
                             "navigatorObjectID": debugObjectID,
                             "htmlLength": pendingHTML.html.count,
@@ -1635,7 +1867,34 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedRequest = request
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
+        if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" {
+            debugPrint(
+                "# READER navigator.loadRequest",
+                [
+                    "navigatorID": debugIdentifier ?? "nil",
+                    "navigatorObjectID": debugObjectID,
+                    "url": request.url?.absoluteString ?? "nil",
+                    "webViewAttached": webView != nil
+                ] as [String : Any]
+            )
+        }
         if let webView = webView {
+            if webView.window == nil || webView.superview == nil {
+                pendingRequest = request
+                if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                    debugPrint(
+                        "# READER navigator.loadRequest.deferredUntilAttached",
+                        [
+                            "navigatorID": debugIdentifier ?? "nil",
+                            "navigatorObjectID": debugObjectID,
+                            "url": request.url?.absoluteString ?? "nil",
+                            "windowAttached": webView.window != nil,
+                            "superviewAttached": webView.superview != nil
+                        ] as [String : Any]
+                    )
+                }
+                return
+            }
             if let url = request.url, url.isFileURL {
                 webView.loadFileURL(url, allowingReadAccessTo: url)
             } else {
@@ -2693,6 +2952,20 @@ public class EnhancedWKWebView: WKWebView {
     public required init?(coder: NSCoder) {
         super.init(coder: coder)
     }
+
+#if os(macOS)
+    public var onDidMoveToWindow: ((Bool) -> Void)?
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onDidMoveToWindow?(window != nil || superview != nil)
+    }
+
+    public override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        onDidMoveToWindow?(window != nil || superview != nil)
+    }
+#endif
 
 #if os(iOS)
     var buildMenu: BuildMenuType?
@@ -3895,6 +4168,7 @@ extension WebView {
         webView.pageZoom = config.pageZoom
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         context.coordinator.schedulePaginationConfigurationApply(reason: "apply-common-configuration", for: webView)
+        context.coordinator.navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil, webView: webView)
     }
 
     @MainActor
