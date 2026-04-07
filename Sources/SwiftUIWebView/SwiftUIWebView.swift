@@ -860,10 +860,10 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) {
         pendingWebViewBindingTask?.cancel()
-        self.setWebView(webView)
         pendingWebViewBindingTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard let self else { return }
+            self.setWebView(webView)
             self.applyPaginationConfigurationIfNeeded(reason: paginationReason)
             self.pendingWebViewBindingTask = nil
         }
@@ -3039,8 +3039,6 @@ public class WebViewController: UIViewController {
     private var webViewConstraints: [NSLayoutConstraint] = []
     private var snapshotImageView: UIImageView?
     private var touchProbeGestureRecognizer: WebViewTouchProbeGestureRecognizer?
-    private var topScrollEdgeEffectView: UIView?
-    private var topScrollEdgeInteraction: AnyObject?
     private var lastKnownWebViewSize: CGSize = .zero
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
@@ -3058,7 +3056,6 @@ public class WebViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
         installTouchProbeIfNeeded()
         attachWebView(webView)
-        configureScrollEdgeEffectIfNeeded()
     }
     
     required init?(coder: NSCoder) {
@@ -3145,7 +3142,6 @@ public class WebViewController: UIViewController {
         detachWebView()
         webView = newWebView
         attachWebView(newWebView)
-        configureScrollEdgeEffectIfNeeded()
         isWebViewUnloaded = false
         updateObscuredInsets()
     }
@@ -3229,43 +3225,6 @@ public class WebViewController: UIViewController {
             view.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(webViewConstraints)
-    }
-
-    @MainActor
-    private func configureScrollEdgeEffectIfNeeded() {
-        guard #available(iOS 26, *) else { return }
-
-        if topScrollEdgeEffectView == nil {
-            let extensionView = UIBackgroundExtensionView()
-            extensionView.translatesAutoresizingMaskIntoConstraints = false
-            extensionView.isUserInteractionEnabled = false
-
-            let contentView = UIView()
-            contentView.translatesAutoresizingMaskIntoConstraints = false
-            contentView.backgroundColor = .clear
-            extensionView.contentView = contentView
-
-            view.addSubview(extensionView)
-            NSLayoutConstraint.activate([
-                extensionView.topAnchor.constraint(equalTo: view.topAnchor),
-                extensionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                extensionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                extensionView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor)
-            ])
-
-            let interaction = UIScrollEdgeElementContainerInteraction()
-            interaction.edge = .top
-            interaction.scrollView = webView.scrollView
-            extensionView.addInteraction(interaction)
-
-            topScrollEdgeEffectView = extensionView
-            topScrollEdgeInteraction = interaction
-        } else if let interaction = topScrollEdgeInteraction as? UIScrollEdgeElementContainerInteraction {
-            interaction.scrollView = webView.scrollView
-        }
-
-        webView.scrollView.topEdgeEffect.style = .soft
-        setContentScrollView(webView.scrollView, for: .top)
     }
 
     @MainActor
@@ -4209,7 +4168,6 @@ extension WebView {
         webView.pageZoom = config.pageZoom
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
         context.coordinator.schedulePaginationConfigurationApply(reason: "apply-common-configuration", for: webView)
-        context.coordinator.navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil, webView: webView)
     }
 
     @MainActor
