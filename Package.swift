@@ -6,7 +6,7 @@ import PackageDescription
 let package = Package(
     name: "SwiftUIWebView",
     platforms: [
-        .iOS(.v15), .macOS(.v26)
+        .iOS(.v15), .macOS(.v15)
     ],
     products: [
         .library(
