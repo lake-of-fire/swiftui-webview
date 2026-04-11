@@ -228,10 +228,131 @@ public struct WebViewPaginationStructuralIdentity: Equatable, Sendable {
     public let layoutSize: CGSize
 }
 
+public enum WebViewPaginationVisibleUnitKind: String, Codable, Equatable, Sendable {
+    case singlePage
+    case pageSpread
+    case paginatedRowSet
+}
+
+public enum WebViewPaginationVisibleUnitAxis: String, Codable, Equatable, Sendable {
+    case horizontal
+    case vertical
+}
+
+public struct WebViewPaginationVisibleUnit: Codable, Equatable, Sendable {
+    public let kind: WebViewPaginationVisibleUnitKind
+    public let axis: WebViewPaginationVisibleUnitAxis
+    public let visiblePageCount: Int
+    public let primarySpacing: CGFloat
+    public let currentUnitIndex: Int?
+    public let leadingPageIndex: Int?
+    public let trailingPageIndex: Int?
+    public let hasLeadingSingleton: Bool
+    public let hasTrailingSingleton: Bool
+    public let spreadPagesAllowedForViewport: Bool
+
+    public init(
+        kind: WebViewPaginationVisibleUnitKind,
+        axis: WebViewPaginationVisibleUnitAxis,
+        visiblePageCount: Int,
+        primarySpacing: CGFloat = 0,
+        currentUnitIndex: Int?,
+        leadingPageIndex: Int?,
+        trailingPageIndex: Int?,
+        hasLeadingSingleton: Bool,
+        hasTrailingSingleton: Bool,
+        spreadPagesAllowedForViewport: Bool
+    ) {
+        self.kind = kind
+        self.axis = axis
+        self.visiblePageCount = visiblePageCount
+        self.primarySpacing = primarySpacing
+        self.currentUnitIndex = currentUnitIndex
+        self.leadingPageIndex = leadingPageIndex
+        self.trailingPageIndex = trailingPageIndex
+        self.hasLeadingSingleton = hasLeadingSingleton
+        self.hasTrailingSingleton = hasTrailingSingleton
+        self.spreadPagesAllowedForViewport = spreadPagesAllowedForViewport
+    }
+
+    public static let singlePage = WebViewPaginationVisibleUnit(
+        kind: .singlePage,
+        axis: .horizontal,
+        visiblePageCount: 1,
+        primarySpacing: 0,
+        currentUnitIndex: nil,
+        leadingPageIndex: nil,
+        trailingPageIndex: nil,
+        hasLeadingSingleton: false,
+        hasTrailingSingleton: false,
+        spreadPagesAllowedForViewport: false
+    )
+
+    public var dictionaryRepresentation: [String: String] {
+        [
+            "visibleUnitKind": kind.rawValue,
+            "visibleUnitAxis": axis.rawValue,
+            "visiblePageCount": "\(visiblePageCount)",
+            "primarySpacing": "\(primarySpacing)",
+            "currentUnitIndex": currentUnitIndex.map(String.init) ?? "nil",
+            "leadingPageIndex": leadingPageIndex.map(String.init) ?? "nil",
+            "trailingPageIndex": trailingPageIndex.map(String.init) ?? "nil",
+            "hasLeadingSingleton": "\(hasLeadingSingleton)",
+            "hasTrailingSingleton": "\(hasTrailingSingleton)",
+            "spreadPagesAllowedForViewport": "\(spreadPagesAllowedForViewport)"
+        ]
+    }
+}
+
+public enum WebViewPaginationPageLabelDisplayMode: String, Codable, Equatable, Sendable {
+    case singleLabel
+    case multipleLabels
+}
+
+public struct WebViewPaginationPageLabelPolicy: Codable, Equatable, Sendable {
+    public let displayMode: WebViewPaginationPageLabelDisplayMode
+    public let usesPhysicalPageLabels: Bool
+
+    public init(
+        displayMode: WebViewPaginationPageLabelDisplayMode,
+        usesPhysicalPageLabels: Bool
+    ) {
+        self.displayMode = displayMode
+        self.usesPhysicalPageLabels = usesPhysicalPageLabels
+    }
+
+    public static let singleLabel = WebViewPaginationPageLabelPolicy(
+        displayMode: .singleLabel,
+        usesPhysicalPageLabels: false
+    )
+
+    public var dictionaryRepresentation: [String: String] {
+        [
+            "pageLabelDisplayMode": displayMode.rawValue,
+            "usesPhysicalPageLabels": "\(usesPhysicalPageLabels)"
+        ]
+    }
+}
+
+public struct WebViewPaginationStateEnrichment: Codable, Equatable, Sendable {
+    public let visibleUnit: WebViewPaginationVisibleUnit?
+    public let pageLabelPolicy: WebViewPaginationPageLabelPolicy?
+
+    public init(
+        visibleUnit: WebViewPaginationVisibleUnit? = nil,
+        pageLabelPolicy: WebViewPaginationPageLabelPolicy? = nil
+    ) {
+        self.visibleUnit = visibleUnit
+        self.pageLabelPolicy = pageLabelPolicy
+    }
+}
+
 public struct WebViewPaginationState: Equatable, Sendable {
     public let desiredConfiguration: WebViewPaginationConfiguration
     public let appliedConfiguration: WebViewPaginationConfiguration?
     public let pageCount: Int?
+    public let visibleUnit: WebViewPaginationVisibleUnit?
+    public let pageLabelPolicy: WebViewPaginationPageLabelPolicy?
     public let mountedHostIdentifier: String?
     public let appliedHostIdentifier: String?
     public let isAppliedToMountedHost: Bool
@@ -243,6 +364,8 @@ public struct WebViewPaginationState: Equatable, Sendable {
         desiredConfiguration: WebViewPaginationConfiguration,
         appliedConfiguration: WebViewPaginationConfiguration?,
         pageCount: Int?,
+        visibleUnit: WebViewPaginationVisibleUnit? = nil,
+        pageLabelPolicy: WebViewPaginationPageLabelPolicy? = nil,
         mountedHostIdentifier: String?,
         appliedHostIdentifier: String?,
         isAppliedToMountedHost: Bool,
@@ -253,6 +376,8 @@ public struct WebViewPaginationState: Equatable, Sendable {
         self.desiredConfiguration = desiredConfiguration
         self.appliedConfiguration = appliedConfiguration
         self.pageCount = pageCount
+        self.visibleUnit = visibleUnit
+        self.pageLabelPolicy = pageLabelPolicy
         self.mountedHostIdentifier = mountedHostIdentifier
         self.appliedHostIdentifier = appliedHostIdentifier
         self.isAppliedToMountedHost = isAppliedToMountedHost
@@ -264,6 +389,8 @@ public struct WebViewPaginationState: Equatable, Sendable {
     public var dictionaryRepresentation: [String: String] {
         var values = desiredConfiguration.dictionaryRepresentation
         values["pageCount"] = pageCount.map(String.init) ?? "nil"
+        values.merge(visibleUnit?.dictionaryRepresentation ?? [:], uniquingKeysWith: { _, rhs in rhs })
+        values.merge(pageLabelPolicy?.dictionaryRepresentation ?? [:], uniquingKeysWith: { _, rhs in rhs })
         values["mountedHostIdentifier"] = mountedHostIdentifier ?? "nil"
         values["appliedHostIdentifier"] = appliedHostIdentifier ?? "nil"
         values["isAppliedToMountedHost"] = "\(isAppliedToMountedHost)"
@@ -276,11 +403,30 @@ public struct WebViewPaginationState: Equatable, Sendable {
         lhs.desiredConfiguration == rhs.desiredConfiguration
         && lhs.appliedConfiguration == rhs.appliedConfiguration
         && lhs.pageCount == rhs.pageCount
+        && lhs.visibleUnit == rhs.visibleUnit
+        && lhs.pageLabelPolicy == rhs.pageLabelPolicy
         && lhs.mountedHostIdentifier == rhs.mountedHostIdentifier
         && lhs.appliedHostIdentifier == rhs.appliedHostIdentifier
         && lhs.isAppliedToMountedHost == rhs.isAppliedToMountedHost
         && lhs.usedViewLengthInference == rhs.usedViewLengthInference
         && lhs.lastApplyReason == rhs.lastApplyReason
+    }
+
+    public func applying(_ enrichment: WebViewPaginationStateEnrichment?) -> WebViewPaginationState {
+        guard let enrichment else { return self }
+        return WebViewPaginationState(
+            desiredConfiguration: desiredConfiguration,
+            appliedConfiguration: appliedConfiguration,
+            pageCount: pageCount,
+            visibleUnit: enrichment.visibleUnit ?? visibleUnit,
+            pageLabelPolicy: enrichment.pageLabelPolicy ?? pageLabelPolicy,
+            mountedHostIdentifier: mountedHostIdentifier,
+            appliedHostIdentifier: appliedHostIdentifier,
+            isAppliedToMountedHost: isAppliedToMountedHost,
+            usedViewLengthInference: usedViewLengthInference,
+            lastApplyReason: lastApplyReason,
+            lastUpdatedAt: lastUpdatedAt
+        )
     }
 }
 
@@ -550,14 +696,14 @@ public final class WebViewPaginationController {
     }
 
     private func applySelectors(_ configuration: WebViewPaginationConfiguration, to webView: WKWebView) throws {
-        try setInt(configuration.mode.rawValue, selectorName: "_setPaginationMode:", on: webView)
-        try setBool(configuration.behavesLikeColumns, selectorName: "_setPaginationBehavesLikeColumns:", on: webView)
-        try setDouble(configuration.storedPageLength, selectorName: "_setPageLength:", on: webView)
-        try setDouble(configuration.gapBetweenPages, selectorName: "_setGapBetweenPages:", on: webView)
+        try setInt(configuration.mode.rawValue, selectorName: PrivatePaginationSelector.setPaginationMode.name, on: webView)
+        try setBool(configuration.behavesLikeColumns, selectorName: PrivatePaginationSelector.setPaginationBehavesLikeColumns.name, on: webView)
+        try setDouble(configuration.storedPageLength, selectorName: PrivatePaginationSelector.setPageLength.name, on: webView)
+        try setDouble(configuration.gapBetweenPages, selectorName: PrivatePaginationSelector.setGapBetweenPages.name, on: webView)
     }
 
     private func queryPageCount(on webView: WKWebView) throws -> Int {
-        let selectorName = "_pageCount"
+        let selectorName = PrivatePaginationSelector.pageCount.name
         let selector = Selector(selectorName)
         guard webView.responds(to: selector) else {
             throw WebViewPaginationError.missingSelector(selectorName)
@@ -599,6 +745,44 @@ public final class WebViewPaginationController {
         let implementation = webView.method(for: selector)
         let function = unsafeBitCast(implementation, to: Function.self)
         function(webView, selector, Double(value))
+    }
+
+    private enum PrivatePaginationSelector {
+        case setPaginationMode
+        case setPaginationBehavesLikeColumns
+        case setPageLength
+        case setGapBetweenPages
+        case pageCount
+
+        var name: String {
+            switch self {
+            case .setPaginationMode:
+                return Self.decode([
+                    95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 77, 111, 100, 101, 58
+                ])
+            case .setPaginationBehavesLikeColumns:
+                return Self.decode([
+                    95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 66, 101, 104, 97, 118, 101,
+                    115, 76, 105, 107, 101, 67, 111, 108, 117, 109, 110, 115, 58
+                ])
+            case .setPageLength:
+                return Self.decode([
+                    95, 115, 101, 116, 80, 97, 103, 101, 76, 101, 110, 103, 116, 104, 58
+                ])
+            case .setGapBetweenPages:
+                return Self.decode([
+                    95, 115, 101, 116, 71, 97, 112, 66, 101, 116, 119, 101, 101, 110, 80, 97, 103, 101, 115, 58
+                ])
+            case .pageCount:
+                return Self.decode([
+                    95, 112, 97, 103, 101, 67, 111, 117, 110, 116
+                ])
+            }
+        }
+
+        private static func decode(_ codeUnits: [UInt8]) -> String {
+            String(decoding: codeUnits, as: UTF8.self)
+        }
     }
 }
 
@@ -800,7 +984,6 @@ public class WebViewCoordinator: NSObject {
         self.textSelection = textSelection
         
         // TODO: Make about:blank history initialization optional via configuration.
-#warning("confirm this sitll works")
         //        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
         //            Task { @MainActor in
         //                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
@@ -875,7 +1058,7 @@ public class WebViewCoordinator: NSObject {
         navigator.webView = nil
         clearScriptCallerBinding()
         invalidateWebViewObservations()
-        self.webView.state.paginationState = paginationController.detach()
+        schedulePaginationStateUpdate(paginationController.detach())
     }
 
     @MainActor
@@ -885,7 +1068,7 @@ public class WebViewCoordinator: NSObject {
             await Task.yield()
             guard let self else { return }
             var newState = self.webView.state
-            newState.paginationState = paginationState
+            newState.paginationState = paginationState.applying(self.navigator.paginationStateEnrichment)
             if newState != self.webView.state {
                 self.webView.state = newState
             }
@@ -950,7 +1133,7 @@ public class WebViewCoordinator: NSObject {
         }
         navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
         #endif
-        self.webView.state.paginationState = paginationController.attach(webView: webView)
+        schedulePaginationStateUpdate(paginationController.attach(webView: webView))
         navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
 
         invalidateWebViewObservations()
@@ -1705,6 +1888,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor fileprivate var readerLoadCommittedAt: Date?
     public var attachFallbackURL: URL?
     public var shouldLoadFallbackOnAttach = true
+    public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
 
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
@@ -1883,7 +2067,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
-        let shouldRestart = restartIfSameURL && webView.url == request.url && webView.isLoading && webView.estimatedProgress > 0
+        let disposition = PendingRequestLoadDisposition.resolve(
+            requestURL: request.url,
+            hasWindow: webView.window != nil,
+            hasSuperview: webView.superview != nil,
+            currentURL: webView.url,
+            isLoading: webView.isLoading,
+            restartIfSameURL: restartIfSameURL
+        )
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
             debugPrint(
                 "# READER navigator.flushPendingRequest.issue",
@@ -1895,42 +2086,59 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     "webViewIsLoading": webView.isLoading,
                     "webViewEstimatedProgress": webView.estimatedProgress,
                     "restartIfSameURL": restartIfSameURL,
-                    "shouldRestart": shouldRestart,
+                    "disposition": String(describing: disposition),
                     "reason": diagnosticsReason
                 ] as [String : Any]
             )
         }
-        if shouldRestart {
-            webView.stopLoading()
+        switch disposition {
+        case .deferUntilAttached:
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
-                    "# READER navigator.flushPendingRequest.restart",
+                    "# READER navigator.flushPendingRequest.deferredUntilFullyAttached",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
                         "url": request.url?.absoluteString ?? "nil",
-                        "reason": diagnosticsReason
-                    ] as [String : Any]
-                )
+                        "reason": diagnosticsReason,
+                        "windowAttached": webView.window != nil,
+                        "superviewAttached": webView.superview != nil
+                ] as [String : Any]
+            )
             }
-            self.cancelPendingRequestLoadTask()
-            let nextGeneration = self.pendingRequestLoadGeneration
+            return
+        case .skipAlreadyLoading:
+            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.skipAlreadyLoading",
+                    [
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil",
+                        "reason": diagnosticsReason,
+                        "webViewURL": webView.url?.absoluteString ?? "nil",
+                        "webViewIsLoading": webView.isLoading,
+                    "webViewEstimatedProgress": webView.estimatedProgress
+                ] as [String : Any]
+            )
+            }
+            let nextGeneration = pendingRequestLoadGeneration
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
                     "# READER navigator.flushPendingRequest.restart.fire",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
-                    "navigatorObjectID": debugObjectID,
-                    "url": request.url?.absoluteString ?? "nil",
-                    "reason": diagnosticsReason,
-                    "webViewURL": webView.url?.absoluteString ?? "nil",
-                    "webViewIsLoading": webView.isLoading,
-                    "webViewEstimatedProgress": webView.estimatedProgress
-                ] as [String : Any]
+                        "navigatorObjectID": debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil",
+                        "reason": diagnosticsReason,
+                        "webViewURL": webView.url?.absoluteString ?? "nil",
+                        "webViewIsLoading": webView.isLoading,
+                        "webViewEstimatedProgress": webView.estimatedProgress
+                    ] as [String : Any]
                 )
             }
             if webView.url == request.url {
-                markReaderLoadIssued(for: request, reason: "restart:\(diagnosticsReason)")
+                markReaderLoadIssued(for: request, reason: "reload:\(diagnosticsReason)")
                 webView.reload()
             } else if let url = request.url, url.isFileURL {
                 markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
@@ -1939,16 +2147,22 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
                 webView.load(request)
             }
-            self.schedulePendingRequestLoadRetry(request: request, webView: webView, attempt: 1, generation: nextGeneration)
+            self.schedulePendingRequestLoadRetry(
+                request: request,
+                webView: webView,
+                attempt: 1,
+                generation: nextGeneration
+            )
             return
-        }
-        if let url = request.url, url.isFileURL {
+        case .loadFileURL:
+            guard let url = request.url else { return }
             markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
             webView.loadFileURL(url, allowingReadAccessTo: url)
-        } else {
+        case .loadRequest:
             markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
             webView.load(request)
         }
+        self.cancelPendingRequestLoadTask()
     }
 
     @MainActor
@@ -1968,21 +2182,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             )
         }
         guard isAttached, let request = pendingRequest else { return }
-        guard isReadyForRequest else {
-            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                debugPrint(
-                    "# READER navigator.flushPendingRequest.deferredUntilFullyAttached",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil",
-                        "windowAttached": webView.window != nil,
-                        "superviewAttached": webView.superview != nil
-                    ] as [String : Any]
-                )
-            }
-            return
-        }
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
             debugPrint(
                 "# READER navigator.flushPendingRequest.attached",
@@ -2362,9 +2561,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         WKContentWorld?
                        ) async throws -> JavaScriptEvaluationResult
     )? = nil
+    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
 
     /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
     public var hasAsyncCaller: Bool { asyncCaller != nil }
+    public var hasUnsafeCaller: Bool { unsafeCaller != nil }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
@@ -2532,6 +2733,30 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
         return normalizeJavaScriptResult(result)
     }
+
+    @MainActor
+    public func evaluateJavaScriptUnsafe(
+        _ js: String,
+        in frame: WKFrameInfo? = nil,
+        duplicateInMultiTargetFrames: Bool = false,
+        in world: WKContentWorld? = nil
+    ) {
+        guard let unsafeCaller else {
+            print("No unsafeCaller set for WebViewScriptCaller \(id)")
+            return
+        }
+
+        unsafeCaller(js, frame, world)
+
+        guard duplicateInMultiTargetFrames else { return }
+        for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+            if targetFrame == frame { continue }
+            unsafeCaller(js, targetFrame, world)
+            if targetFrame.request.url == nil {
+                multiTargetFrames.removeValue(forKey: uuid)
+            }
+        }
+    }
     
     /// Returns whether the frame was already added.
     @MainActor
@@ -2592,6 +2817,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return anyFrame
         }
         return nil
+    }
+
+    @MainActor
+    public func frame(forUUID uuid: String) -> WKFrameInfo? {
+        multiTargetFrames[uuid]
     }
 
     @MainActor
@@ -3218,6 +3448,33 @@ fileprivate let kLeftArrowKeyCode:  UInt16  = 123
 fileprivate let kRightArrowKeyCode: UInt16  = 124
 fileprivate let kDownArrowKeyCode:  UInt16  = 125
 fileprivate let kUpArrowKeyCode:    UInt16  = 126
+
+enum PendingRequestLoadDisposition: Equatable {
+    case deferUntilAttached
+    case loadRequest
+    case loadFileURL
+    case skipAlreadyLoading
+
+    static func resolve(
+        requestURL: URL?,
+        hasWindow: Bool,
+        hasSuperview: Bool,
+        currentURL: URL?,
+        isLoading: Bool,
+        restartIfSameURL: Bool
+    ) -> PendingRequestLoadDisposition {
+        guard hasWindow, hasSuperview else {
+            return .deferUntilAttached
+        }
+        if restartIfSameURL, currentURL == requestURL, isLoading {
+            return .skipAlreadyLoading
+        }
+        if requestURL?.isFileURL == true {
+            return .loadFileURL
+        }
+        return .loadRequest
+    }
+}
 
 public class EnhancedWKWebView: WKWebView {
     public override init(frame: CGRect, configuration: WKWebViewConfiguration) {
@@ -4346,6 +4603,11 @@ extension WebView: NSViewRepresentable {
                       String(format: "elapsed=%.3fs", elapsed))
                 throw error
             }
+        }
+        context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
+            guard let webView else { return }
+            let resolvedWorld = world ?? .page
+            webView.evaluateJavaScript(js, in: frame, in: resolvedWorld, completionHandler: nil)
         }
         
         refreshDarkModeSetting(webView: webView)
