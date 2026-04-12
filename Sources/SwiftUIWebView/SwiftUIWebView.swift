@@ -39,6 +39,8 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
     }
 }
 
+private let readerLoadIssueGapWarningThreshold: TimeInterval = 0.750
+
 @inline(__always)
 private func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     guard let url,
@@ -1585,13 +1587,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
             let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
                 partialResult[entry.key] = String(describing: entry.value)
             }
+            let hasMeaningfulBodyContent = summary["hasMeaningfulBodyContent"] as? Bool ?? false
             if let hasReaderRenderReady = summary["hasReaderRenderReady"] as? Bool,
                self.webView.state.hasReaderRenderReady != hasReaderRenderReady {
                 var newState = self.webView.state
                 newState.hasReaderRenderReady = hasReaderRenderReady
                 self.webView.state = newState
             }
-            readerLoadLog("webView.documentSummary", mapped)
+            if !hasMeaningfulBodyContent || (summary["hasReaderRenderReady"] as? Bool ?? false) {
+                readerLoadLog("webView.documentSummary", mapped)
+            }
         }
     }
     
@@ -1765,6 +1770,24 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+        if let issuedAt = navigator.readerLoadIssuedAt {
+            let issueGap = provisionalNow.timeIntervalSince(issuedAt)
+            if issueGap >= readerLoadIssueGapWarningThreshold {
+                readerLoadLog(
+                    "webView.nav.issueGap",
+                    [
+                        "currentURL": webView.url?.absoluteString ?? "nil",
+                        "elapsedSinceIssued": String(format: "%.3fs", issueGap),
+                        "estimatedProgress": String(format: "%.3f", webView.estimatedProgress),
+                        "hasSuperview": "\(webView.superview != nil)",
+                        "hasWindow": "\(webView.window != nil)",
+                        "isLoading": "\(webView.isLoading)",
+                        "pendingRequestURL": navigator.pendingRequest?.url?.absoluteString ?? "nil",
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+        }
         if navigator.pendingRequest?.url == webView.url {
             if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
                 debugPrint(
@@ -1923,6 +1946,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
             "webViewNavigator.loadRequest",
             [
                 "attached": "\(webView != nil)",
+                "hasSuperview": "\(webView?.superview != nil)",
+                "hasWindow": "\(webView?.window != nil)",
                 "url": request.url?.absoluteString ?? "nil"
             ]
         )
@@ -1935,7 +1960,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadLog(
             "webViewNavigator.requestIssued",
             [
+                "currentURL": webView?.url?.absoluteString ?? "nil",
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: readerLoadRequestedAt, now: now),
+                "estimatedProgress": webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil",
+                "hasSuperview": "\(webView?.superview != nil)",
+                "hasWindow": "\(webView?.window != nil)",
+                "isLoading": "\(webView?.isLoading ?? false)",
                 "reason": reason,
                 "requestURL": readerLoadRequestedURL?.absoluteString ?? "nil",
                 "url": request.url?.absoluteString ?? "nil"
@@ -2347,18 +2377,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
         if let webView = webView {
             if webView.window == nil || webView.superview == nil {
                 pendingRequest = request
-                if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                    debugPrint(
-                        "# READER navigator.loadRequest.deferredUntilAttached",
-                        [
-                            "navigatorID": debugIdentifier ?? "nil",
-                            "navigatorObjectID": debugObjectID,
-                            "url": request.url?.absoluteString ?? "nil",
-                            "windowAttached": webView.window != nil,
-                            "superviewAttached": webView.superview != nil
-                        ] as [String : Any]
-                    )
-                }
+                readerLoadLog(
+                    "webViewNavigator.requestDeferredUntilAttached",
+                    [
+                        "url": request.url?.absoluteString ?? "nil",
+                        "hasSuperview": "\(webView.superview != nil)",
+                        "hasWindow": "\(webView.window != nil)"
+                    ]
+                )
                 return
             }
             if let url = request.url, url.isFileURL {
@@ -2389,6 +2415,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
             [
                 "baseURL": baseURL.absoluteString,
                 "bytes": "\(data.count)",
+                "hasSuperview": "\(webView?.superview != nil)",
+                "hasWindow": "\(webView?.window != nil)",
                 "mimeType": mimeType
             ]
         )
@@ -2439,7 +2467,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
             "webViewNavigator.htmlLoadIssued",
             [
                 "baseURL": baseURL?.absoluteString ?? "nil",
-                "bytes": "\(html.utf8.count)"
+                "bytes": "\(html.utf8.count)",
+                "hasSuperview": "\(webView?.superview != nil)",
+                "hasWindow": "\(webView?.window != nil)"
             ]
         )
         guard let webView else {
