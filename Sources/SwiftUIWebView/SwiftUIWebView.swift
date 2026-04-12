@@ -4549,12 +4549,13 @@ extension WebView: UIViewControllerRepresentable {
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
+        let topSafeAreaInset = controller.view.window?.safeAreaInsets.top ?? 0
         let bottomSafeAreaInset = controller.view.window?.safeAreaInsets.bottom ?? 0
-        
+
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
         //        print(obscuredInsets)
         controller.additionalSafeAreaInsets = UIEdgeInsets(
-            top: 0,
+            top: max(0, obscuredInsets.top - topSafeAreaInset),
             left: 0,
             bottom: max(0, obscuredInsets.bottom - bottomSafeAreaInset),
             right: 0
