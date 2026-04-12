@@ -460,6 +460,7 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var pageImageURL: URL?
     public internal(set) var pageIconURL: URL?
     public internal(set) var pageHTML: String?
+    public internal(set) var hasReaderRenderReady: Bool
     public internal(set) var error: Error?
     public internal(set) var canGoBack: Bool
     public internal(set) var canGoForward: Bool
@@ -476,6 +477,7 @@ public struct WebViewState: Equatable, Sendable {
         pageImageURL: nil,
         pageIconURL: nil,
         pageHTML: nil,
+        hasReaderRenderReady: false,
         error: nil,
         canGoBack: false,
         canGoForward: false,
@@ -492,6 +494,7 @@ public struct WebViewState: Equatable, Sendable {
         && lhs.pageImageURL == rhs.pageImageURL
         && lhs.pageIconURL == rhs.pageIconURL
         && lhs.pageHTML == rhs.pageHTML
+        && lhs.hasReaderRenderReady == rhs.hasReaderRenderReady
         && lhs.error?.localizedDescription == rhs.error?.localizedDescription
         && lhs.canGoBack == rhs.canGoBack
         && lhs.canGoForward == rhs.canGoForward
@@ -1378,6 +1381,14 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 return
             }
             textSelection.wrappedValue = text
+        } else if message.name == "readerDocState" {
+            guard let body = message.body as? [String: Any] else { return }
+            if let hasReaderRenderReady = body["hasReaderRenderReady"] as? Bool,
+               webView.state.hasReaderRenderReady != hasReaderRenderReady {
+                var newState = webView.state
+                newState.hasReaderRenderReady = hasReaderRenderReady
+                webView.state = newState
+            }
         }
         /* else if message.name == "swiftUIWebViewIsWarm" {
          if !webView.isWarm, let onWarm = webView.onWarm {
@@ -1563,6 +1574,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyChildElementCount: body?.childElementCount || 0,
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
+                    hasReaderRenderReady: html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1',
                     hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
                     titleLength: (document.title || "").length
                 };
@@ -1572,6 +1584,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             guard error == nil, let summary = response as? [String: Any] else { return }
             let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
                 partialResult[entry.key] = String(describing: entry.value)
+            }
+            if let hasReaderRenderReady = summary["hasReaderRenderReady"] as? Bool,
+               self.webView.state.hasReaderRenderReady != hasReaderRenderReady {
+                var newState = self.webView.state
+                newState.hasReaderRenderReady = hasReaderRenderReady
+                self.webView.state = newState
             }
             readerLoadLog("webView.documentSummary", mapped)
         }
@@ -1707,6 +1725,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         newState.pageIconURL = nil
         newState.pageTitle = nil
         newState.pageHTML = nil
+        newState.hasReaderRenderReady = false
         newState.error = nil
         onNavigationCommitted?(newState)
 #if os(iOS)
@@ -1825,6 +1844,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             newState.pageImageURL = nil
             newState.pageIconURL = nil
             newState.pageHTML = nil
+            newState.hasReaderRenderReady = false
             newState.error = nil
             self.webView.state = newState
         }
@@ -1887,6 +1907,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor fileprivate var readerLoadProvisionalStartedAt: Date?
     @MainActor fileprivate var readerLoadCommittedAt: Date?
     public var attachFallbackURL: URL?
+    public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
     public var shouldLoadFallbackOnAttach = true
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
 
@@ -1952,11 +1973,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask()
         let generation = attachFallbackLoadGeneration
         let fallbackURL = attachFallbackURL ?? URL(string: "about:blank")!
-        let delayNanoseconds: UInt64 = 250_000_000
+        let delayNanoseconds = attachFallbackDelayNanoseconds
         readerLoadLog(
             "webViewNavigator.attachFallbackScheduled",
             [
-                "delayMs": "250",
+                "delayMs": "\(delayNanoseconds / 1_000_000)",
                 "url": fallbackURL.absoluteString
             ]
         )
@@ -3064,13 +3085,67 @@ fileprivate struct ReaderDocStateUserScript {
     try {
         const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.readerDocState;
         if (!handler || typeof handler.postMessage !== "function") { return; }
-        handler.postMessage({
-            href: window.location.href,
-            readyState: document.readyState,
-            hasBody: !!document.body,
-            hasReaderContent: !!document.getElementById('reader-content'),
-            hasReadabilityGlobal: typeof window.manabi_readability === 'function'
+        let stateMachine = { stopped: false, attempts: 0 };
+        let rafHandle = { value: 0 };
+        let timeoutHandle = { value: 0 };
+        let observer = new MutationObserver(() => {
+            postState("mutation");
         });
+        function currentState(reason) {
+            return {
+                href: window.location.href,
+                readyState: document.readyState,
+                hasBody: !!document.body,
+                hasReaderContent: !!document.getElementById('reader-content'),
+                hasReadabilityGlobal: typeof window.manabi_readability === 'function',
+                hasReaderRenderReady:
+                    document.documentElement?.dataset?.manabiReaderRenderReady === '1'
+                    || document.body?.dataset?.manabiReaderRenderReady === '1',
+                reason
+            };
+        }
+        function stopPolling() {
+            if (stateMachine.stopped) { return; }
+            stateMachine.stopped = true;
+            try { observer.disconnect(); } catch (_error) {}
+            if (rafHandle.value) { cancelAnimationFrame(rafHandle.value); }
+            if (timeoutHandle.value) { clearTimeout(timeoutHandle.value); }
+        }
+        function postState(reason) {
+            const state = currentState(reason);
+            handler.postMessage(state);
+            if (state.hasReaderRenderReady) {
+                stopPolling();
+                return true;
+            }
+            return false;
+        }
+        let attempts = 0;
+        function scheduleNextTick() {
+            if (stateMachine.stopped || stateMachine.attempts >= 80) { return; }
+            stateMachine.attempts += 1;
+            rafHandle.value = requestAnimationFrame(() => {
+                timeoutHandle.value = setTimeout(() => {
+                    if (!postState("poll")) {
+                        scheduleNextTick();
+                    }
+                }, 25);
+            });
+        }
+        if (document.documentElement) {
+            observer.observe(document.documentElement, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ["data-manabi-reader-render-ready"]
+            });
+        }
+        document.addEventListener("readystatechange", () => { postState("readystatechange"); });
+        document.addEventListener("DOMContentLoaded", () => { postState("domcontentloaded"); });
+        window.addEventListener("load", () => { postState("load"); });
+        if (!postState("initial")) {
+            scheduleNextTick();
+        }
     } catch (e) { /* noop */ }
 })();
 """
