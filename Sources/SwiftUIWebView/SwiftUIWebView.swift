@@ -2016,6 +2016,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled else { return }
             guard self.attachFallbackLoadGeneration == generation else { return }
+            if let requestedURL = self.readerLoadRequestedURL,
+               requestedURL.absoluteString != fallbackURL.absoluteString,
+               self.readerLoadProvisionalStartedAt == nil,
+               (self.readerLoadIssuedAt != nil || webView.isLoading) {
+                readerLoadLog(
+                    "webViewNavigator.attachFallbackSuppressed",
+                    [
+                        "reason": "requestInFlight",
+                        "url": fallbackURL.absoluteString,
+                        "requestURL": requestedURL.absoluteString,
+                        "currentURL": webView.url?.absoluteString ?? "nil",
+                        "elapsedSinceIssued": readerLoadElapsedString(since: self.readerLoadIssuedAt),
+                        "isLoading": "\(webView.isLoading)"
+                    ]
+                )
+                self.attachFallbackLoadTask = nil
+                return
+            }
             guard self.pendingRequest == nil, self.pendingHTML == nil, self.pendingDataLoad == nil else {
                 readerLoadLog(
                     "webViewNavigator.attachFallbackSuppressed",
