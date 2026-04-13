@@ -17,6 +17,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", branch: "development"),
         .package(url: "https://github.com/apple/swift-collections.git", branch: "main"),
+        .package(url: "https://github.com/nicklockwood/LRUCache.git", from: "1.1.2"),
 //        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
     ],
     targets: [
@@ -25,6 +26,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ZIPFoundation", package: "ZipFoundation"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
+                .product(name: "LRUCache", package: "LRUCache"),
 //                .product(name: "BookmarkStorage", package: "bookmark-storage"),
             ],
             resources: [

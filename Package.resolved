@@ -1,6 +1,15 @@
 {
-  "originHash" : "03f69345b1089c723a4ca76f06af2928e4907e09b23a373560ec8a33feea426c",
+  "originHash" : "3cdc11326425d7b726992917f17911b7779444c3185289fdf42d8fb21c07526d",
   "pins" : [
+    {
+      "identity" : "lrucache",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/nicklockwood/LRUCache.git",
+      "state" : {
+        "revision" : "cb5b2bd0da83ad29c0bec762d39f41c8ad0eaf3e",
+        "version" : "1.2.1"
+      }
+    },
     {
       "identity" : "swift-collections",
       "kind" : "remoteSourceControl",
