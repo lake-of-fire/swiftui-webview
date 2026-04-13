@@ -815,6 +815,7 @@ public class WebViewCoordinator: NSObject {
     private var lastProgressUpdateTime: CFTimeInterval = 0
     private var lastEmittedProgress: Double?
     private var pendingProgressUpdateTask: Task<Void, Never>?
+    private var loadingProgressUpdateGeneration: Int = 0
     private var pendingPaginationApplyTask: Task<Void, Never>?
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
@@ -1162,6 +1163,16 @@ public class WebViewCoordinator: NSObject {
             guard let self else { return }
             guard let progress = change.newValue else { return }
             Task { @MainActor [weak self] in
+                readerLoadLog(
+                    "webView.loadingProgress.observeEstimatedProgress",
+                    [
+                        "currentURL": webView.url?.absoluteString ?? "nil",
+                        "estimatedProgress": String(format: "%.3f", progress),
+                        "isLoading": "\(webView.isLoading)",
+                        "pageURL": self?.webView.state.pageURL.absoluteString ?? "nil",
+                        "stateLoadingProgress": self?.webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil"
+                    ]
+                )
                 self?.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
             }
         }
@@ -1170,6 +1181,16 @@ public class WebViewCoordinator: NSObject {
             guard let self else { return }
             guard let isLoading = change.newValue else { return }
             Task { @MainActor [weak self] in
+                readerLoadLog(
+                    "webView.loadingProgress.observeIsLoading",
+                    [
+                        "currentURL": webView.url?.absoluteString ?? "nil",
+                        "estimatedProgress": String(format: "%.3f", webView.estimatedProgress),
+                        "isLoading": "\(isLoading)",
+                        "pageURL": self?.webView.state.pageURL.absoluteString ?? "nil",
+                        "stateLoadingProgress": self?.webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil"
+                    ]
+                )
                 self?.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
             }
         }
@@ -1219,6 +1240,7 @@ public class WebViewCoordinator: NSObject {
         forwardList: [WKBackForwardListItem]? = nil,
         error: Error? = nil
     ) -> WebViewState {
+        let previousState = webView.state
         var newState = webView.state
         newState.isLoading = isLoading
         var pageURLChanged = false
@@ -1248,6 +1270,20 @@ public class WebViewCoordinator: NSObject {
         }
         //        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
+        readerLoadLog(
+            "webView.loadingProgress.setLoading",
+            [
+                "currentURL": navigator.webView?.url?.absoluteString ?? "nil",
+                "estimatedProgress": String(format: "%.3f", navigator.webView?.estimatedProgress ?? latestEstimatedProgress),
+                "isLoading": "\(isLoading)",
+                "latestIsLoading": "\(latestIsLoading)",
+                "newPageURL": newState.pageURL.absoluteString,
+                "pageURLChanged": "\(pageURLChanged)",
+                "previousIsLoading": "\(previousState.isLoading)",
+                "previousLoadingProgress": previousState.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil",
+                "stateLoadingProgress": newState.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil"
+            ]
+        )
         
         if pageURLChanged {
             onURLChanged?(newState)
@@ -1260,6 +1296,10 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func updateLoadingProgress(isLoading: Bool?, estimatedProgress: Double?) {
+        loadingProgressUpdateGeneration &+= 1
+        let generation = loadingProgressUpdateGeneration
+        let previousLatestIsLoading = latestIsLoading
+        let previousLatestEstimatedProgress = latestEstimatedProgress
         if let isLoading {
             latestIsLoading = isLoading
         }
@@ -1283,15 +1323,31 @@ public class WebViewCoordinator: NSObject {
             shouldEmitImmediately = elapsed >= progressUpdateMinimumInterval
         }
 
+        readerLoadLog(
+            "webView.loadingProgress.update",
+            [
+                "currentURL": navigator.webView?.url?.absoluteString ?? "nil",
+                "estimatedProgressInput": estimatedProgress.map { String(format: "%.3f", $0) } ?? "nil",
+                "isLoadingInput": isLoading.map(String.init(describing:)) ?? "nil",
+                "latestEstimatedProgress": String(format: "%.3f", latestEstimatedProgress),
+                "latestEstimatedProgressPrevious": String(format: "%.3f", previousLatestEstimatedProgress),
+                "latestIsLoading": "\(latestIsLoading)",
+                "latestIsLoadingPrevious": "\(previousLatestIsLoading)",
+                "progressCandidate": progress.map { String(format: "%.3f", $0) } ?? "nil",
+                "shouldEmitImmediately": "\(shouldEmitImmediately)",
+                "stateLoadingProgress": webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil"
+            ]
+        )
+
         if shouldEmitImmediately {
             emitLoadingProgress(progress, now: now)
         } else {
-            scheduleLoadingProgressUpdate(progress, now: now)
+            scheduleLoadingProgressUpdate(progress, now: now, generation: generation)
         }
     }
 
     @MainActor
-    private func scheduleLoadingProgressUpdate(_ progress: Double?, now: CFTimeInterval) {
+    private func scheduleLoadingProgressUpdate(_ progress: Double?, now: CFTimeInterval, generation: Int) {
         pendingProgressUpdateTask?.cancel()
         let elapsed = now - lastProgressUpdateTime
         let delay = max(0, progressUpdateMinimumInterval - elapsed)
@@ -1299,10 +1355,36 @@ public class WebViewCoordinator: NSObject {
             emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
             return
         }
+        readerLoadLog(
+            "webView.loadingProgress.schedule",
+            [
+                "currentURL": navigator.webView?.url?.absoluteString ?? "nil",
+                "delay": String(format: "%.3f", delay),
+                "generation": "\(generation)",
+                "progress": progress.map { String(format: "%.3f", $0) } ?? "nil",
+                "stateLoadingProgress": webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil"
+            ]
+        )
 
         pendingProgressUpdateTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            self?.emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            guard let self else { return }
+            guard self.loadingProgressUpdateGeneration == generation else {
+                readerLoadLog(
+                    "webView.loadingProgress.scheduleDroppedStale",
+                    [
+                        "currentGeneration": "\(self.loadingProgressUpdateGeneration)",
+                        "currentURL": self.navigator.webView?.url?.absoluteString ?? "nil",
+                        "scheduledGeneration": "\(generation)",
+                        "scheduledProgress": progress.map { String(format: "%.3f", $0) } ?? "nil"
+                    ]
+                )
+                return
+            }
+            let currentProgress: Double? = self.latestIsLoading
+                ? max(0, min(self.latestEstimatedProgress, 1))
+                : nil
+            self.emitLoadingProgress(currentProgress, now: CFAbsoluteTimeGetCurrent())
         }
     }
 
@@ -1312,6 +1394,7 @@ public class WebViewCoordinator: NSObject {
         pendingProgressUpdateTask = nil
 
         guard webView.state.loadingProgress != progress else { return }
+        let previousProgress = webView.state.loadingProgress
 
         lastProgressUpdateTime = now
         lastEmittedProgress = progress
@@ -1319,6 +1402,72 @@ public class WebViewCoordinator: NSObject {
         var newState = webView.state
         newState.loadingProgress = progress
         webView.state = newState
+        readerLoadLog(
+            "webView.loadingProgress.emit",
+            [
+                "currentURL": navigator.webView?.url?.absoluteString ?? "nil",
+                "isLoading": "\(webView.state.isLoading)",
+                "nextProgress": progress.map { String(format: "%.3f", $0) } ?? "nil",
+                "previousProgress": previousProgress.map { String(format: "%.3f", $0) } ?? "nil"
+            ]
+        )
+    }
+
+    @MainActor
+    fileprivate func forceClearLoadingIndicators(reason: String, pageURL: URL?) {
+        let effectivePageURL = pageURL ?? navigator.webView?.url ?? webView.state.pageURL
+        let hadLoadingState = webView.state.isLoading || webView.state.loadingProgress != nil || latestIsLoading
+        readerLoadLog(
+            "webView.loadingProgress.forceClear.begin",
+            [
+                "currentURL": navigator.webView?.url?.absoluteString ?? "nil",
+                "effectivePageURL": effectivePageURL.absoluteString,
+                "estimatedProgress": String(format: "%.3f", navigator.webView?.estimatedProgress ?? latestEstimatedProgress),
+                "isLoading": "\(webView.state.isLoading)",
+                "latestIsLoading": "\(latestIsLoading)",
+                "loadingProgress": webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil",
+                "reason": reason
+            ]
+        )
+        guard hadLoadingState else {
+            readerLoadLog(
+                "webView.loadingProgress.forceClear.skipped",
+                [
+                    "effectivePageURL": effectivePageURL.absoluteString,
+                    "reason": reason
+                ]
+            )
+            return
+        }
+
+        pendingProgressUpdateTask?.cancel()
+        pendingProgressUpdateTask = nil
+        latestIsLoading = false
+        latestEstimatedProgress = 0
+        lastProgressUpdateTime = CFAbsoluteTimeGetCurrent()
+        lastEmittedProgress = nil
+
+        var newState = setLoading(
+            false,
+            pageURL: effectivePageURL,
+            isProvisionallyNavigating: false,
+            canGoBack: navigator.webView?.canGoBack,
+            canGoForward: navigator.webView?.canGoForward,
+            backList: navigator.webView?.backForwardList.backList,
+            forwardList: navigator.webView?.backForwardList.forwardList
+        )
+        newState.loadingProgress = nil
+        webView.state = newState
+
+        readerLoadLog(
+            "webView.loadingProgress.forceClear.end",
+            [
+                "effectivePageURL": effectivePageURL.absoluteString,
+                "isLoading": "\(webView.state.isLoading)",
+                "loadingProgress": webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil",
+                "reason": reason
+            ]
+        )
     }
 }
 
@@ -1933,6 +2082,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
     public var shouldLoadFallbackOnAttach = true
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
+    @MainActor fileprivate var forceClearLoadingIndicatorsHandler: ((String, URL?) -> Void)?
 
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
@@ -1971,6 +2121,20 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "url": request.url?.absoluteString ?? "nil"
             ]
         )
+    }
+
+    @MainActor
+    public func forceClearLoadingIndicators(reason: String, pageURL: URL? = nil) {
+        readerLoadLog(
+            "webViewNavigator.forceClearLoadingIndicators.requested",
+            [
+                "currentURL": webView?.url?.absoluteString ?? "nil",
+                "hasHandler": "\(forceClearLoadingIndicatorsHandler != nil)",
+                "pageURL": pageURL?.absoluteString ?? "nil",
+                "reason": reason
+            ]
+        )
+        forceClearLoadingIndicatorsHandler?(reason, pageURL)
     }
 
     @MainActor
@@ -4241,6 +4405,11 @@ public struct WebView {
         coordinator.webViewPool = resolvedWebViewPool
         coordinator.lifecycleConfig = lifecycleConfig
         coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator] reason, pageURL in
+            Task { @MainActor in
+                coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
+            }
+        }
         return coordinator
     }
 
