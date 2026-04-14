@@ -840,6 +840,7 @@ public class WebViewCoordinator: NSObject {
     weak var lastUserContentController: WKUserContentController?
     weak var lastUserScriptsContentController: WKUserContentController?
     var lastInstalledScriptsSignature: String?
+    var lastAppliedConfigurationState: WebViewConfigurationState?
     var compiledContentRules = [String: WKContentRuleList]()
     var lastAppliedContentRules: String?
     var shouldReapplyContentRulesAfterLoad = false
@@ -1086,6 +1087,7 @@ public class WebViewCoordinator: NSObject {
         removeMessageHandlers(for: webView)
         lastUserScriptsContentController = nil
         lastInstalledScriptsSignature = nil
+        lastAppliedConfigurationState = nil
         navigator.webView = nil
         clearScriptCallerBinding()
         invalidateWebViewObservations()
@@ -1482,6 +1484,17 @@ public class WebViewCoordinator: NSObject {
             ]
         )
     }
+}
+
+struct WebViewConfigurationState: Equatable {
+    var webViewID: ObjectIdentifier
+    var userScriptsDomainKey: String?
+    var userScriptsSignature: String
+    var visualSignature: String
+    var scrollBehaviorSignature: String
+    var contentRulesSignature: String?
+    var messageHandlersSignature: String
+    var paginationSignature: String
 }
 
 extension WebViewCoordinator: WKScriptMessageHandler {
@@ -4591,6 +4604,9 @@ extension WebView: UIViewControllerRepresentable {
         controller: WebViewController,
         context: Context
     ) {
+        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
+        let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
         readerLoadLog(
             "webView.configure",
             [
@@ -4601,7 +4617,6 @@ extension WebView: UIViewControllerRepresentable {
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
-        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
             context: context,
@@ -4635,7 +4650,15 @@ extension WebView: UIViewControllerRepresentable {
         updateUserScripts(
             userContentController: webView.configuration.userContentController,
             coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
+            forDomain: resolvedDomain,
+            config: config,
+            resolvedState: resolvedUserScriptsState
+        )
+        context.coordinator.lastAppliedConfigurationState = webViewConfigurationState(
+            webView: webView,
+            resolvedDomain: resolvedDomain,
+            resolvedUserScriptsState: resolvedUserScriptsState,
+            resolvedContentRules: resolvedContentRules,
             config: config
         )
         context.coordinator.scheduleWebViewBinding(webView, paginationReason: "configure-webview")
@@ -4710,30 +4733,46 @@ extension WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
-        readerLoadLog(
-            "webView.updateUIViewController",
-            [
-                "controllerID": readerLoadObjectIDString(controller),
-                "coordinatorID": readerLoadObjectIDString(context.coordinator),
-                "navigatorID": readerLoadObjectIDString(context.coordinator.navigator),
-                "processPoolID": readerLoadObjectIDString(controller.webView.configuration.processPool),
-                "webViewID": readerLoadObjectIDString(controller.webView)
-            ]
-        )
         updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
-        applyCommonConfiguration(
+        let resolvedDomain = resolvedUserScriptDomain(currentURL: controller.webView.url)
+        let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
+        let currentConfigurationState = webViewConfigurationState(
             webView: controller.webView,
-            context: context,
-            resolvedContentRules: resolvedContentRules
-        )
-        refreshDarkModeSetting(webView: controller.webView)
-        updateUserScripts(
-            userContentController: controller.webView.configuration.userContentController,
-            coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: controller.webView.url),
+            resolvedDomain: resolvedDomain,
+            resolvedUserScriptsState: resolvedUserScriptsState,
+            resolvedContentRules: resolvedContentRules,
             config: config
         )
+
+        if context.coordinator.lastAppliedConfigurationState != currentConfigurationState {
+            applyCommonConfiguration(
+                webView: controller.webView,
+                context: context,
+                resolvedContentRules: resolvedContentRules
+            )
+            refreshDarkModeSetting(webView: controller.webView)
+            updateUserScripts(
+                userContentController: controller.webView.configuration.userContentController,
+                coordinator: context.coordinator,
+                forDomain: resolvedDomain,
+                config: config,
+                resolvedState: resolvedUserScriptsState
+            )
+            controller.webView.scrollView.bounces = bounces
+            controller.webView.scrollView.alwaysBounceVertical = bounces
+            controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
+            applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
+            context.coordinator.lastAppliedConfigurationState = currentConfigurationState
+        } else {
+            readerLoadLog(
+                "webView.reconfigurationSkipped",
+                [
+                    "domain": resolvedDomain?.absoluteString ?? "nil",
+                    "webViewID": readerLoadObjectIDString(controller.webView)
+                ]
+            )
+        }
         
         //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
@@ -4741,10 +4780,6 @@ extension WebView: UIViewControllerRepresentable {
         
         
         controller.webView.buildMenu = buildMenu
-        controller.webView.scrollView.bounces = bounces
-        controller.webView.scrollView.alwaysBounceVertical = bounces
-        controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
-        applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
@@ -4955,31 +4990,43 @@ extension WebView: NSViewRepresentable {
     public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
         updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
-        applyCommonConfiguration(
+        let resolvedDomain = resolvedUserScriptDomain(currentURL: uiView.url)
+        let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
+        let currentConfigurationState = webViewConfigurationState(
             webView: uiView,
-            context: context,
-            resolvedContentRules: resolvedContentRules
-        )
-        updateUserScripts(
-            userContentController: uiView.configuration.userContentController,
-            coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: uiView.url),
+            resolvedDomain: resolvedDomain,
+            resolvedUserScriptsState: resolvedUserScriptsState,
+            resolvedContentRules: resolvedContentRules,
             config: config
         )
+
+        if context.coordinator.lastAppliedConfigurationState != currentConfigurationState {
+            applyCommonConfiguration(
+                webView: uiView,
+                context: context,
+                resolvedContentRules: resolvedContentRules
+            )
+            updateUserScripts(
+                userContentController: uiView.configuration.userContentController,
+                coordinator: context.coordinator,
+                forDomain: resolvedDomain,
+                config: config,
+                resolvedState: resolvedUserScriptsState
+            )
+            refreshDarkModeSetting(webView: uiView)
+            let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+            uiView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+            if #available(macOS 11.0, *) {
+                uiView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
+            } else {
+                uiView.layer?.backgroundColor = NSColor.clear.cgColor
+            }
+            context.coordinator.lastAppliedConfigurationState = currentConfigurationState
+        }
         
         // Can't disable on macOS.
         //        uiView.scrollView.bounces = bounces
         //        uiView.scrollView.alwaysBounceVertical = bounces
-        
-        refreshDarkModeSetting(webView: uiView)
-        
-        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-        uiView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
-        if #available(macOS 11.0, *) {
-            uiView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
-        } else {
-            uiView.layer?.backgroundColor = NSColor.clear.cgColor
-        }
         
     }
     
@@ -4996,6 +5043,128 @@ extension WebView {
     private var resolvedWebViewPool: WebViewPool? {
         webViewPrewarmer?.pool ?? webViewPool
     }
+
+    @MainActor
+    private func resolvedUserScriptsState(
+        forDomain domain: URL?,
+        config: WebViewConfig
+    ) -> (scripts: [WebViewUserScript], signature: String) {
+        var scripts = config.userScripts
+        if let domain = domain?.domainURL.host {
+            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
+        } else {
+            scripts = scripts.filter { $0.allowedDomains.isEmpty }
+        }
+        let allScripts = Self.systemScripts + scripts
+        let signature = allScripts
+            .map { script in
+                [
+                    "\(script.source.hashValue)",
+                    "\(script.injectionTime.rawValue)",
+                    "\(script.isForMainFrameOnly)",
+                    "\(script.world.map { String(describing: $0) } ?? "nil")"
+                ].joined(separator: "|")
+            }
+            .joined(separator: "||")
+        return (allScripts, signature)
+    }
+
+    @MainActor
+    private func webViewConfigurationState(
+        webView: WKWebView,
+        resolvedDomain: URL?,
+        resolvedUserScriptsState: (scripts: [WebViewUserScript], signature: String),
+        resolvedContentRules: String?,
+        config: WebViewConfig
+    ) -> WebViewConfigurationState {
+        WebViewConfigurationState(
+            webViewID: ObjectIdentifier(webView),
+            userScriptsDomainKey: resolvedDomain?.domainURL.host,
+            userScriptsSignature: resolvedUserScriptsState.signature,
+            visualSignature: visualConfigurationSignature(config: config),
+            scrollBehaviorSignature: scrollBehaviorSignature(),
+            contentRulesSignature: resolvedContentRules?.trimmingCharacters(in: .whitespacesAndNewlines),
+            messageHandlersSignature: messageHandlersSignature(webViewMessageHandlers),
+            paginationSignature: paginationConfigurationSignature(config.paginationConfiguration)
+        )
+    }
+
+    @MainActor
+    private func messageHandlersSignature(_ handlers: WebViewMessageHandlers) -> String {
+        handlers.handlers.keys.joined(separator: "|")
+    }
+
+    @MainActor
+    private func paginationConfigurationSignature(_ paginationConfiguration: WebViewPaginationConfiguration) -> String {
+        [
+            "\(paginationConfiguration.mode.rawValue)",
+            "\(paginationConfiguration.storedPageLength)",
+            "\(paginationConfiguration.effectivePageLength)",
+            "\(paginationConfiguration.gapBetweenPages)",
+            "\(paginationConfiguration.behavesLikeColumns)",
+            "\(paginationConfiguration.layoutSize.width)",
+            "\(paginationConfiguration.layoutSize.height)"
+        ].joined(separator: "|")
+    }
+
+    @MainActor
+    private func visualConfigurationSignature(config: WebViewConfig) -> String {
+        [
+            "\(config.javaScriptEnabled)",
+            "\(config.allowsBackForwardNavigationGestures)",
+            "\(config.allowsInlineMediaPlayback)",
+            "\(config.mediaTypesRequiringUserActionForPlayback.rawValue)",
+            "\(config.dataDetectorsEnabled)",
+            "\(config.isScrollEnabled)",
+            String(format: "%.4f", Double(config.pageZoom)),
+            "\(config.isOpaque)",
+            backgroundColorSignature(config.backgroundColor),
+            config.darkModeSetting.rawValue
+        ].joined(separator: "|")
+    }
+
+    @MainActor
+    private func scrollBehaviorSignature() -> String {
+        [
+            "\(bounces)",
+            "\(drawsBackground)"
+        ].joined(separator: "|")
+    }
+
+#if os(iOS)
+    @MainActor
+    private func backgroundColorSignature(_ color: Color) -> String {
+        let resolved = UIColor(color)
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var alpha: CGFloat = 0
+        if resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            return [
+                String(format: "%.4f", red),
+                String(format: "%.4f", green),
+                String(format: "%.4f", blue),
+                String(format: "%.4f", alpha)
+            ].joined(separator: "|")
+        }
+        if let components = resolved.cgColor.components {
+            return components.map { String(format: "%.4f", $0) }.joined(separator: "|")
+        }
+        return String(describing: resolved)
+    }
+#elseif os(macOS)
+    @MainActor
+    private func backgroundColorSignature(_ color: Color) -> String {
+        let resolved = NSColor(color)
+        let rgb = resolved.usingColorSpace(.deviceRGB) ?? resolved
+        return [
+            String(format: "%.4f", rgb.redComponent),
+            String(format: "%.4f", rgb.greenComponent),
+            String(format: "%.4f", rgb.blueComponent),
+            String(format: "%.4f", rgb.alphaComponent)
+        ].joined(separator: "|")
+    }
+#endif
 
     var userAgent: String {
         //        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"
@@ -5192,20 +5361,32 @@ extension WebView {
     }
     
     @MainActor
-    func updateUserScripts(userContentController: WKUserContentController, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebViewConfig) {
+    func updateUserScripts(
+        userContentController: WKUserContentController,
+        coordinator: WebViewCoordinator,
+        forDomain domain: URL?,
+        config: WebViewConfig,
+        resolvedState: (scripts: [WebViewUserScript], signature: String)? = nil
+    ) {
+        let resolvedState = resolvedState ?? resolvedUserScriptsState(forDomain: domain, config: config)
+        updateUserScripts(
+            userContentController: userContentController,
+            coordinator: coordinator,
+            forDomain: domain,
+            resolvedState: resolvedState
+        )
+    }
+
+    @MainActor
+    func updateUserScripts(
+        userContentController: WKUserContentController,
+        coordinator: WebViewCoordinator,
+        forDomain domain: URL?,
+        resolvedState: (scripts: [WebViewUserScript], signature: String)
+    ) {
         let startedAt = Date()
-        var scripts = config.userScripts
-        if let domain = domain?.domainURL.host {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
-        } else {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty }
-        }
-        let allScripts = Self.systemScripts + scripts
-        let installedScriptsSignature = allScripts
-            .map { script in
-                "\(script.source.hashValue)|\(script.injectionTime.rawValue)|\(script.isForMainFrameOnly)"
-            }
-            .joined(separator: "||")
+        let allScripts = resolvedState.scripts
+        let installedScriptsSignature = resolvedState.signature
 
         if coordinator.lastUserScriptsContentController === userContentController,
            coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
