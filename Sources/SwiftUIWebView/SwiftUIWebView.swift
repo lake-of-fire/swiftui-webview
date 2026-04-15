@@ -376,10 +376,17 @@ fileprivate func webViewPaginationPageOffsetRange(
 }
 
 fileprivate func webViewPaginationCurrentContentLocation(
+    spread: WebViewPaginationSpread?,
     visiblePageIndices: [Int]?
 ) -> WebViewPaginationCurrentContentLocation? {
     guard let visiblePageIndices, !visiblePageIndices.isEmpty else { return nil }
-    return visiblePageIndices.count > 1 ? .center : .leading
+    if visiblePageIndices.count > 1 {
+        return .center
+    }
+    if spread?.slots.first?.kind == .blank {
+        return .trailing
+    }
+    return .leading
 }
 
 fileprivate func webViewPaginationVisibleUnit(
@@ -397,6 +404,13 @@ fileprivate func webViewPaginationVisibleUnit(
     let hasTrailingSingleton = currentSpread.slots.last?.kind == .blank
     let visiblePageCount = pageIndices.count
     let kind: WebViewPaginationVisibleUnitKind = visiblePageCount > 1 ? .pageSpread : .singlePage
+    let spreadPagesAllowedForViewport = spreadSequence.spreads.contains { spread in
+        let visiblePageIndices = spread.pageIndices
+        if visiblePageIndices.count > 1 {
+            return true
+        }
+        return visiblePageIndices.count == 1 && spread.slots.contains(where: { $0.kind == .blank })
+    }
     return WebViewPaginationVisibleUnit(
         kind: kind,
         axis: .horizontal,
@@ -408,7 +422,7 @@ fileprivate func webViewPaginationVisibleUnit(
         trailingPageIndex: pageIndices.last,
         hasLeadingSingleton: hasLeadingSingleton,
         hasTrailingSingleton: hasTrailingSingleton,
-        spreadPagesAllowedForViewport: spreadSequence.spreads.count > 1
+        spreadPagesAllowedForViewport: spreadPagesAllowedForViewport
     )
 }
 
@@ -522,6 +536,7 @@ public enum WebViewPaginationPreloadStrategy: String, Codable, Equatable, Sendab
 public enum WebViewPaginationCurrentContentLocation: String, Codable, Equatable, Sendable {
     case center
     case leading
+    case trailing
 }
 
 public enum WebViewPaginationRequestedLocationKind: String, Codable, Equatable, Sendable {
@@ -1213,6 +1228,7 @@ public final class WebViewPaginationController {
             visiblePageIndices: runtimeVisiblePageIndices
         )
         let runtimeCurrentContentLocation = webViewPaginationCurrentContentLocation(
+            spread: runtimeCurrentSpread,
             visiblePageIndices: runtimeVisiblePageIndices
         )
         let runtimeForwardDestinationAvailability = webViewPaginationDestinationAvailability(
@@ -2425,6 +2441,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
+        let isInternalReaderLoaderNavigation = isMainDocumentNavigation
+            && canonicalContentURLForReaderLoader(navigationAction.request.url) != nil
         if isMainDocumentNavigation,
            let requestedURL = navigationAction.request.url,
            let loaderRequestedURL = navigator.readerLoadRequestedURL,
@@ -2465,16 +2483,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
 
             scriptCaller?.removeAllMultiTargetFrames()
-            var newState = self.webView.state
-            newState.pageURL = effectiveMainDocumentURL ?? newState.pageURL
-            newState.pageTitle = nil
-            newState.isProvisionallyNavigating = false
-            newState.pageImageURL = nil
-            newState.pageIconURL = nil
-            newState.pageHTML = nil
-            newState.hasReaderRenderReady = false
-            newState.error = nil
-            self.webView.state = newState
+            if !isInternalReaderLoaderNavigation {
+                var newState = self.webView.state
+                newState.pageURL = effectiveMainDocumentURL ?? newState.pageURL
+                newState.pageTitle = nil
+                newState.isProvisionallyNavigating = false
+                newState.pageImageURL = nil
+                newState.pageIconURL = nil
+                newState.pageHTML = nil
+                newState.hasReaderRenderReady = false
+                newState.error = nil
+                self.webView.state = newState
+            }
         }
         
         // Only apply content rules for main frame navigations.
@@ -2538,6 +2558,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
     public var shouldLoadFallbackOnAttach = true
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
+
+    @MainActor
+    public var isReadyForDirectLoad: Bool {
+        guard let webView else { return false }
+        return webView.window != nil && webView.superview != nil
+    }
 
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
