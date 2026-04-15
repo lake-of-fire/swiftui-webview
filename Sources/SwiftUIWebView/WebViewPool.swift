@@ -93,6 +93,13 @@ public final class WebViewPool: ObservableObject {
         log(event: "prepare.end")
     }
 
+#if os(iOS)
+    public func attachWarmShelfIfNeeded(to window: UIWindow?) {
+        WarmWebViewShelf.shared.attach(to: window)
+        prepareIfPossible()
+    }
+#endif
+
     public func dequeue(createIfNeeded: @escaping () -> EnhancedWKWebView) -> EnhancedWKWebView {
         if creationClosure == nil {
             creationClosure = createIfNeeded

@@ -1613,6 +1613,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# READER webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+        navigator.cancelReaderLoadHeartbeat(reason: "didFinishNavigation")
         let finishNow = Date()
         readerLoadLog(
             "webView.nav.finish",
@@ -1767,6 +1768,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
         }
@@ -1812,6 +1814,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
         }
@@ -1884,6 +1887,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "isLoading=\(webView.isLoading)")
         let provisionalNow = Date()
         navigator.readerLoadProvisionalStartedAt = provisionalNow
+        navigator.cancelReaderLoadHeartbeat(reason: "didStartProvisionalNavigation")
         readerLoadLog(
             "webView.nav.provisionalStart",
             [
@@ -2162,6 +2166,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
+    @MainActor private var readerLoadHeartbeatGeneration: Int = 0
+    @MainActor private var readerLoadHeartbeatTask: Task<Void, Never>?
     @MainActor fileprivate var readerLoadRequestedAt: Date?
     @MainActor fileprivate var readerLoadRequestedURL: URL?
     @MainActor fileprivate var readerLoadIssuedAt: Date?
@@ -2221,6 +2227,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
         let now = Date()
+        cancelReaderLoadHeartbeat()
         readerLoadRequestedAt = now
         readerLoadRequestedURL = request.url
         readerLoadIssuedAt = nil
@@ -2250,6 +2257,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "hasSuperview": "\(webView?.superview != nil)",
                 "hasWindow": "\(webView?.window != nil)",
                 "isLoading": "\(webView?.isLoading ?? false)",
+                "prewarmCompleted": "false",
+                "prewarmElapsed": "nil",
+                "prewarmState": "idle",
+                "prewarmWebViewID": "nil",
                 "processPoolID": readerLoadObjectIDString(webView?.configuration.processPool),
                 "reason": reason,
                 "requestURL": readerLoadRequestedURL?.absoluteString ?? "nil",
@@ -2257,6 +2268,68 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "url": request.url?.absoluteString ?? "nil"
             ]
         )
+        startReaderLoadHeartbeatIfNeeded()
+    }
+
+    @MainActor
+    fileprivate func cancelReaderLoadHeartbeat(reason: String? = nil) {
+        readerLoadHeartbeatGeneration &+= 1
+        readerLoadHeartbeatTask?.cancel()
+        readerLoadHeartbeatTask = nil
+        guard let reason else { return }
+        readerLoadLog(
+            "webViewNavigator.requestHeartbeatCanceled",
+            [
+                "currentURL": webView?.url?.absoluteString ?? "nil",
+                "elapsedSinceIssued": readerLoadElapsedString(since: readerLoadIssuedAt),
+                "reason": reason,
+                "requestURL": readerLoadRequestedURL?.absoluteString ?? "nil"
+            ]
+        )
+    }
+
+    @MainActor
+    private func startReaderLoadHeartbeatIfNeeded() {
+        guard isInternalReaderLoaderURL(readerLoadRequestedURL),
+              readerLoadIssuedAt != nil,
+              readerLoadProvisionalStartedAt == nil else {
+            cancelReaderLoadHeartbeat()
+            return
+        }
+        readerLoadHeartbeatGeneration &+= 1
+        let generation = readerLoadHeartbeatGeneration
+        readerLoadHeartbeatTask?.cancel()
+        readerLoadHeartbeatTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let strongSelf = self,
+                      strongSelf.readerLoadHeartbeatGeneration == generation,
+                      strongSelf.readerLoadIssuedAt != nil,
+                      strongSelf.readerLoadProvisionalStartedAt == nil else {
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled,
+                      strongSelf.readerLoadHeartbeatGeneration == generation,
+                      strongSelf.readerLoadIssuedAt != nil,
+                      strongSelf.readerLoadProvisionalStartedAt == nil else {
+                    return
+                }
+                let webView = strongSelf.webView
+                readerLoadLog(
+                    "webViewNavigator.requestHeartbeat",
+                    [
+                        "currentURL": webView?.url?.absoluteString ?? "nil",
+                        "elapsedSinceIssued": readerLoadElapsedString(since: strongSelf.readerLoadIssuedAt),
+                        "estimatedProgress": webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil",
+                        "hasSuperview": "\(webView?.superview != nil)",
+                        "hasWindow": "\(webView?.window != nil)",
+                        "isLoading": "\(webView?.isLoading ?? false)",
+                        "requestURL": strongSelf.readerLoadRequestedURL?.absoluteString ?? "nil",
+                        "sceneState": readerLoadSceneStateString(for: webView)
+                    ]
+                )
+            }
+        }
     }
 
     @MainActor
@@ -2850,6 +2923,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedRequest = nil
         lastLoadedHTML = nil
         cancelAttachFallbackLoadTask(reason: "explicitDataLoad")
+        cancelReaderLoadHeartbeat(reason: "explicitDataLoad")
         readerLoadRequestedAt = Date()
         readerLoadRequestedURL = baseURL
         readerLoadIssuedAt = readerLoadRequestedAt
@@ -2903,6 +2977,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedRequest = nil
         lastLoadedDataLoad = nil
         cancelAttachFallbackLoadTask(reason: "explicitHTMLLoad")
+        cancelReaderLoadHeartbeat(reason: "explicitHTMLLoad")
         readerLoadRequestedAt = Date()
         readerLoadRequestedURL = baseURL
         readerLoadIssuedAt = readerLoadRequestedAt
@@ -4014,6 +4089,9 @@ enum PendingRequestLoadDisposition: Equatable {
 }
 
 public class EnhancedWKWebView: WKWebView {
+    var persistedUserScriptsSignature: String?
+    var persistedAppliedContentRules: String?
+
     public override init(frame: CGRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame, configuration: configuration)
     }
@@ -4833,6 +4911,23 @@ extension WebView: UIViewControllerRepresentable {
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
+        if context.coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
+            context.coordinator.lastUserScriptsContentController = webView.configuration.userContentController
+            context.coordinator.lastInstalledScriptsSignature = webView.persistedUserScriptsSignature
+        }
+        if context.coordinator.lastAppliedContentRules != webView.persistedAppliedContentRules {
+            context.coordinator.lastAppliedContentRules = webView.persistedAppliedContentRules
+        }
+        if webView.persistedUserScriptsSignature != nil || webView.persistedAppliedContentRules != nil {
+            readerLoadLog(
+                "webView.configure.restorePersistedState",
+                [
+                    "contentRules": webView.persistedAppliedContentRules ?? "nil",
+                    "userScriptsSignaturePresent": "\(webView.persistedUserScriptsSignature != nil)",
+                    "webViewID": readerLoadObjectIDString(webView)
+                ]
+            )
+        }
         applyCommonConfiguration(
             webView: webView,
             context: context,
@@ -4949,6 +5044,9 @@ extension WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
+        if let resolvedWebViewPool {
+            resolvedWebViewPool.attachWarmShelfIfNeeded(to: controller.view.window)
+        }
         let requestedBeforeProvisional = context.coordinator.navigator.readerLoadRequestedAt != nil
             && context.coordinator.navigator.readerLoadProvisionalStartedAt == nil
         if context.coordinator.navigator.readerLoadRequestedAt != nil,
@@ -5467,6 +5565,8 @@ extension WebView {
                 coordinator: context.coordinator,
                 overrideRules: resolvedContentRules
             )
+        } else if let enhancedWebView = webView as? EnhancedWKWebView {
+            enhancedWebView.persistedAppliedContentRules = resolvedContentRules
         }
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -5557,6 +5657,7 @@ extension WebView {
         userContentController.removeAllContentRuleLists()
         guard let contentRules = rules, !contentRules.isEmpty else {
             coordinator.lastAppliedContentRules = nil
+            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = nil
             readerLoadLog(
                 "webView.contentRules.refreshCleared",
                 [
@@ -5568,6 +5669,7 @@ extension WebView {
         if let ruleList = coordinator.compiledContentRules[contentRules] {
             userContentController.add(ruleList)
             coordinator.lastAppliedContentRules = contentRules
+            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = contentRules
             readerLoadLog(
                 "webView.contentRules.refreshAppliedCached",
                 [
@@ -5596,6 +5698,7 @@ extension WebView {
             userContentController.add(ruleList)
             coordinator.compiledContentRules[contentRules] = ruleList
             coordinator.lastAppliedContentRules = contentRules
+            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = contentRules
             readerLoadLog(
                 "webView.contentRules.refreshCompiled",
                 [
@@ -5673,6 +5776,7 @@ extension WebView {
 
         if coordinator.lastUserScriptsContentController === userContentController,
            coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
+            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
             return
         }
 
@@ -5680,6 +5784,7 @@ extension WebView {
             userContentController.removeAllUserScripts()
             coordinator.lastUserScriptsContentController = userContentController
             coordinator.lastInstalledScriptsSignature = nil
+            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = nil
             readerLoadLog(
                 "webView.userScripts.refreshCleared",
                 [
@@ -5721,6 +5826,7 @@ extension WebView {
             debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
             coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         }
+        (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
         if coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
             readerLoadLog(
                 "webView.userScripts.refreshComplete",
