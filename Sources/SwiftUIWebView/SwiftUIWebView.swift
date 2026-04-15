@@ -4764,14 +4764,6 @@ extension WebView: UIViewControllerRepresentable {
             controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
             applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
             context.coordinator.lastAppliedConfigurationState = currentConfigurationState
-        } else {
-            readerLoadLog(
-                "webView.reconfigurationSkipped",
-                [
-                    "domain": resolvedDomain?.absoluteString ?? "nil",
-                    "webViewID": readerLoadObjectIDString(controller.webView)
-                ]
-            )
         }
         
         //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
