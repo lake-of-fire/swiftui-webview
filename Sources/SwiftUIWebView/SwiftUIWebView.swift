@@ -241,11 +241,183 @@ public enum WebViewPaginationVisibleUnitAxis: String, Codable, Equatable, Sendab
     case vertical
 }
 
+public enum WebViewPaginationSpreadSlotKind: String, Codable, Equatable, Sendable {
+    case blank
+    case page
+}
+
+public struct WebViewPaginationSpreadSlot: Codable, Equatable, Sendable {
+    public let kind: WebViewPaginationSpreadSlotKind
+    public let pageIndex: Int?
+
+    public init(kind: WebViewPaginationSpreadSlotKind, pageIndex: Int? = nil) {
+        self.kind = kind
+        self.pageIndex = pageIndex
+    }
+}
+
+public struct WebViewPaginationSpread: Codable, Equatable, Sendable {
+    public let index: Int?
+    public let slots: [WebViewPaginationSpreadSlot]
+
+    public init(index: Int?, slots: [WebViewPaginationSpreadSlot]) {
+        self.index = index
+        self.slots = slots
+    }
+
+    public var pageIndices: [Int] {
+        slots.compactMap(\.pageIndex)
+    }
+
+    public var dictionaryRepresentation: [String: String] {
+        [
+            "spreadIndex": index.map(String.init) ?? "nil",
+            "spreadSlots": slots
+                .map { slot in
+                    "\(slot.kind.rawValue):\(slot.pageIndex.map(String.init) ?? "nil")"
+                }
+                .joined(separator: ",")
+        ]
+    }
+}
+
+public struct WebViewPaginationSpreadSequence: Codable, Equatable, Sendable {
+    public let spreads: [WebViewPaginationSpread]
+    public let currentIndex: Int?
+
+    public init(spreads: [WebViewPaginationSpread], currentIndex: Int?) {
+        self.spreads = spreads
+        self.currentIndex = currentIndex
+    }
+
+    public var currentSpread: WebViewPaginationSpread? {
+        guard let currentIndex, spreads.indices.contains(currentIndex) else { return nil }
+        return spreads[currentIndex]
+    }
+
+    public var dictionaryRepresentation: [String: String] {
+        [
+            "spreadSequenceCount": String(spreads.count),
+            "spreadSequenceCurrentIndex": currentIndex.map(String.init) ?? "nil",
+        ]
+    }
+}
+
+fileprivate func webViewPaginationSpreadSlot(from value: Any?) -> WebViewPaginationSpreadSlot? {
+    guard let dictionary = value as? [String: Any] else { return nil }
+    if let blank = dictionary["blank"] as? Bool, blank {
+        return WebViewPaginationSpreadSlot(kind: .blank)
+    }
+    guard let pageIndex = dictionary["pageIndex"] as? Int else { return nil }
+    return WebViewPaginationSpreadSlot(kind: .page, pageIndex: pageIndex)
+}
+
+fileprivate func webViewPaginationSpread(from value: Any?) -> WebViewPaginationSpread? {
+    guard let dictionary = value as? [String: Any] else { return nil }
+    let leadingSlot = webViewPaginationSpreadSlot(from: dictionary["leadingSlot"])
+    let trailingSlot = webViewPaginationSpreadSlot(from: dictionary["trailingSlot"])
+    let slots: [WebViewPaginationSpreadSlot] = [leadingSlot, trailingSlot].compactMap { $0 }
+    guard !slots.isEmpty else { return nil }
+    return WebViewPaginationSpread(index: dictionary["index"] as? Int, slots: slots)
+}
+
+fileprivate func webViewPaginationSpreadSequence(from value: Any?) -> WebViewPaginationSpreadSequence? {
+    guard let dictionary = value as? [String: Any] else { return nil }
+    guard let spreadValues = dictionary["spreads"] as? [Any] else { return nil }
+    let spreads = spreadValues.compactMap(webViewPaginationSpread(from:))
+    guard !spreads.isEmpty else { return nil }
+    return WebViewPaginationSpreadSequence(
+        spreads: spreads,
+        currentIndex: dictionary["currentIndex"] as? Int
+    )
+}
+
+fileprivate func webViewPaginationDestinationAvailability(
+    spread: WebViewPaginationSpread?,
+    pageCount: Int?
+) -> String? {
+    guard let spread else { return nil }
+    if spread.slots.count >= 2 {
+        let leadingBlank = spread.slots.first?.kind == .blank
+        let trailingBlank = spread.slots.last?.kind == .blank
+        switch (leadingBlank, trailingBlank) {
+        case (true, false):
+            return "first"
+        case (false, true):
+            return "second"
+        default:
+            break
+        }
+    }
+
+    let pageIndices = spread.pageIndices
+    if pageIndices.count > 1 {
+        return "both"
+    }
+    guard let pageIndex = pageIndices.first else { return "unavailable" }
+    if pageIndex == 0 {
+        return "first"
+    }
+    if let pageCount, pageIndex == max(0, pageCount - 1) {
+        return "second"
+    }
+    return "both"
+}
+
+fileprivate func webViewPaginationPageOffsetRange(
+    visiblePageIndices: [Int]?
+) -> WebViewPaginationPageOffsetRange? {
+    guard let visiblePageIndices,
+          let lowerBound = visiblePageIndices.min(),
+          let upperBound = visiblePageIndices.max() else {
+        return nil
+    }
+    return WebViewPaginationPageOffsetRange(lowerBound: lowerBound, upperBound: upperBound)
+}
+
+fileprivate func webViewPaginationCurrentContentLocation(
+    visiblePageIndices: [Int]?
+) -> WebViewPaginationCurrentContentLocation? {
+    guard let visiblePageIndices, !visiblePageIndices.isEmpty else { return nil }
+    return visiblePageIndices.count > 1 ? .center : .leading
+}
+
+fileprivate func webViewPaginationVisibleUnit(
+    spreadSequence: WebViewPaginationSpreadSequence?
+) -> WebViewPaginationVisibleUnit? {
+    guard let spreadSequence,
+          let currentIndex = spreadSequence.currentIndex,
+          spreadSequence.spreads.indices.contains(currentIndex) else {
+        return nil
+    }
+    let currentSpread = spreadSequence.spreads[currentIndex]
+    let pageIndices = currentSpread.pageIndices
+    guard !pageIndices.isEmpty else { return nil }
+    let hasLeadingSingleton = currentSpread.slots.first?.kind == .blank
+    let hasTrailingSingleton = currentSpread.slots.last?.kind == .blank
+    let visiblePageCount = pageIndices.count
+    let kind: WebViewPaginationVisibleUnitKind = visiblePageCount > 1 ? .pageSpread : .singlePage
+    return WebViewPaginationVisibleUnit(
+        kind: kind,
+        axis: .horizontal,
+        visiblePageCount: visiblePageCount,
+        primarySpacing: 0,
+        chromeGutterWidth: 0,
+        currentUnitIndex: currentIndex,
+        leadingPageIndex: pageIndices.first,
+        trailingPageIndex: pageIndices.last,
+        hasLeadingSingleton: hasLeadingSingleton,
+        hasTrailingSingleton: hasTrailingSingleton,
+        spreadPagesAllowedForViewport: spreadSequence.spreads.count > 1
+    )
+}
+
 public struct WebViewPaginationVisibleUnit: Codable, Equatable, Sendable {
     public let kind: WebViewPaginationVisibleUnitKind
     public let axis: WebViewPaginationVisibleUnitAxis
     public let visiblePageCount: Int
     public let primarySpacing: CGFloat
+    public let chromeGutterWidth: CGFloat
     public let currentUnitIndex: Int?
     public let leadingPageIndex: Int?
     public let trailingPageIndex: Int?
@@ -258,6 +430,7 @@ public struct WebViewPaginationVisibleUnit: Codable, Equatable, Sendable {
         axis: WebViewPaginationVisibleUnitAxis,
         visiblePageCount: Int,
         primarySpacing: CGFloat = 0,
+        chromeGutterWidth: CGFloat? = nil,
         currentUnitIndex: Int?,
         leadingPageIndex: Int?,
         trailingPageIndex: Int?,
@@ -269,6 +442,7 @@ public struct WebViewPaginationVisibleUnit: Codable, Equatable, Sendable {
         self.axis = axis
         self.visiblePageCount = visiblePageCount
         self.primarySpacing = primarySpacing
+        self.chromeGutterWidth = chromeGutterWidth ?? primarySpacing
         self.currentUnitIndex = currentUnitIndex
         self.leadingPageIndex = leadingPageIndex
         self.trailingPageIndex = trailingPageIndex
@@ -282,6 +456,7 @@ public struct WebViewPaginationVisibleUnit: Codable, Equatable, Sendable {
         axis: .horizontal,
         visiblePageCount: 1,
         primarySpacing: 0,
+        chromeGutterWidth: 0,
         currentUnitIndex: nil,
         leadingPageIndex: nil,
         trailingPageIndex: nil,
@@ -296,6 +471,7 @@ public struct WebViewPaginationVisibleUnit: Codable, Equatable, Sendable {
             "visibleUnitAxis": axis.rawValue,
             "visiblePageCount": "\(visiblePageCount)",
             "primarySpacing": "\(primarySpacing)",
+            "chromeGutterWidth": "\(chromeGutterWidth)",
             "currentUnitIndex": currentUnitIndex.map(String.init) ?? "nil",
             "leadingPageIndex": leadingPageIndex.map(String.init) ?? "nil",
             "trailingPageIndex": trailingPageIndex.map(String.init) ?? "nil",
@@ -311,27 +487,120 @@ public enum WebViewPaginationPageLabelDisplayMode: String, Codable, Equatable, S
     case multipleLabels
 }
 
+public enum WebViewPageNavigationStyle: String, Codable, Equatable, Sendable {
+    case paged
+    case verticalScroll
+    case horizontalScroll
+}
+
+public enum WebViewPaginationPageNumberMode: String, Codable, Equatable, Sendable {
+    case digitalBook
+    case printEdition
+}
+
+public enum WebViewPaginationPublicationSource: String, Codable, Equatable, Sendable {
+    case cache
+    case template
+    case pagination
+}
+
+public enum WebViewPaginationContentHostState: String, Codable, Equatable, Sendable {
+    case initial
+    case waitingOnContentView
+    case preparingContentView
+    case placeholderViewAvailable
+    case contentViewAvailable
+    case preparingForReuse
+}
+
+public enum WebViewPaginationPreloadStrategy: String, Codable, Equatable, Sendable {
+    case conservative
+    case standard
+    case aggressive
+}
+
+public enum WebViewPaginationCurrentContentLocation: String, Codable, Equatable, Sendable {
+    case center
+    case leading
+}
+
+public enum WebViewPaginationRequestedLocationKind: String, Codable, Equatable, Sendable {
+    case anchor
+    case cfi
+    case progress
+    case rect
+    case pageNumber
+    case href
+    case history
+}
+
+public struct WebViewPaginationRequestedLocation: Codable, Equatable, Sendable {
+    public let kind: WebViewPaginationRequestedLocationKind
+    public let value: String
+    public let surroundingContext: String?
+    public let rectX: Double?
+    public let rectY: Double?
+    public let rectWidth: Double?
+    public let rectHeight: Double?
+    public let isRequestedPageChange: Bool
+
+    public init(
+        kind: WebViewPaginationRequestedLocationKind,
+        value: String,
+        surroundingContext: String? = nil,
+        rectX: Double? = nil,
+        rectY: Double? = nil,
+        rectWidth: Double? = nil,
+        rectHeight: Double? = nil,
+        isRequestedPageChange: Bool = false
+    ) {
+        self.kind = kind
+        self.value = value
+        self.surroundingContext = surroundingContext
+        self.rectX = rectX
+        self.rectY = rectY
+        self.rectWidth = rectWidth
+        self.rectHeight = rectHeight
+        self.isRequestedPageChange = isRequestedPageChange
+    }
+}
+
+public struct WebViewPaginationPageOffsetRange: Codable, Equatable, Sendable {
+    public let lowerBound: Int
+    public let upperBound: Int
+
+    public init(lowerBound: Int, upperBound: Int) {
+        self.lowerBound = lowerBound
+        self.upperBound = upperBound
+    }
+}
+
 public struct WebViewPaginationPageLabelPolicy: Codable, Equatable, Sendable {
     public let displayMode: WebViewPaginationPageLabelDisplayMode
     public let usesPhysicalPageLabels: Bool
+    public let allowsMultipleLabelsInMultiUnitLayout: Bool
 
     public init(
         displayMode: WebViewPaginationPageLabelDisplayMode,
-        usesPhysicalPageLabels: Bool
+        usesPhysicalPageLabels: Bool,
+        allowsMultipleLabelsInMultiUnitLayout: Bool = false
     ) {
         self.displayMode = displayMode
         self.usesPhysicalPageLabels = usesPhysicalPageLabels
+        self.allowsMultipleLabelsInMultiUnitLayout = allowsMultipleLabelsInMultiUnitLayout
     }
 
     public static let singleLabel = WebViewPaginationPageLabelPolicy(
         displayMode: .singleLabel,
-        usesPhysicalPageLabels: false
+        usesPhysicalPageLabels: false,
+        allowsMultipleLabelsInMultiUnitLayout: false
     )
 
     public var dictionaryRepresentation: [String: String] {
         [
             "pageLabelDisplayMode": displayMode.rawValue,
-            "usesPhysicalPageLabels": "\(usesPhysicalPageLabels)"
+            "usesPhysicalPageLabels": "\(usesPhysicalPageLabels)",
+            "allowsMultipleLabelsInMultiUnitLayout": "\(allowsMultipleLabelsInMultiUnitLayout)"
         ]
     }
 }
@@ -339,13 +608,82 @@ public struct WebViewPaginationPageLabelPolicy: Codable, Equatable, Sendable {
 public struct WebViewPaginationStateEnrichment: Codable, Equatable, Sendable {
     public let visibleUnit: WebViewPaginationVisibleUnit?
     public let pageLabelPolicy: WebViewPaginationPageLabelPolicy?
+    public let currentPageDisplayLabel: String?
+    public let currentPhysicalPageLabel: String?
+    public let pageNavigationStyle: WebViewPageNavigationStyle?
+    public let allowsMultipleColumns: Bool?
+    public let pageNumberMode: WebViewPaginationPageNumberMode?
+    public let paginationComplete: Bool?
+    public let configurationKey: String?
+    public let publicationSource: WebViewPaginationPublicationSource?
+    public let contentHostState: WebViewPaginationContentHostState?
+    public let preloadStrategy: WebViewPaginationPreloadStrategy?
+    public let currentContentLocation: WebViewPaginationCurrentContentLocation?
+    public let requestedLocation: WebViewPaginationRequestedLocation?
+    public let pageOffsetsDisplayed: [Int]?
+    public let pageOffsetRange: WebViewPaginationPageOffsetRange?
+    public let currentPageIndex: Int?
+    public let visiblePageIndices: [Int]?
+    public let canMoveForward: Bool?
+    public let canMoveBackward: Bool?
+    public let forwardDestinationAvailability: String?
+    public let backwardDestinationAvailability: String?
+    public let currentSpread: WebViewPaginationSpread?
+    public let destinationSpread: WebViewPaginationSpread?
+    public let spreadSequence: WebViewPaginationSpreadSequence?
 
     public init(
         visibleUnit: WebViewPaginationVisibleUnit? = nil,
-        pageLabelPolicy: WebViewPaginationPageLabelPolicy? = nil
+        pageLabelPolicy: WebViewPaginationPageLabelPolicy? = nil,
+        currentPageDisplayLabel: String? = nil,
+        currentPhysicalPageLabel: String? = nil,
+        pageNavigationStyle: WebViewPageNavigationStyle? = nil,
+        allowsMultipleColumns: Bool? = nil,
+        pageNumberMode: WebViewPaginationPageNumberMode? = nil,
+        paginationComplete: Bool? = nil,
+        configurationKey: String? = nil,
+        publicationSource: WebViewPaginationPublicationSource? = nil,
+        contentHostState: WebViewPaginationContentHostState? = nil,
+        preloadStrategy: WebViewPaginationPreloadStrategy? = nil,
+        currentContentLocation: WebViewPaginationCurrentContentLocation? = nil,
+        requestedLocation: WebViewPaginationRequestedLocation? = nil,
+        pageOffsetsDisplayed: [Int]? = nil,
+        pageOffsetRange: WebViewPaginationPageOffsetRange? = nil,
+        currentPageIndex: Int? = nil,
+        visiblePageIndices: [Int]? = nil,
+        canMoveForward: Bool? = nil,
+        canMoveBackward: Bool? = nil,
+        forwardDestinationAvailability: String? = nil,
+        backwardDestinationAvailability: String? = nil,
+        currentSpread: WebViewPaginationSpread? = nil,
+        destinationSpread: WebViewPaginationSpread? = nil,
+        spreadSequence: WebViewPaginationSpreadSequence? = nil
     ) {
         self.visibleUnit = visibleUnit
         self.pageLabelPolicy = pageLabelPolicy
+        self.currentPageDisplayLabel = currentPageDisplayLabel
+        self.currentPhysicalPageLabel = currentPhysicalPageLabel
+        self.pageNavigationStyle = pageNavigationStyle
+        self.allowsMultipleColumns = allowsMultipleColumns
+        self.pageNumberMode = pageNumberMode
+        self.paginationComplete = paginationComplete
+        self.configurationKey = configurationKey
+        self.publicationSource = publicationSource
+        self.contentHostState = contentHostState
+        self.preloadStrategy = preloadStrategy
+        self.currentContentLocation = currentContentLocation
+        self.requestedLocation = requestedLocation
+        self.pageOffsetsDisplayed = pageOffsetsDisplayed
+        self.pageOffsetRange = pageOffsetRange
+        self.currentPageIndex = currentPageIndex
+        self.visiblePageIndices = visiblePageIndices
+        self.canMoveForward = canMoveForward
+        self.canMoveBackward = canMoveBackward
+        self.forwardDestinationAvailability = forwardDestinationAvailability
+        self.backwardDestinationAvailability = backwardDestinationAvailability
+        self.currentSpread = currentSpread
+        self.destinationSpread = destinationSpread
+        self.spreadSequence = spreadSequence
     }
 }
 
@@ -355,6 +693,29 @@ public struct WebViewPaginationState: Equatable, Sendable {
     public let pageCount: Int?
     public let visibleUnit: WebViewPaginationVisibleUnit?
     public let pageLabelPolicy: WebViewPaginationPageLabelPolicy?
+    public let currentPageDisplayLabel: String?
+    public let currentPhysicalPageLabel: String?
+    public let pageNavigationStyle: WebViewPageNavigationStyle?
+    public let allowsMultipleColumns: Bool?
+    public let pageNumberMode: WebViewPaginationPageNumberMode?
+    public let paginationComplete: Bool?
+    public let configurationKey: String?
+    public let publicationSource: WebViewPaginationPublicationSource?
+    public let contentHostState: WebViewPaginationContentHostState?
+    public let preloadStrategy: WebViewPaginationPreloadStrategy?
+    public let currentContentLocation: WebViewPaginationCurrentContentLocation?
+    public let requestedLocation: WebViewPaginationRequestedLocation?
+    public let pageOffsetsDisplayed: [Int]?
+    public let pageOffsetRange: WebViewPaginationPageOffsetRange?
+    public let currentPageIndex: Int?
+    public let visiblePageIndices: [Int]?
+    public let canMoveForward: Bool?
+    public let canMoveBackward: Bool?
+    public let forwardDestinationAvailability: String?
+    public let backwardDestinationAvailability: String?
+    public let currentSpread: WebViewPaginationSpread?
+    public let destinationSpread: WebViewPaginationSpread?
+    public let spreadSequence: WebViewPaginationSpreadSequence?
     public let mountedHostIdentifier: String?
     public let appliedHostIdentifier: String?
     public let isAppliedToMountedHost: Bool
@@ -368,6 +729,29 @@ public struct WebViewPaginationState: Equatable, Sendable {
         pageCount: Int?,
         visibleUnit: WebViewPaginationVisibleUnit? = nil,
         pageLabelPolicy: WebViewPaginationPageLabelPolicy? = nil,
+        currentPageDisplayLabel: String? = nil,
+        currentPhysicalPageLabel: String? = nil,
+        pageNavigationStyle: WebViewPageNavigationStyle? = nil,
+        allowsMultipleColumns: Bool? = nil,
+        pageNumberMode: WebViewPaginationPageNumberMode? = nil,
+        paginationComplete: Bool? = nil,
+        configurationKey: String? = nil,
+        publicationSource: WebViewPaginationPublicationSource? = nil,
+        contentHostState: WebViewPaginationContentHostState? = nil,
+        preloadStrategy: WebViewPaginationPreloadStrategy? = nil,
+        currentContentLocation: WebViewPaginationCurrentContentLocation? = nil,
+        requestedLocation: WebViewPaginationRequestedLocation? = nil,
+        pageOffsetsDisplayed: [Int]? = nil,
+        pageOffsetRange: WebViewPaginationPageOffsetRange? = nil,
+        currentPageIndex: Int? = nil,
+        visiblePageIndices: [Int]? = nil,
+        canMoveForward: Bool? = nil,
+        canMoveBackward: Bool? = nil,
+        forwardDestinationAvailability: String? = nil,
+        backwardDestinationAvailability: String? = nil,
+        currentSpread: WebViewPaginationSpread? = nil,
+        destinationSpread: WebViewPaginationSpread? = nil,
+        spreadSequence: WebViewPaginationSpreadSequence? = nil,
         mountedHostIdentifier: String?,
         appliedHostIdentifier: String?,
         isAppliedToMountedHost: Bool,
@@ -380,6 +764,29 @@ public struct WebViewPaginationState: Equatable, Sendable {
         self.pageCount = pageCount
         self.visibleUnit = visibleUnit
         self.pageLabelPolicy = pageLabelPolicy
+        self.currentPageDisplayLabel = currentPageDisplayLabel
+        self.currentPhysicalPageLabel = currentPhysicalPageLabel
+        self.pageNavigationStyle = pageNavigationStyle
+        self.allowsMultipleColumns = allowsMultipleColumns
+        self.pageNumberMode = pageNumberMode
+        self.paginationComplete = paginationComplete
+        self.configurationKey = configurationKey
+        self.publicationSource = publicationSource
+        self.contentHostState = contentHostState
+        self.preloadStrategy = preloadStrategy
+        self.currentContentLocation = currentContentLocation
+        self.requestedLocation = requestedLocation
+        self.pageOffsetsDisplayed = pageOffsetsDisplayed
+        self.pageOffsetRange = pageOffsetRange
+        self.currentPageIndex = currentPageIndex
+        self.visiblePageIndices = visiblePageIndices
+        self.canMoveForward = canMoveForward
+        self.canMoveBackward = canMoveBackward
+        self.forwardDestinationAvailability = forwardDestinationAvailability
+        self.backwardDestinationAvailability = backwardDestinationAvailability
+        self.currentSpread = currentSpread
+        self.destinationSpread = destinationSpread
+        self.spreadSequence = spreadSequence
         self.mountedHostIdentifier = mountedHostIdentifier
         self.appliedHostIdentifier = appliedHostIdentifier
         self.isAppliedToMountedHost = isAppliedToMountedHost
@@ -393,6 +800,42 @@ public struct WebViewPaginationState: Equatable, Sendable {
         values["pageCount"] = pageCount.map(String.init) ?? "nil"
         values.merge(visibleUnit?.dictionaryRepresentation ?? [:], uniquingKeysWith: { _, rhs in rhs })
         values.merge(pageLabelPolicy?.dictionaryRepresentation ?? [:], uniquingKeysWith: { _, rhs in rhs })
+        values["currentPageDisplayLabel"] = currentPageDisplayLabel ?? "nil"
+        values["currentPhysicalPageLabel"] = currentPhysicalPageLabel ?? "nil"
+        values["pageNavigationStyle"] = pageNavigationStyle?.rawValue ?? "nil"
+        values["allowsMultipleColumns"] = allowsMultipleColumns.map(String.init) ?? "nil"
+        values["pageNumberMode"] = pageNumberMode?.rawValue ?? "nil"
+        values["paginationComplete"] = paginationComplete.map(String.init) ?? "nil"
+        values["configurationKey"] = configurationKey ?? "nil"
+        values["publicationSource"] = publicationSource?.rawValue ?? "nil"
+        values["contentHostState"] = contentHostState?.rawValue ?? "nil"
+        values["preloadStrategy"] = preloadStrategy?.rawValue ?? "nil"
+        values["currentContentLocation"] = currentContentLocation?.rawValue ?? "nil"
+        values["requestedLocationKind"] = requestedLocation?.kind.rawValue ?? "nil"
+        values["requestedLocationValue"] = requestedLocation?.value ?? "nil"
+        values["pageOffsetsDisplayed"] = pageOffsetsDisplayed?.map(String.init).joined(separator: ",") ?? "nil"
+        if let pageOffsetRange {
+            values["pageOffsetRange"] = "\(pageOffsetRange.lowerBound)...\(pageOffsetRange.upperBound)"
+        } else {
+            values["pageOffsetRange"] = "nil"
+        }
+        values["currentPageIndex"] = currentPageIndex.map(String.init) ?? "nil"
+        values["visiblePageIndices"] = visiblePageIndices?.map(String.init).joined(separator: ",") ?? "nil"
+        values["canMoveForward"] = canMoveForward.map(String.init) ?? "nil"
+        values["canMoveBackward"] = canMoveBackward.map(String.init) ?? "nil"
+        values["forwardDestinationAvailability"] = forwardDestinationAvailability ?? "nil"
+        values["backwardDestinationAvailability"] = backwardDestinationAvailability ?? "nil"
+        values.merge(currentSpread?.dictionaryRepresentation ?? [:], uniquingKeysWith: { _, rhs in rhs })
+        if let destinationSpread {
+            values["destinationSpreadIndex"] = destinationSpread.index.map(String.init) ?? "nil"
+            values["destinationSpreadSlots"] = destinationSpread.slots
+                .map { "\($0.kind.rawValue):\($0.pageIndex.map(String.init) ?? "nil")" }
+                .joined(separator: ",")
+        } else {
+            values["destinationSpreadIndex"] = "nil"
+            values["destinationSpreadSlots"] = "nil"
+        }
+        values.merge(spreadSequence?.dictionaryRepresentation ?? [:], uniquingKeysWith: { _, rhs in rhs })
         values["mountedHostIdentifier"] = mountedHostIdentifier ?? "nil"
         values["appliedHostIdentifier"] = appliedHostIdentifier ?? "nil"
         values["isAppliedToMountedHost"] = "\(isAppliedToMountedHost)"
@@ -407,6 +850,29 @@ public struct WebViewPaginationState: Equatable, Sendable {
         && lhs.pageCount == rhs.pageCount
         && lhs.visibleUnit == rhs.visibleUnit
         && lhs.pageLabelPolicy == rhs.pageLabelPolicy
+        && lhs.currentPageDisplayLabel == rhs.currentPageDisplayLabel
+        && lhs.currentPhysicalPageLabel == rhs.currentPhysicalPageLabel
+        && lhs.pageNavigationStyle == rhs.pageNavigationStyle
+        && lhs.allowsMultipleColumns == rhs.allowsMultipleColumns
+        && lhs.pageNumberMode == rhs.pageNumberMode
+        && lhs.paginationComplete == rhs.paginationComplete
+        && lhs.configurationKey == rhs.configurationKey
+        && lhs.publicationSource == rhs.publicationSource
+        && lhs.contentHostState == rhs.contentHostState
+        && lhs.preloadStrategy == rhs.preloadStrategy
+        && lhs.currentContentLocation == rhs.currentContentLocation
+        && lhs.requestedLocation == rhs.requestedLocation
+        && lhs.pageOffsetsDisplayed == rhs.pageOffsetsDisplayed
+        && lhs.pageOffsetRange == rhs.pageOffsetRange
+        && lhs.currentPageIndex == rhs.currentPageIndex
+        && lhs.visiblePageIndices == rhs.visiblePageIndices
+        && lhs.canMoveForward == rhs.canMoveForward
+        && lhs.canMoveBackward == rhs.canMoveBackward
+        && lhs.forwardDestinationAvailability == rhs.forwardDestinationAvailability
+        && lhs.backwardDestinationAvailability == rhs.backwardDestinationAvailability
+        && lhs.currentSpread == rhs.currentSpread
+        && lhs.destinationSpread == rhs.destinationSpread
+        && lhs.spreadSequence == rhs.spreadSequence
         && lhs.mountedHostIdentifier == rhs.mountedHostIdentifier
         && lhs.appliedHostIdentifier == rhs.appliedHostIdentifier
         && lhs.isAppliedToMountedHost == rhs.isAppliedToMountedHost
@@ -422,6 +888,29 @@ public struct WebViewPaginationState: Equatable, Sendable {
             pageCount: pageCount,
             visibleUnit: enrichment.visibleUnit ?? visibleUnit,
             pageLabelPolicy: enrichment.pageLabelPolicy ?? pageLabelPolicy,
+            currentPageDisplayLabel: enrichment.currentPageDisplayLabel ?? currentPageDisplayLabel,
+            currentPhysicalPageLabel: enrichment.currentPhysicalPageLabel ?? currentPhysicalPageLabel,
+            pageNavigationStyle: enrichment.pageNavigationStyle ?? pageNavigationStyle,
+            allowsMultipleColumns: enrichment.allowsMultipleColumns ?? allowsMultipleColumns,
+            pageNumberMode: enrichment.pageNumberMode ?? pageNumberMode,
+            paginationComplete: enrichment.paginationComplete ?? paginationComplete,
+            configurationKey: enrichment.configurationKey ?? configurationKey,
+            publicationSource: enrichment.publicationSource ?? publicationSource,
+            contentHostState: enrichment.contentHostState ?? contentHostState,
+            preloadStrategy: enrichment.preloadStrategy ?? preloadStrategy,
+            currentContentLocation: enrichment.currentContentLocation ?? currentContentLocation,
+            requestedLocation: enrichment.requestedLocation ?? requestedLocation,
+            pageOffsetsDisplayed: enrichment.pageOffsetsDisplayed ?? pageOffsetsDisplayed,
+            pageOffsetRange: enrichment.pageOffsetRange ?? pageOffsetRange,
+            currentPageIndex: enrichment.currentPageIndex ?? currentPageIndex,
+            visiblePageIndices: enrichment.visiblePageIndices ?? visiblePageIndices,
+            canMoveForward: enrichment.canMoveForward ?? canMoveForward,
+            canMoveBackward: enrichment.canMoveBackward ?? canMoveBackward,
+            forwardDestinationAvailability: enrichment.forwardDestinationAvailability ?? forwardDestinationAvailability,
+            backwardDestinationAvailability: enrichment.backwardDestinationAvailability ?? backwardDestinationAvailability,
+            currentSpread: enrichment.currentSpread ?? currentSpread,
+            destinationSpread: enrichment.destinationSpread ?? destinationSpread,
+            spreadSequence: enrichment.spreadSequence ?? spreadSequence,
             mountedHostIdentifier: mountedHostIdentifier,
             appliedHostIdentifier: appliedHostIdentifier,
             isAppliedToMountedHost: isAppliedToMountedHost,
@@ -607,6 +1096,7 @@ public final class WebViewPaginationController {
     private(set) public var lastAppliedIdentity: WebViewPaginationStructuralIdentity?
     private(set) public var lastAppliedHostIdentifier: String?
     private(set) public var lastPageCount: Int?
+    private(set) public var lastRuntimeSpreadSequence: WebViewPaginationSpreadSequence?
     private(set) public var lastApplyReason: String?
     private(set) public var lastUpdatedAt: Date?
 
@@ -619,6 +1109,7 @@ public final class WebViewPaginationController {
 
     public func detach() -> WebViewPaginationState {
         webView = nil
+        lastRuntimeSpreadSequence = nil
         return currentState(reason: "detach")
     }
 
@@ -683,10 +1174,92 @@ public final class WebViewPaginationController {
 
     public func currentState(reason: String? = nil) -> WebViewPaginationState {
         let mountedHostIdentifier = webView.map(Self.hostIdentifier(for:))
+        let configurationKey = Self.configurationKey(
+            desiredConfiguration: desiredConfiguration,
+            appliedConfiguration: lastAppliedConfiguration
+        )
+        let effectiveConfiguration = lastAppliedConfiguration ?? desiredConfiguration
+        let runtimeCurrentSpread = lastRuntimeSpreadSequence?.currentSpread
+        let runtimeVisibleUnit = webViewPaginationVisibleUnit(
+            spreadSequence: lastRuntimeSpreadSequence
+        )
+        let runtimeVisiblePageIndices = runtimeCurrentSpread?.pageIndices
+        let runtimeCurrentPageIndex = runtimeVisiblePageIndices?.first
+        let runtimeForwardSpread: WebViewPaginationSpread? = {
+            guard let sequence = lastRuntimeSpreadSequence,
+                  let currentIndex = sequence.currentIndex else { return nil }
+            let nextIndex = currentIndex + 1
+            guard sequence.spreads.indices.contains(nextIndex) else { return nil }
+            return sequence.spreads[nextIndex]
+        }()
+        let runtimeBackwardSpread: WebViewPaginationSpread? = {
+            guard let sequence = lastRuntimeSpreadSequence,
+                  let currentIndex = sequence.currentIndex else { return nil }
+            let previousIndex = currentIndex - 1
+            guard sequence.spreads.indices.contains(previousIndex) else { return nil }
+            return sequence.spreads[previousIndex]
+        }()
+        let runtimeCanMoveBackward: Bool? = {
+            guard let sequence = lastRuntimeSpreadSequence,
+                  let currentIndex = sequence.currentIndex else { return nil }
+            return currentIndex > 0
+        }()
+        let runtimeCanMoveForward: Bool? = {
+            guard let sequence = lastRuntimeSpreadSequence,
+                  let currentIndex = sequence.currentIndex else { return nil }
+            return currentIndex + 1 < sequence.spreads.count
+        }()
+        let runtimePageOffsetRange = webViewPaginationPageOffsetRange(
+            visiblePageIndices: runtimeVisiblePageIndices
+        )
+        let runtimeCurrentContentLocation = webViewPaginationCurrentContentLocation(
+            visiblePageIndices: runtimeVisiblePageIndices
+        )
+        let runtimeForwardDestinationAvailability = webViewPaginationDestinationAvailability(
+            spread: runtimeForwardSpread,
+            pageCount: lastPageCount
+        )
+        let runtimeBackwardDestinationAvailability = webViewPaginationDestinationAvailability(
+            spread: runtimeBackwardSpread,
+            pageCount: lastPageCount
+        )
+        let runtimeDestinationSpread: WebViewPaginationSpread? = {
+            switch (runtimeBackwardSpread, runtimeForwardSpread) {
+            case (nil, let forward?):
+                return forward
+            case (let backward?, nil):
+                return backward
+            default:
+                return nil
+            }
+        }()
         return WebViewPaginationState(
             desiredConfiguration: desiredConfiguration,
             appliedConfiguration: lastAppliedConfiguration,
             pageCount: lastPageCount,
+            visibleUnit: runtimeVisibleUnit,
+            currentPageDisplayLabel: nil,
+            currentPhysicalPageLabel: nil,
+            pageNavigationStyle: effectiveConfiguration.mode.isPaginated ? .paged : nil,
+            allowsMultipleColumns: effectiveConfiguration.mode.isPaginated ? effectiveConfiguration.behavesLikeColumns : nil,
+            pageNumberMode: nil,
+            paginationComplete: lastAppliedConfiguration != nil && lastPageCount != nil,
+            configurationKey: configurationKey,
+            publicationSource: lastAppliedConfiguration == nil ? nil : .pagination,
+            contentHostState: nil,
+            currentContentLocation: runtimeCurrentContentLocation,
+            requestedLocation: nil,
+            pageOffsetsDisplayed: runtimeVisiblePageIndices,
+            pageOffsetRange: runtimePageOffsetRange,
+            currentPageIndex: runtimeCurrentPageIndex,
+            visiblePageIndices: runtimeVisiblePageIndices,
+            canMoveForward: runtimeCanMoveForward,
+            canMoveBackward: runtimeCanMoveBackward,
+            forwardDestinationAvailability: runtimeForwardDestinationAvailability,
+            backwardDestinationAvailability: runtimeBackwardDestinationAvailability,
+            currentSpread: runtimeCurrentSpread,
+            destinationSpread: runtimeDestinationSpread,
+            spreadSequence: lastRuntimeSpreadSequence,
             mountedHostIdentifier: mountedHostIdentifier,
             appliedHostIdentifier: lastAppliedHostIdentifier,
             isAppliedToMountedHost: mountedHostIdentifier != nil && mountedHostIdentifier == lastAppliedHostIdentifier,
@@ -694,6 +1267,29 @@ public final class WebViewPaginationController {
             lastApplyReason: reason ?? lastApplyReason,
             lastUpdatedAt: lastUpdatedAt
         )
+    }
+
+    @discardableResult
+    public func updateRuntimeSpreadSequence(
+        _ spreadSequence: WebViewPaginationSpreadSequence?,
+        reason: String
+    ) -> WebViewPaginationState? {
+        guard lastRuntimeSpreadSequence != spreadSequence else { return nil }
+        lastRuntimeSpreadSequence = spreadSequence
+        lastApplyReason = reason
+        lastUpdatedAt = Date()
+        return currentState(reason: reason)
+    }
+
+    private static func configurationKey(
+        desiredConfiguration: WebViewPaginationConfiguration,
+        appliedConfiguration: WebViewPaginationConfiguration?
+    ) -> String {
+        let resolved = (appliedConfiguration ?? desiredConfiguration).dictionaryRepresentation
+        return resolved
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "|")
     }
 
     public static func hostIdentifier(for webView: WKWebView) -> String {
@@ -1391,6 +1987,15 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 newState.hasReaderRenderReady = hasReaderRenderReady
                 webView.state = newState
             }
+        } else if message.name == "swiftUIWebViewPaginationReadback" {
+            guard let body = message.body as? [String: Any] else { return }
+            let spreadSequence = webViewPaginationSpreadSequence(from: body["spreadSequence"])
+            guard let paginationState = paginationController.updateRuntimeSpreadSequence(
+                spreadSequence,
+                reason: "runtime-pagination-readback"
+            ) else { return }
+            schedulePaginationStateUpdate(paginationState)
+            return
         }
         /* else if message.name == "swiftUIWebViewIsWarm" {
          if !webView.isWarm, let onWarm = webView.onWarm {
@@ -5033,6 +5638,7 @@ extension WebView {
         "swiftUIWebViewLocationChanged",
         "swiftUIWebViewImageUpdated",
         "swiftUIWebViewPageIconUpdated",
+        "swiftUIWebViewPaginationReadback",
         "swiftUIWebViewTextSelection",
         "readerBootstrapPing",
         "readerDocState",
