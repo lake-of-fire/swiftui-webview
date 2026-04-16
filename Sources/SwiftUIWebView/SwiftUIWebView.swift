@@ -41,6 +41,10 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
 
 private let readerLoadIssueGapWarningThreshold: TimeInterval = 0.750
 private let readerLoadCommitGapWarningThreshold: TimeInterval = 0.750
+private let internalReaderLoaderStartedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.startedAt."
+private let internalReaderLoaderResponseAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.responseAt."
+private let internalReaderLoaderDataAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.dataAt."
+private let internalReaderLoaderFinishedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.finishedAt."
 
 @inline(__always)
 private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
@@ -1859,6 +1863,49 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+        if let currentURL = webView.url?.absoluteString, isInternalReaderLoaderURL(URL(string: currentURL)) {
+            let defaults = UserDefaults.standard
+            let loaderStartTimestamp = defaults.double(forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL)
+            if loaderStartTimestamp > 0 {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeStart",
+                    [
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderStartTimestamp))),
+                        "requestURL": currentURL
+                    ]
+                )
+            }
+            let loaderResponseTimestamp = defaults.double(forKey: internalReaderLoaderResponseAtKeyPrefix + currentURL)
+            if loaderResponseTimestamp > 0 {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeResponse",
+                    [
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderResponseTimestamp))),
+                        "requestURL": currentURL
+                    ]
+                )
+            }
+            let loaderDataTimestamp = defaults.double(forKey: internalReaderLoaderDataAtKeyPrefix + currentURL)
+            if loaderDataTimestamp > 0 {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeData",
+                    [
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderDataTimestamp))),
+                        "requestURL": currentURL
+                    ]
+                )
+            }
+            let loaderFinishTimestamp = defaults.double(forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURL)
+            if loaderFinishTimestamp > 0 {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeFinish",
+                    [
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderFinishTimestamp))),
+                        "requestURL": currentURL
+                    ]
+                )
+            }
+        }
         var newState = setLoading(
             true,
             pageURL: webView.url,
@@ -1923,6 +1970,26 @@ extension WebViewCoordinator: WKNavigationDelegate {
                         ]
                     )
                 }
+            }
+        }
+        if let currentURL = webView.url?.absoluteString, isInternalReaderLoaderURL(URL(string: currentURL)) {
+            let defaults = UserDefaults.standard
+            let loaderStartTimestamp = defaults.double(forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL)
+            if loaderStartTimestamp > 0 {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.afterInternalSchemeStart",
+                    [
+                        "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(Date(timeIntervalSince1970: loaderStartTimestamp))),
+                        "requestURL": currentURL
+                    ]
+                )
+            } else {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.beforeInternalSchemeStart",
+                    [
+                        "requestURL": currentURL
+                    ]
+                )
             }
         }
         if navigator.pendingRequest?.url == webView.url {
@@ -5047,10 +5114,12 @@ extension WebView: UIViewControllerRepresentable {
         if let resolvedWebViewPool {
             resolvedWebViewPool.attachWarmShelfIfNeeded(to: controller.view.window)
         }
-        let requestedBeforeProvisional = context.coordinator.navigator.readerLoadRequestedAt != nil
-            && context.coordinator.navigator.readerLoadProvisionalStartedAt == nil
-        if context.coordinator.navigator.readerLoadRequestedAt != nil,
-           context.coordinator.navigator.readerLoadProvisionalStartedAt == nil {
+        let requestedAt = context.coordinator.navigator.readerLoadRequestedAt
+        let provisionalStartedAt = context.coordinator.navigator.readerLoadProvisionalStartedAt
+        let committedAt = context.coordinator.navigator.readerLoadCommittedAt
+        let requestedBeforeProvisional = requestedAt != nil && provisionalStartedAt == nil
+        let requestedAfterProvisionalBeforeCommit = requestedAt != nil && provisionalStartedAt != nil && committedAt == nil
+        if requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit {
             readerLoadLog(
                 "webView.host.updateUIViewController",
                 [
@@ -5063,6 +5132,43 @@ extension WebView: UIViewControllerRepresentable {
                     "webViewID": readerLoadObjectIDString(controller.webView)
                 ]
             )
+        }
+        if let requestedAt, requestedBeforeProvisional {
+            let waitElapsed = Date().timeIntervalSince(requestedAt)
+            if waitElapsed >= readerLoadIssueGapWarningThreshold {
+                readerLoadLog(
+                    "webView.host.loaderPhase.preProvisional",
+                    [
+                        "elapsedSinceRequested": String(format: "%.3fs", waitElapsed),
+                        "estimatedProgress": String(format: "%.3f", controller.webView.estimatedProgress),
+                        "hasSuperview": "\(controller.webView.superview != nil)",
+                        "hasWindow": "\(controller.webView.window != nil)",
+                        "isLoading": "\(controller.webView.isLoading)",
+                        "requestURL": context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil",
+                        "sceneState": readerLoadSceneStateString(for: controller.webView),
+                        "webViewID": readerLoadObjectIDString(controller.webView)
+                    ]
+                )
+            }
+        }
+        if let provisionalStartedAt, requestedAfterProvisionalBeforeCommit {
+            let waitElapsed = Date().timeIntervalSince(provisionalStartedAt)
+            if waitElapsed >= readerLoadCommitGapWarningThreshold {
+                readerLoadLog(
+                    "webView.host.loaderPhase.postProvisionalPreCommit",
+                    [
+                        "currentURL": controller.webView.url?.absoluteString ?? "nil",
+                        "elapsedSinceProvisionalStart": String(format: "%.3fs", waitElapsed),
+                        "estimatedProgress": String(format: "%.3f", controller.webView.estimatedProgress),
+                        "hasSuperview": "\(controller.webView.superview != nil)",
+                        "hasWindow": "\(controller.webView.window != nil)",
+                        "isLoading": "\(controller.webView.isLoading)",
+                        "requestURL": context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil",
+                        "sceneState": readerLoadSceneStateString(for: controller.webView),
+                        "webViewID": readerLoadObjectIDString(controller.webView)
+                    ]
+                )
+            }
         }
         updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
@@ -5077,7 +5183,7 @@ extension WebView: UIViewControllerRepresentable {
         )
         let configurationChanged = context.coordinator.lastAppliedConfigurationState != currentConfigurationState
 
-        if requestedBeforeProvisional {
+        if requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit {
             let hasTextSelection = !(textSelection?.isEmpty ?? true)
             let updateContextSignature = [
                 "configChanged=\(configurationChanged)",
