@@ -41,10 +41,41 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
 
 private let readerLoadIssueGapWarningThreshold: TimeInterval = 0.750
 private let readerLoadCommitGapWarningThreshold: TimeInterval = 0.750
+private let readerLoadStaleLoadingStateThreshold: Double = 0.050
 private let internalReaderLoaderStartedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.startedAt."
 private let internalReaderLoaderResponseAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.responseAt."
 private let internalReaderLoaderDataAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.dataAt."
 private let internalReaderLoaderFinishedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.finishedAt."
+private let readerLoadVerboseUIViewControllerLoggingEnabled =
+    ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
+private let readerLoadCorrelationMaxAge: TimeInterval = 30
+
+@inline(__always)
+private func readerLoadCorrelationTimestamp(
+    forKey key: String,
+    baseline: Date?,
+    now: Date
+) -> Date? {
+    let timestamp = UserDefaults.standard.double(forKey: key)
+    guard timestamp > 0 else { return nil }
+    let resolved = Date(timeIntervalSince1970: timestamp)
+    if let baseline, resolved.timeIntervalSince(baseline) < -0.050 {
+        return nil
+    }
+    guard now.timeIntervalSince(resolved) <= readerLoadCorrelationMaxAge else {
+        return nil
+    }
+    return resolved
+}
+
+@inline(__always)
+private func clearReaderLoaderCorrelationTimestamps(for urlString: String) {
+    let defaults = UserDefaults.standard
+    defaults.removeObject(forKey: internalReaderLoaderStartedAtKeyPrefix + urlString)
+    defaults.removeObject(forKey: internalReaderLoaderResponseAtKeyPrefix + urlString)
+    defaults.removeObject(forKey: internalReaderLoaderDataAtKeyPrefix + urlString)
+    defaults.removeObject(forKey: internalReaderLoaderFinishedAtKeyPrefix + urlString)
+}
 
 @inline(__always)
 private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
@@ -1655,6 +1686,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
                 ]
             )
+            if let requestURL = navigator.readerLoadRequestedURL?.absoluteString {
+                clearReaderLoaderCorrelationTimestamps(for: requestURL)
+            }
         }
         //                debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
@@ -1833,6 +1867,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+        if let requestURL = navigator.readerLoadRequestedURL?.absoluteString,
+           isInternalReaderLoaderURL(navigator.readerLoadRequestedURL) {
+            clearReaderLoaderCorrelationTimestamps(for: requestURL)
+        }
         
         extractPageState(webView: webView)
         
@@ -1864,43 +1902,55 @@ extension WebViewCoordinator: WKNavigationDelegate {
             ]
         )
         if let currentURL = webView.url?.absoluteString, isInternalReaderLoaderURL(URL(string: currentURL)) {
-            let defaults = UserDefaults.standard
-            let loaderStartTimestamp = defaults.double(forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL)
-            if loaderStartTimestamp > 0 {
+            let correlationBaseline = navigator.readerLoadIssuedAt ?? navigator.readerLoadRequestedAt
+            if let loaderStartTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
                 readerLoadLog(
                     "webView.nav.commit.afterInternalSchemeStart",
                     [
-                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderStartTimestamp))),
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(loaderStartTimestamp)),
                         "requestURL": currentURL
                     ]
                 )
             }
-            let loaderResponseTimestamp = defaults.double(forKey: internalReaderLoaderResponseAtKeyPrefix + currentURL)
-            if loaderResponseTimestamp > 0 {
+            if let loaderResponseTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderResponseAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
                 readerLoadLog(
                     "webView.nav.commit.afterInternalSchemeResponse",
                     [
-                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderResponseTimestamp))),
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(loaderResponseTimestamp)),
                         "requestURL": currentURL
                     ]
                 )
             }
-            let loaderDataTimestamp = defaults.double(forKey: internalReaderLoaderDataAtKeyPrefix + currentURL)
-            if loaderDataTimestamp > 0 {
+            if let loaderDataTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderDataAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
                 readerLoadLog(
                     "webView.nav.commit.afterInternalSchemeData",
                     [
-                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderDataTimestamp))),
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(loaderDataTimestamp)),
                         "requestURL": currentURL
                     ]
                 )
             }
-            let loaderFinishTimestamp = defaults.double(forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURL)
-            if loaderFinishTimestamp > 0 {
+            if let loaderFinishTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
                 readerLoadLog(
                     "webView.nav.commit.afterInternalSchemeFinish",
                     [
-                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(Date(timeIntervalSince1970: loaderFinishTimestamp))),
+                        "elapsed": String(format: "%.3fs", commitNow.timeIntervalSince(loaderFinishTimestamp)),
                         "requestURL": currentURL
                     ]
                 )
@@ -1973,16 +2023,58 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
         if let currentURL = webView.url?.absoluteString, isInternalReaderLoaderURL(URL(string: currentURL)) {
-            let defaults = UserDefaults.standard
-            let loaderStartTimestamp = defaults.double(forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL)
-            if loaderStartTimestamp > 0 {
+            let correlationBaseline = navigator.readerLoadIssuedAt ?? navigator.readerLoadRequestedAt
+            if let loaderStartTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: provisionalNow
+            ) {
                 readerLoadLog(
                     "webView.nav.provisionalStart.afterInternalSchemeStart",
                     [
-                        "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(Date(timeIntervalSince1970: loaderStartTimestamp))),
+                        "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderStartTimestamp)),
                         "requestURL": currentURL
                     ]
                 )
+                if let loaderResponseTimestamp = readerLoadCorrelationTimestamp(
+                    forKey: internalReaderLoaderResponseAtKeyPrefix + currentURL,
+                    baseline: correlationBaseline,
+                    now: provisionalNow
+                ) {
+                    readerLoadLog(
+                        "webView.nav.provisionalStart.afterInternalSchemeResponse",
+                        [
+                            "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderResponseTimestamp)),
+                            "requestURL": currentURL
+                        ]
+                    )
+                }
+                if let loaderDataTimestamp = readerLoadCorrelationTimestamp(
+                    forKey: internalReaderLoaderDataAtKeyPrefix + currentURL,
+                    baseline: correlationBaseline,
+                    now: provisionalNow
+                ) {
+                    readerLoadLog(
+                        "webView.nav.provisionalStart.afterInternalSchemeData",
+                        [
+                            "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderDataTimestamp)),
+                            "requestURL": currentURL
+                        ]
+                    )
+                }
+                if let loaderFinishTimestamp = readerLoadCorrelationTimestamp(
+                    forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURL,
+                    baseline: correlationBaseline,
+                    now: provisionalNow
+                ) {
+                    readerLoadLog(
+                        "webView.nav.provisionalStart.afterInternalSchemeFinish",
+                        [
+                            "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderFinishTimestamp)),
+                            "requestURL": currentURL
+                        ]
+                    )
+                }
             } else {
                 readerLoadLog(
                     "webView.nav.provisionalStart.beforeInternalSchemeStart",
@@ -2312,6 +2404,38 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    private func logPreIssueLoadState(for request: URLRequest, reason: String) {
+        guard let webView else { return }
+        let estimatedProgress = webView.estimatedProgress
+        let isLoading = webView.isLoading
+        readerLoadLog(
+            "webViewNavigator.preIssueState",
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "estimatedProgress": String(format: "%.3f", estimatedProgress),
+                "hasSuperview": "\(webView.superview != nil)",
+                "hasWindow": "\(webView.window != nil)",
+                "isLoading": "\(isLoading)",
+                "reason": reason,
+                "requestURL": request.url?.absoluteString ?? "nil",
+                "sceneState": readerLoadSceneStateString(for: webView),
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
+        )
+        guard isLoading || estimatedProgress > readerLoadStaleLoadingStateThreshold else { return }
+        readerLoadLog(
+            "webViewNavigator.preIssueState.anomaly",
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "estimatedProgress": String(format: "%.3f", estimatedProgress),
+                "isLoading": "\(isLoading)",
+                "reason": reason,
+                "requestURL": request.url?.absoluteString ?? "nil"
+            ]
+        )
+    }
+
+    @MainActor
     private func markReaderLoadIssued(for request: URLRequest, reason: String) {
         let now = Date()
         readerLoadIssuedAt = now
@@ -2576,6 +2700,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
+        logPreIssueLoadState(for: request, reason: "issuePendingRequestLoad:\(diagnosticsReason)")
         let disposition = PendingRequestLoadDisposition.resolve(
             requestURL: request.url,
             hasWindow: webView.window != nil,
@@ -2916,6 +3041,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask(reason: "explicitRequestLoad")
         beginReaderLoadTrace(for: request)
         if let webView = webView {
+            logPreIssueLoadState(for: request, reason: "navigator.load")
             if webView.window == nil || webView.superview == nil {
                 pendingRequest = request
                 pendingRequestSetAt = Date()
@@ -5119,7 +5245,7 @@ extension WebView: UIViewControllerRepresentable {
         let committedAt = context.coordinator.navigator.readerLoadCommittedAt
         let requestedBeforeProvisional = requestedAt != nil && provisionalStartedAt == nil
         let requestedAfterProvisionalBeforeCommit = requestedAt != nil && provisionalStartedAt != nil && committedAt == nil
-        if requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit {
+        if readerLoadVerboseUIViewControllerLoggingEnabled && (requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit) {
             readerLoadLog(
                 "webView.host.updateUIViewController",
                 [
@@ -5136,6 +5262,15 @@ extension WebView: UIViewControllerRepresentable {
         if let requestedAt, requestedBeforeProvisional {
             let waitElapsed = Date().timeIntervalSince(requestedAt)
             if waitElapsed >= readerLoadIssueGapWarningThreshold {
+                let correlationBaseline = context.coordinator.navigator.readerLoadIssuedAt ?? context.coordinator.navigator.readerLoadRequestedAt
+                let requestURLString = context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                let internalSchemeStartGap = context.coordinator.navigator.readerLoadRequestedURL.flatMap { requestedURL in
+                    readerLoadCorrelationTimestamp(
+                        forKey: internalReaderLoaderStartedAtKeyPrefix + requestedURL.absoluteString,
+                        baseline: correlationBaseline,
+                        now: Date()
+                    )
+                }.map { String(format: "%.3fs", Date().timeIntervalSince($0)) } ?? "nil"
                 readerLoadLog(
                     "webView.host.loaderPhase.preProvisional",
                     [
@@ -5143,8 +5278,9 @@ extension WebView: UIViewControllerRepresentable {
                         "estimatedProgress": String(format: "%.3f", controller.webView.estimatedProgress),
                         "hasSuperview": "\(controller.webView.superview != nil)",
                         "hasWindow": "\(controller.webView.window != nil)",
+                        "internalSchemeStartGap": internalSchemeStartGap,
                         "isLoading": "\(controller.webView.isLoading)",
-                        "requestURL": context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil",
+                        "requestURL": requestURLString,
                         "sceneState": readerLoadSceneStateString(for: controller.webView),
                         "webViewID": readerLoadObjectIDString(controller.webView)
                     ]
@@ -5154,6 +5290,29 @@ extension WebView: UIViewControllerRepresentable {
         if let provisionalStartedAt, requestedAfterProvisionalBeforeCommit {
             let waitElapsed = Date().timeIntervalSince(provisionalStartedAt)
             if waitElapsed >= readerLoadCommitGapWarningThreshold {
+                let correlationBaseline = context.coordinator.navigator.readerLoadIssuedAt ?? context.coordinator.navigator.readerLoadRequestedAt
+                let requestURLString = context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                let internalSchemeResponseGap = context.coordinator.navigator.readerLoadRequestedURL.flatMap { requestedURL in
+                    readerLoadCorrelationTimestamp(
+                        forKey: internalReaderLoaderResponseAtKeyPrefix + requestedURL.absoluteString,
+                        baseline: correlationBaseline,
+                        now: Date()
+                    )
+                }.map { String(format: "%.3fs", Date().timeIntervalSince($0)) } ?? "nil"
+                let internalSchemeDataGap = context.coordinator.navigator.readerLoadRequestedURL.flatMap { requestedURL in
+                    readerLoadCorrelationTimestamp(
+                        forKey: internalReaderLoaderDataAtKeyPrefix + requestedURL.absoluteString,
+                        baseline: correlationBaseline,
+                        now: Date()
+                    )
+                }.map { String(format: "%.3fs", Date().timeIntervalSince($0)) } ?? "nil"
+                let internalSchemeFinishGap = context.coordinator.navigator.readerLoadRequestedURL.flatMap { requestedURL in
+                    readerLoadCorrelationTimestamp(
+                        forKey: internalReaderLoaderFinishedAtKeyPrefix + requestedURL.absoluteString,
+                        baseline: correlationBaseline,
+                        now: Date()
+                    )
+                }.map { String(format: "%.3fs", Date().timeIntervalSince($0)) } ?? "nil"
                 readerLoadLog(
                     "webView.host.loaderPhase.postProvisionalPreCommit",
                     [
@@ -5162,8 +5321,11 @@ extension WebView: UIViewControllerRepresentable {
                         "estimatedProgress": String(format: "%.3f", controller.webView.estimatedProgress),
                         "hasSuperview": "\(controller.webView.superview != nil)",
                         "hasWindow": "\(controller.webView.window != nil)",
+                        "internalSchemeDataGap": internalSchemeDataGap,
+                        "internalSchemeFinishGap": internalSchemeFinishGap,
+                        "internalSchemeResponseGap": internalSchemeResponseGap,
                         "isLoading": "\(controller.webView.isLoading)",
-                        "requestURL": context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil",
+                        "requestURL": requestURLString,
                         "sceneState": readerLoadSceneStateString(for: controller.webView),
                         "webViewID": readerLoadObjectIDString(controller.webView)
                     ]
@@ -5184,38 +5346,7 @@ extension WebView: UIViewControllerRepresentable {
         let configurationChanged = context.coordinator.lastAppliedConfigurationState != currentConfigurationState
 
         if requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit {
-            let hasTextSelection = !(textSelection?.isEmpty ?? true)
-            let updateContextSignature = [
-                "configChanged=\(configurationChanged)",
-                "domain=\(resolvedDomain?.absoluteString ?? "nil")",
-                "statePageURL=\(state.pageURL.absoluteString)",
-                "stateIsLoading=\(state.isLoading)",
-                "stateProgress=\(state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil")",
-                "hideNavigation=\(hideNavigationDueToScroll)",
-                "hasTextSelection=\(hasTextSelection)",
-                "obscuredTop=\(String(format: "%.1f", obscuredInsets.top))",
-                "obscuredBottom=\(String(format: "%.1f", obscuredInsets.bottom))",
-                "buildMenu=\(buildMenu != nil)"
-            ].joined(separator: "|")
-            if context.coordinator.lastHostUpdateContextSignature != updateContextSignature {
-                context.coordinator.lastHostUpdateContextSignature = updateContextSignature
-                readerLoadLog(
-                    "webView.host.updateContext",
-                    [
-                        "buildMenu": "\(buildMenu != nil)",
-                        "configChanged": "\(configurationChanged)",
-                        "domain": resolvedDomain?.absoluteString ?? "nil",
-                        "hasTextSelection": "\(hasTextSelection)",
-                        "hideNavigation": "\(hideNavigationDueToScroll)",
-                        "obscuredBottom": String(format: "%.1f", obscuredInsets.bottom),
-                        "obscuredTop": String(format: "%.1f", obscuredInsets.top),
-                        "stateIsLoading": "\(state.isLoading)",
-                        "statePageURL": state.pageURL.absoluteString,
-                        "stateProgress": state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil",
-                        "webViewID": readerLoadObjectIDString(controller.webView)
-                    ]
-                )
-            }
+            context.coordinator.lastHostUpdateContextSignature = nil
         }
 
         if configurationChanged {
