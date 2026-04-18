@@ -40,6 +40,39 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
 }
 
 private let readerLoadIssueGapWarningThreshold: TimeInterval = 0.750
+private let readerLoadStaleLoadingStateThreshold: Double = 0.050
+private let internalReaderLoaderStartedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.startedAt."
+private let internalReaderLoaderResponseAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.responseAt."
+private let internalReaderLoaderDataAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.dataAt."
+private let internalReaderLoaderFinishedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.finishedAt."
+private let readerLoadCorrelationMaxAge: TimeInterval = 30
+
+@inline(__always)
+private func readerLoadCorrelationTimestamp(
+    forKey key: String,
+    baseline: Date?,
+    now: Date
+) -> Date? {
+    let timestamp = UserDefaults.standard.double(forKey: key)
+    guard timestamp > 0 else { return nil }
+    let resolved = Date(timeIntervalSince1970: timestamp)
+    if let baseline, resolved.timeIntervalSince(baseline) < -0.050 {
+        return nil
+    }
+    guard now.timeIntervalSince(resolved) <= readerLoadCorrelationMaxAge else {
+        return nil
+    }
+    return resolved
+}
+
+@inline(__always)
+private func clearReaderLoaderCorrelationTimestamps(for urlString: String) {
+    let defaults = UserDefaults.standard
+    defaults.removeObject(forKey: internalReaderLoaderStartedAtKeyPrefix + urlString)
+    defaults.removeObject(forKey: internalReaderLoaderResponseAtKeyPrefix + urlString)
+    defaults.removeObject(forKey: internalReaderLoaderDataAtKeyPrefix + urlString)
+    defaults.removeObject(forKey: internalReaderLoaderFinishedAtKeyPrefix + urlString)
+}
 
 @inline(__always)
 private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
@@ -2380,6 +2413,66 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+        if let currentURL = webView.url?.absoluteString {
+            let correlationBaseline = navigator.readerLoadIssuedAt ?? navigator.readerLoadRequestedAt
+            if let finishTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeFinish",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeFinish": String(format: "%.3fs", commitNow.timeIntervalSince(finishTimestamp)),
+                        "elapsedSinceProvisionalStart": readerLoadElapsedString(since: navigator.readerLoadProvisionalStartedAt, now: commitNow),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+            if let startTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeStart",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeStart": String(format: "%.3fs", commitNow.timeIntervalSince(startTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+            if let responseTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderResponseAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeResponse",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeResponse": String(format: "%.3fs", commitNow.timeIntervalSince(responseTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+            if let dataTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderDataAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: commitNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.commit.afterInternalSchemeData",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeData": String(format: "%.3fs", commitNow.timeIntervalSince(dataTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+        }
         var newState = setLoading(
             true,
             pageURL: webView.url,
@@ -2430,6 +2523,72 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+        if let currentURL = webView.url?.absoluteString {
+            let correlationBaseline = navigator.readerLoadIssuedAt ?? navigator.readerLoadRequestedAt
+            if let startTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderStartedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: provisionalNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.afterInternalSchemeStart",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeStart": String(format: "%.3fs", provisionalNow.timeIntervalSince(startTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            } else {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.beforeInternalSchemeStart",
+                    [
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+            if let responseTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderResponseAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: provisionalNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.afterInternalSchemeResponse",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeResponse": String(format: "%.3fs", provisionalNow.timeIntervalSince(responseTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+            if let dataTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderDataAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: provisionalNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.afterInternalSchemeData",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeData": String(format: "%.3fs", provisionalNow.timeIntervalSince(dataTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+            if let finishTimestamp = readerLoadCorrelationTimestamp(
+                forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURL,
+                baseline: correlationBaseline,
+                now: provisionalNow
+            ) {
+                readerLoadLog(
+                    "webView.nav.provisionalStart.afterInternalSchemeFinish",
+                    [
+                        "currentURL": currentURL,
+                        "elapsedSinceInternalSchemeFinish": String(format: "%.3fs", provisionalNow.timeIntervalSince(finishTimestamp)),
+                        "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
+                    ]
+                )
+            }
+        }
         if let issuedAt = navigator.readerLoadIssuedAt {
             let issueGap = provisionalNow.timeIntervalSince(issuedAt)
             if issueGap >= readerLoadIssueGapWarningThreshold {
@@ -2627,6 +2786,41 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "hasSuperview": "\(webView?.superview != nil)",
                 "hasWindow": "\(webView?.window != nil)",
                 "url": request.url?.absoluteString ?? "nil"
+            ]
+        )
+        if let requestURL = request.url?.absoluteString {
+            clearReaderLoaderCorrelationTimestamps(for: requestURL)
+        }
+    }
+
+    @MainActor
+    private func logPreIssueLoadState(for request: URLRequest, reason: String) {
+        guard let webView else { return }
+        let estimatedProgress = webView.estimatedProgress
+        let isLoading = webView.isLoading
+        readerLoadLog(
+            "webViewNavigator.preIssueState",
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "estimatedProgress": String(format: "%.3f", estimatedProgress),
+                "hasSuperview": "\(webView.superview != nil)",
+                "hasWindow": "\(webView.window != nil)",
+                "isLoading": "\(isLoading)",
+                "reason": reason,
+                "requestURL": request.url?.absoluteString ?? "nil",
+                "sceneState": readerLoadSceneStateString(for: webView),
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
+        )
+        guard isLoading || estimatedProgress > readerLoadStaleLoadingStateThreshold else { return }
+        readerLoadLog(
+            "webViewNavigator.preIssueState.anomaly",
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "estimatedProgress": String(format: "%.3f", estimatedProgress),
+                "isLoading": "\(isLoading)",
+                "reason": reason,
+                "requestURL": request.url?.absoluteString ?? "nil"
             ]
         )
     }
@@ -2910,6 +3104,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
+        logPreIssueLoadState(for: request, reason: "issuePendingRequestLoad:\(diagnosticsReason)")
         let disposition = PendingRequestLoadDisposition.resolve(
             requestURL: request.url,
             hasWindow: webView.window != nil,
@@ -3176,6 +3371,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask(reason: "explicitRequestLoad")
         beginReaderLoadTrace(for: request)
         if let webView = webView {
+            logPreIssueLoadState(for: request, reason: "navigator.load")
             if webView.window == nil || webView.superview == nil {
                 pendingRequest = request
                 readerLoadLog(
@@ -3385,6 +3581,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
     ) async rethrows -> T? {
         guard let webView else { return nil }
         return try await operation(webView)
+    }
+
+    @MainActor
+    public func attachedWebViewHasReadyNavigationState() -> Bool {
+        guard let webView else { return false }
+        return webView.window != nil
+            && webView.superview != nil
+            && webView.navigationDelegate != nil
     }
 
     public override init() {
