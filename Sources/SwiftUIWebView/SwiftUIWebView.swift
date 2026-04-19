@@ -1784,7 +1784,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyChildElementCount: body?.childElementCount || 0,
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
-                    hasReaderRenderReady: html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1',
+                    hasReaderRenderReady:
+                        (html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
+                        && !!document.getElementById("reader-content")
+                        && (html?.dataset?.manabiFontPending ?? null) !== '1'
+                        && bodyStyle?.visibility !== 'hidden'
+                        && bodyStyle?.display !== 'none'
+                        && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
                     hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
                     titleLength: (document.title || "").length
                 };
@@ -2220,6 +2226,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         public let lastDataLoadBaseURL: String
         public let lastHTMLBaseURL: String
         public let hasAttachedWebView: Bool
+        public let isLoading: Bool
     }
 
     @MainActor
@@ -2229,7 +2236,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
             lastRequestURL: lastLoadedRequest?.url?.absoluteString ?? "nil",
             lastDataLoadBaseURL: lastLoadedDataLoad?.baseURL.absoluteString ?? "nil",
             lastHTMLBaseURL: lastLoadedHTML?.baseURL?.absoluteString ?? "nil",
-            hasAttachedWebView: hasAttachedWebView
+            hasAttachedWebView: hasAttachedWebView,
+            isLoading: webView?.isLoading ?? false
         )
     }
 
@@ -4002,9 +4010,6 @@ fileprivate struct ReaderDocStateUserScript {
                 hasBody: !!body,
                 hasReaderContent: !!readerContent,
                 hasReadabilityGlobal: typeof window.manabi_readability === 'function',
-                hasReaderRenderReady:
-                    html?.dataset?.manabiReaderRenderReady === '1'
-                    || body?.dataset?.manabiReaderRenderReady === '1',
                 manabiFontPending: html?.dataset?.manabiFontPending ?? null,
                 manabiFontReady: html?.dataset?.manabiFontReady ?? null,
                 hasCustomFontStyle: !!document.getElementById("manabi-custom-fonts-inline"),
@@ -4035,6 +4040,14 @@ fileprivate struct ReaderDocStateUserScript {
                         && style.visibility !== "hidden"
                         && Number.parseFloat(style.opacity || "1") > 0.01;
                 }).length,
+                hasReaderRenderReady:
+                    (html?.dataset?.manabiReaderRenderReady === '1'
+                    || body?.dataset?.manabiReaderRenderReady === '1')
+                    && !!readerContent
+                    && (html?.dataset?.manabiFontPending ?? null) !== '1'
+                    && bodyStyle?.visibility !== 'hidden'
+                    && bodyStyle?.display !== 'none'
+                    && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
                 viewport: {
                     innerWidth: window.innerWidth,
                     innerHeight: window.innerHeight,
