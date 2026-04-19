@@ -1448,6 +1448,7 @@ public class WebViewCoordinator: NSObject {
             "webView.loadingProgress.forceClear.end",
             [
                 "effectivePageURL": effectivePageURL.absoluteString,
+                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(),
                 "isLoading": "\(webView.state.isLoading)",
                 "loadingProgress": webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil",
                 "reason": reason
@@ -1645,7 +1646,7 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        debugPrint("# READER webView.nav.finish",
+        debugPrint("# EPUB  webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
         let finishNow = Date()
@@ -1654,6 +1655,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             "webView.nav.finish",
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(now: finishNow),
+                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: finishNow),
                 "elapsedSinceCommit": readerLoadElapsedString(since: navigator.readerLoadCommittedAt, now: finishNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: finishNow),
                 "requestURL": activeRequestURL?.absoluteString ?? "nil",
@@ -1898,7 +1901,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
         }
-        debugPrint("# READER webView.nav.commit",
+        debugPrint("# EPUB  webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
         let commitNow = Date()
@@ -1910,6 +1913,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             "webView.nav.commit",
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(now: commitNow),
+                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: commitNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: commitNow),
                 "elapsedSinceProvisionalStart": readerLoadElapsedString(since: navigator.readerLoadProvisionalStartedAt, now: commitNow),
                 "requestURL": activeRequestURL?.absoluteString ?? "nil",
@@ -1939,7 +1944,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        debugPrint("# READER webView.nav.start",
+        debugPrint("# EPUB  webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
         let provisionalNow = Date()
@@ -1951,6 +1956,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             "webView.nav.provisionalStart",
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(now: provisionalNow),
+                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: provisionalNow),
                 "elapsedSinceIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: provisionalNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: provisionalNow),
                 "requestURL": activeRequestURL?.absoluteString ?? "nil",
@@ -2010,7 +2017,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         if navigator.pendingRequest?.url == webView.url {
             if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
                 debugPrint(
-                    "# READER navigator.pendingRequest.clearedOnStart",
+                    "# EPUB  navigator.pendingRequest.clearedOnStart",
                     [
                         "navigatorID": navigator.debugIdentifier ?? "nil",
                         "navigatorObjectID": navigator.debugObjectID,
@@ -2036,7 +2043,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         let startedAt = Date()
-        debugPrint("# READER webView.nav.decide",
+        debugPrint("# EPUB  webView.nav.decide",
                    "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
         let requestURL = navigationAction.request.url
@@ -2165,7 +2172,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         if let response = navigationResponse.response as? HTTPURLResponse {
             debugPrint(
-                "# READER webView.nav.response",
+                "# EPUB  webView.nav.response",
                 "url=\(response.url?.absoluteString ?? "<nil>")",
                 "mimeType=\(response.mimeType ?? "<nil>")",
                 "status=\(response.statusCode)",
@@ -2303,6 +2310,22 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor fileprivate var readerLoadCommittedAt: Date? {
         get { currentReaderLoadTrace?.committedAt }
         set { currentReaderLoadTrace?.committedAt = newValue }
+    }
+
+    @MainActor fileprivate var readerLoadDirectDataIssuedAt: Date? {
+        currentReaderLoadTrace?.directDataIssuedAt
+    }
+
+    @MainActor fileprivate func readerLoadDirectDataElapsedString(now: Date = Date()) -> String {
+        readerLoadElapsedString(since: readerLoadDirectDataIssuedAt, now: now)
+    }
+
+    @MainActor fileprivate var readerLoadDirectDataReturnedAt: Date? {
+        currentReaderLoadTrace?.directDataReturnedAt
+    }
+
+    @MainActor fileprivate func readerLoadDirectDataReturnedElapsedString(now: Date = Date()) -> String {
+        readerLoadElapsedString(since: readerLoadDirectDataReturnedAt, now: now)
     }
 
     @MainActor fileprivate var readerLoadInternalLoaderStartedAt: Date? {
@@ -2758,7 +2781,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 guard self.pendingRequestLoadGeneration == generation else { return }
                 if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                     debugPrint(
-                        "# READER navigator.flushPendingRequest.retry.begin",
+                        "# EPUB  navigator.flushPendingRequest.retry.begin",
                         [
                             "navigatorID": self.debugIdentifier ?? "nil",
                             "navigatorObjectID": self.debugObjectID,
@@ -2771,7 +2794,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 if webView.window != nil && webView.superview != nil {
                     if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                         debugPrint(
-                            "# READER navigator.flushPendingRequest.retry",
+                            "# EPUB  navigator.flushPendingRequest.retry",
                             [
                                 "navigatorID": self.debugIdentifier ?? "nil",
                                 "navigatorObjectID": self.debugObjectID,
@@ -2793,7 +2816,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
-                    "# READER navigator.flushPendingRequest.retry.exhausted",
+                    "# EPUB  navigator.flushPendingRequest.retry.exhausted",
                     [
                         "navigatorID": self.debugIdentifier ?? "nil",
                         "navigatorObjectID": self.debugObjectID,
@@ -2825,7 +2848,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         )
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
             debugPrint(
-                "# READER navigator.flushPendingRequest.issue",
+                "# EPUB  navigator.flushPendingRequest.issue",
                 [
                     "navigatorID": debugIdentifier ?? "nil",
                     "navigatorObjectID": debugObjectID,
@@ -2843,7 +2866,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         case .deferUntilAttached:
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
-                    "# READER navigator.flushPendingRequest.deferredUntilFullyAttached",
+                    "# EPUB  navigator.flushPendingRequest.deferredUntilFullyAttached",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
@@ -2858,7 +2881,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         case .skipAlreadyLoading:
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
-                    "# READER navigator.flushPendingRequest.skipAlreadyLoading",
+                    "# EPUB  navigator.flushPendingRequest.skipAlreadyLoading",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
@@ -2873,7 +2896,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             let nextGeneration = pendingRequestLoadGeneration
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
-                    "# READER navigator.flushPendingRequest.restart.fire",
+                    "# EPUB  navigator.flushPendingRequest.restart.fire",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
@@ -2960,7 +2983,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         let isReadyForRequest = webView.window != nil && webView.superview != nil
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
             debugPrint(
-                "# READER navigator.windowAttachmentChanged",
+                "# EPUB  navigator.windowAttachmentChanged",
                 [
                     "navigatorID": debugIdentifier ?? "nil",
                     "navigatorObjectID": debugObjectID,
@@ -2974,7 +2997,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard isAttached, let request = pendingRequest else { return }
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
             debugPrint(
-                "# READER navigator.flushPendingRequest.attached",
+                "# EPUB  navigator.flushPendingRequest.attached",
                 [
                     "navigatorID": debugIdentifier ?? "nil",
                     "navigatorObjectID": debugObjectID,
@@ -2985,7 +3008,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard webView.navigationDelegate != nil else {
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                 debugPrint(
-                    "# READER navigator.flushPendingRequest.deferredUntilDelegate",
+                    "# EPUB  navigator.flushPendingRequest.deferredUntilDelegate",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
@@ -3022,7 +3045,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             )
             if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                 debugPrint(
-                    "# READER navigator.attach",
+                    "# EPUB  navigator.attach",
                     [
                         "navigatorID": debugIdentifier ?? "nil",
                         "navigatorObjectID": debugObjectID,
@@ -3048,7 +3071,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
-                        "# READER navigator.flushPendingRequest",
+                        "# EPUB  navigator.flushPendingRequest",
                         [
                             "navigatorID": debugIdentifier ?? "nil",
                             "navigatorObjectID": debugObjectID,
@@ -3059,7 +3082,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 if webView.window == nil || webView.superview == nil {
                     if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                         debugPrint(
-                            "# READER navigator.flushPendingRequest.deferred",
+                            "# EPUB  navigator.flushPendingRequest.deferred",
                             [
                                 "navigatorID": debugIdentifier ?? "nil",
                                 "navigatorObjectID": debugObjectID,
@@ -3090,7 +3113,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
-                        "# READER navigator.flushPendingDataLoad",
+                        "# EPUB  navigator.flushPendingDataLoad",
                         [
                             "navigatorID": debugIdentifier ?? "nil",
                             "navigatorObjectID": debugObjectID,
@@ -3125,7 +3148,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
-                        "# READER navigator.flushPendingHTML",
+                        "# EPUB  navigator.flushPendingHTML",
                         [
                             "navigatorID": debugIdentifier ?? "nil",
                             "navigatorObjectID": debugObjectID,
@@ -3276,13 +3299,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
             [
                 "baseURL": baseURL.absoluteString,
                 "bytes": "\(data.count)",
+                "traceID": currentReaderLoadTrace?.id.uuidString ?? "nil",
                 "webViewID": readerLoadObjectIDString(webView),
                 "hasSuperview": "\(webView.superview != nil)",
                 "hasWindow": "\(webView.window != nil)"
             ]
         )
         debugPrint(
-            "# READER navigator.load.data",
+            "# EPUB  navigator.load.data",
             "bytes=\(data.count)",
             "mimeType=\(mimeType)",
             "baseURL=\(baseURL.absoluteString)"
@@ -3294,6 +3318,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
             baseURL: baseURL
         )
         currentReaderLoadTrace?.directDataReturnedAt = Date()
+        readerLoadLog(
+            "webViewNavigator.dataLoadReturned",
+            [
+                "baseURL": baseURL.absoluteString,
+                "elapsedSinceDataLoadIssued": readerLoadDirectDataElapsedString(),
+                "traceID": currentReaderLoadTrace?.id.uuidString ?? "nil",
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
+        )
     }
 
     @MainActor
@@ -3575,7 +3608,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         ).value
                         handled = true
                         debugPrint(
-                            "# READER scriptCaller.error.resultTypeUnsupported.coerced",
+                            "# EPUB  scriptCaller.error.resultTypeUnsupported.coerced",
                             "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                             "note=coerced to string for href"
                         )
@@ -3589,7 +3622,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     result = nil
                     handled = true
                     debugPrint(
-                        "# READER scriptCaller.error.resultTypeUnsupported",
+                        "# EPUB  scriptCaller.error.resultTypeUnsupported",
                         "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                         "jsPrefix=\(js.prefix(80))",
                         "note=treated as nil"
@@ -3605,7 +3638,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 result = nil
                 handled = true
                 debugPrint(
-                    "# READER scriptCaller.error.invalidFrame",
+                    "# EPUB  scriptCaller.error.invalidFrame",
                     "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                     "jsPrefix=\(js.prefix(80))",
                     "note=cleared stale frame; returning nil"
@@ -3613,7 +3646,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
             if !handled {
                 debugPrint(
-                    "# READER scriptCaller.error",
+                    "# EPUB  scriptCaller.error",
                     "code=\(nsError.code)",
                     "domain=\(nsError.domain)",
                     "description=\(nsError.localizedDescription)",
@@ -3667,14 +3700,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
         if frame.request.url == nil {
             debugPrint(
-                "# READER scriptCaller.frame.nilURL",
+                "# EPUB  scriptCaller.frame.nilURL",
                 "uuid=\(uuid)",
                 "debug=\(frame.debugDescription)",
                 "isMain=\(frame.isMainFrame)"
             )
         }
         debugPrint(
-            "# READER scriptCaller.frame.add",
+            "# EPUB  scriptCaller.frame.add",
             "uuid=\(uuid)",
             "url=\(frame.request.url?.absoluteString ?? "<nil>")",
             "canonical=\(canonicalFrameKey(for: resolvedCanonicalURL) ?? "<nil>")",
@@ -3688,7 +3721,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public func removeAllMultiTargetFrames() {
         if !multiTargetFrames.isEmpty || !framesByCanonicalURL.isEmpty {
             debugPrint(
-                "# READER scriptCaller.frame.clear",
+                "# EPUB  scriptCaller.frame.clear",
                 "byUUID=\(multiTargetFrames.count)",
                 "byCanonical=\(framesByCanonicalURL.count)"
             )
@@ -5746,7 +5779,7 @@ extension WebView: NSViewRepresentable {
             let currentURL = webView.url?.absoluteString ?? "nil"
             let resolvedWorld = world ?? .page
             let startedAt = Date()
-            print("# READER scriptCaller.call.start",
+            print("# EPUB  scriptCaller.call.start",
                   "url=\(currentURL)",
                   "frameURL=\(frameURL)",
                   "isMainFrame=\(isMainFrame)",
@@ -5763,7 +5796,7 @@ extension WebView: NSViewRepresentable {
                 let elapsed = Date().timeIntervalSince(startedAt)
                 let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
                 let stringLength = (value as? String)?.count
-                print("# READER scriptCaller.call.finish",
+                print("# EPUB  scriptCaller.call.finish",
                       "url=\(currentURL)",
                       "frameURL=\(frameURL)",
                       "isMainFrame=\(isMainFrame)",
@@ -5775,7 +5808,7 @@ extension WebView: NSViewRepresentable {
                 return WebViewScriptCaller.JavaScriptEvaluationResult(value)
             } catch {
                 let elapsed = Date().timeIntervalSince(startedAt)
-                print("# READER scriptCaller.call.error",
+                print("# EPUB  scriptCaller.call.error",
                       "url=\(currentURL)",
                       "frameURL=\(frameURL)",
                       "isMainFrame=\(isMainFrame)",
@@ -6273,7 +6306,7 @@ extension WebView {
         }
         coordinator.lastUserScriptsContentController = userContentController
         if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
-            debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
+            debugPrint("# EPUB  userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
             coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         }
         (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
