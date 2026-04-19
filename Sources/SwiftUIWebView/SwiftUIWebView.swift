@@ -2261,6 +2261,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             (function() {
                 const body = document.body;
                 const html = document.documentElement;
+                const bodyStyle = body ? window.getComputedStyle(body) : null;
                 const bodyText = (body?.innerText || "").trim();
                 const bodyHTML = body?.innerHTML || "";
                 return {
@@ -2269,7 +2270,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyChildElementCount: body?.childElementCount || 0,
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
-                    hasReaderRenderReady: html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1',
+                    hasReaderRenderReady:
+                        (html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
+                        && !!document.getElementById("reader-content")
+                        && (html?.dataset?.manabiFontPending ?? null) !== '1'
+                        && bodyStyle?.visibility !== 'hidden'
+                        && bodyStyle?.display !== 'none'
+                        && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
                     hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
                     titleLength: (document.title || "").length
                 };
@@ -4200,8 +4207,13 @@ fileprivate struct ReaderDocStateUserScript {
                 hasReaderContent: !!document.getElementById('reader-content'),
                 hasReadabilityGlobal: typeof window.manabi_readability === 'function',
                 hasReaderRenderReady:
-                    document.documentElement?.dataset?.manabiReaderRenderReady === '1'
-                    || document.body?.dataset?.manabiReaderRenderReady === '1',
+                    (document.documentElement?.dataset?.manabiReaderRenderReady === '1'
+                    || document.body?.dataset?.manabiReaderRenderReady === '1')
+                    && !!document.getElementById('reader-content')
+                    && (document.documentElement?.dataset?.manabiFontPending ?? null) !== '1'
+                    && window.getComputedStyle(document.body).visibility !== 'hidden'
+                    && window.getComputedStyle(document.body).display !== 'none'
+                    && Number.parseFloat(window.getComputedStyle(document.body).opacity || '1') > 0.01,
                 reason
             };
         }
