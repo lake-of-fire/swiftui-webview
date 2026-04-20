@@ -39,6 +39,26 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
     }
 }
 
+@inline(__always)
+private func isEpubLikeURL(_ url: URL?) -> Bool {
+    guard let url else { return false }
+    let absoluteString = url.absoluteString.lowercased()
+    return absoluteString.hasPrefix("ebook://") || url.pathExtension.lowercased() == "epub"
+}
+
+@inline(__always)
+private func navigationTypeDescription(_ navigationType: WKNavigationType) -> String {
+    switch navigationType {
+    case .linkActivated: return "linkActivated"
+    case .formSubmitted: return "formSubmitted"
+    case .backForward: return "backForward"
+    case .reload: return "reload"
+    case .formResubmitted: return "formResubmitted"
+    case .other: return "other"
+    @unknown default: return "unknown"
+    }
+}
+
 private let readerLoadCommitGapWarningThreshold: TimeInterval = 0.750
 private let readerLoadStaleLoadingStateThreshold: Double = 0.050
 private let internalReaderLoaderStartedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.startedAt."
@@ -893,6 +913,11 @@ public class WebViewCoordinator: NSObject {
     private var pendingPaginationApplyTask: Task<Void, Never>?
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
+    private var lastEpubReaderDocStateSignature: String?
+    private var lastMainFrameNavigationRequestURL: URL?
+    private var lastMainFrameNavigationSourceURL: URL?
+    private var lastMainFrameNavigationMainDocumentURL: URL?
+    private var lastMainFrameNavigationType: WKNavigationType?
     var lastHostUpdateContextSignature: String?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
@@ -1273,6 +1298,35 @@ public class WebViewCoordinator: NSObject {
             )
         }
     }
+
+    @MainActor
+    private func logEpubNavigationTransition(_ stage: String, webView: WKWebView, requestURL: URL? = nil) {
+        let currentURL = webView.url
+        let targetURL = requestURL ?? lastMainFrameNavigationRequestURL ?? navigator.activeReaderLoadRequestURL(for: currentURL)
+        let sourceURL = lastMainFrameNavigationSourceURL ?? self.webView.state.pageURL
+        let isRelevant = isEpubLikeURL(targetURL) || isEpubLikeURL(currentURL) || isEpubLikeURL(sourceURL)
+        guard isRelevant else { return }
+
+        let backList = webView.backForwardList.backList
+        let forwardList = webView.backForwardList.forwardList
+        let navigationType = lastMainFrameNavigationType.map(navigationTypeDescription) ?? "nil"
+        debugPrint(
+            "# EPUB  webView.nav.epubTransition.\(stage)",
+            "sourceURL=\(sourceURL.absoluteString)",
+            "requestURL=\(targetURL?.absoluteString ?? "nil")",
+            "currentURL=\(currentURL?.absoluteString ?? "nil")",
+            "mainDocumentURL=\(lastMainFrameNavigationMainDocumentURL?.absoluteString ?? "nil")",
+            "navigationType=\(navigationType)",
+            "canGoBack=\(webView.canGoBack)",
+            "canGoForward=\(webView.canGoForward)",
+            "backDepth=\(backList.count)",
+            "forwardDepth=\(forwardList.count)",
+            "backItemURL=\(backList.last?.url.absoluteString ?? "nil")",
+            "forwardItemURL=\(forwardList.first?.url.absoluteString ?? "nil")",
+            "statePageURL=\(self.webView.state.pageURL.absoluteString)",
+            "isLoading=\(webView.isLoading)"
+        )
+    }
     
     @discardableResult func setLoading(
         _ isLoading: Bool,
@@ -1535,20 +1589,26 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let reason = body["reason"] as? String ?? "unknown"
             let readyState = body["readyState"] as? String ?? "unknown"
             let elapsedMs = body["elapsedMs"].map { String(describing: $0) } ?? "nil"
+            let hasReaderContentBool = body["hasReaderContent"] as? Bool ?? false
             let hasReaderContent = body["hasReaderContent"].map { String(describing: $0) } ?? "nil"
             let hasReaderRenderReady = body["hasReaderRenderReady"] as? Bool
             let manabiFontPending = body["manabiFontPending"].map { String(describing: $0) } ?? "nil"
             let manabiFontReady = body["manabiFontReady"].map { String(describing: $0) } ?? "nil"
+            let bodyLoading = body["bodyLoading"].map { String(describing: $0) } ?? "nil"
             let hasCustomFontStyle = body["hasCustomFontStyle"].map { String(describing: $0) } ?? "nil"
             let hasCustomFontGate = body["hasCustomFontGate"].map { String(describing: $0) } ?? "nil"
             let fontsStatus = body["fontsStatus"].map { String(describing: $0) } ?? "nil"
             let bodyDisplay = body["bodyDisplay"] as? String ?? "nil"
             let bodyVisibility = body["bodyVisibility"] as? String ?? "nil"
             let bodyOpacity = body["bodyOpacity"].map { String(describing: $0) } ?? "nil"
+            let hasVisibleFoliateView = body["hasVisibleFoliateView"].map { String(describing: $0) } ?? "nil"
             let visibleMarkAsReadButtonCount = body["visibleMarkAsReadButtonCount"].map { String(describing: $0) } ?? "nil"
             let readerContentTextLength = body["readerContentTextLength"].map { String(describing: $0) } ?? "nil"
             let readerContentRectDescription = (body["readerContentRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
+            let readerStageRectDescription = (body["readerStageRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
+            let foliateViewRectDescription = (body["foliateViewRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             let centerElementDescription = (body["elementAtCenter"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
+            let centerClosestReaderContentDescription = (body["centerClosestReaderContent"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             debugPrint(
                 "# READERLOAD stage=readerDocState.message",
                 "pageURL=\(webView.state.pageURL.absoluteString)",
@@ -1560,6 +1620,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 "hasReaderRenderReady=\(String(describing: hasReaderRenderReady))",
                 "manabiFontPending=\(manabiFontPending)",
                 "manabiFontReady=\(manabiFontReady)",
+                "bodyLoading=\(bodyLoading)",
                 "hasCustomFontStyle=\(hasCustomFontStyle)",
                 "hasCustomFontGate=\(hasCustomFontGate)",
                 "fontsStatus=\(fontsStatus)",
@@ -1571,6 +1632,57 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 "readerContentRect=\(readerContentRectDescription)",
                 "elementAtCenter=\(centerElementDescription)"
             )
+            let isEBookDocState = webView.state.pageURL.absoluteString.hasPrefix("ebook://") || href.hasPrefix("ebook://")
+            if isEBookDocState {
+                let epubSignature = [
+                    href,
+                    reason,
+                    readyState,
+                    hasReaderContent,
+                    String(describing: hasReaderRenderReady),
+                    hasVisibleFoliateView,
+                    visibleMarkAsReadButtonCount,
+                    readerContentTextLength,
+                    bodyDisplay,
+                    bodyVisibility,
+                    bodyOpacity,
+                    manabiFontPending,
+                    manabiFontReady,
+                    bodyLoading,
+                    fontsStatus,
+                    readerContentRectDescription,
+                    foliateViewRectDescription,
+                    centerElementDescription
+                ].joined(separator: "|")
+                if lastEpubReaderDocStateSignature != epubSignature {
+                    lastEpubReaderDocStateSignature = epubSignature
+                    debugPrint(
+                        "# EPUB  readerDocState.probe",
+                        "pageURL=\(webView.state.pageURL.absoluteString)",
+                        "href=\(href)",
+                        "reason=\(reason)",
+                        "readyState=\(readyState)",
+                        "elapsedMs=\(elapsedMs)",
+                        "hasReaderContent=\(hasReaderContentBool)",
+                        "hasReaderRenderReady=\(String(describing: hasReaderRenderReady))",
+                        "hasVisibleFoliateView=\(hasVisibleFoliateView)",
+                        "visibleMarkAsReadButtonCount=\(visibleMarkAsReadButtonCount)",
+                        "readerContentTextLength=\(readerContentTextLength)",
+                        "readerContentRect=\(readerContentRectDescription)",
+                        "readerStageRect=\(readerStageRectDescription)",
+                        "foliateViewRect=\(foliateViewRectDescription)",
+                        "centerElement=\(centerElementDescription)",
+                        "centerClosestReaderContent=\(centerClosestReaderContentDescription)",
+                        "bodyDisplay=\(bodyDisplay)",
+                        "bodyVisibility=\(bodyVisibility)",
+                        "bodyOpacity=\(bodyOpacity)",
+                        "bodyLoading=\(bodyLoading)",
+                        "manabiFontPending=\(manabiFontPending)",
+                        "manabiFontReady=\(manabiFontReady)",
+                        "fontsStatus=\(fontsStatus)"
+                    )
+                }
+            }
             if let hasReaderRenderReady,
                webView.state.hasReaderRenderReady != hasReaderRenderReady {
                 var newState = webView.state
@@ -1649,6 +1761,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# EPUB  webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+        logEpubNavigationTransition("finish", webView: webView)
         let finishNow = Date()
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
         readerLoadLog(
@@ -1779,8 +1892,22 @@ extension WebViewCoordinator: WKNavigationDelegate {
             (function() {
                 const body = document.body;
                 const html = document.documentElement;
+                const bodyStyle = body ? window.getComputedStyle(body) : null;
+                const readerContent = document.getElementById("reader-content");
+                const readerStage = document.getElementById("reader-stage");
+                const foliateView = readerStage?.querySelector?.("foliate-view") ?? document.querySelector("foliate-view");
+                const foliateViewStyle = foliateView ? window.getComputedStyle(foliateView) : null;
+                const foliateViewRect = foliateView?.getBoundingClientRect?.() ?? null;
                 const bodyText = (body?.innerText || "").trim();
                 const bodyHTML = body?.innerHTML || "";
+                const hasReaderModeContent = !!readerContent;
+                const hasVisibleFoliateView = !!foliateView
+                    && !!foliateViewRect
+                    && foliateViewRect.width > 1
+                    && foliateViewRect.height > 1
+                    && foliateViewStyle?.visibility !== 'hidden'
+                    && foliateViewStyle?.display !== 'none'
+                    && Number.parseFloat(foliateViewStyle?.opacity || "1") > 0.01;
                 return {
                     documentURL: document.URL.toString(),
                     readyState: document.readyState,
@@ -1788,8 +1915,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
                     hasReaderRenderReady:
-                        (html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
-                        && !!document.getElementById("reader-content")
+                        (((html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
+                        && hasReaderModeContent)
+                        || hasVisibleFoliateView)
                         && (html?.dataset?.manabiFontPending ?? null) !== '1'
                         && bodyStyle?.visibility !== 'hidden'
                         && bodyStyle?.display !== 'none'
@@ -1904,6 +2032,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# EPUB  webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+        logEpubNavigationTransition("commit", webView: webView)
         let commitNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
         navigator.readerLoadCommittedAt = commitNow
@@ -1947,6 +2076,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         debugPrint("# EPUB  webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+        logEpubNavigationTransition("start", webView: webView)
         let provisionalNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
         navigator.readerLoadProvisionalStartedAt = provisionalNow
@@ -2047,6 +2177,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
         let requestURL = navigationAction.request.url
+        if navigationAction.targetFrame?.isMainFrame == true {
+            lastMainFrameNavigationSourceURL = webView.url ?? self.webView.state.pageURL
+            lastMainFrameNavigationRequestURL = requestURL
+            lastMainFrameNavigationMainDocumentURL = navigationAction.request.mainDocumentURL
+            lastMainFrameNavigationType = navigationAction.navigationType
+            logEpubNavigationTransition("decide", webView: webView, requestURL: requestURL)
+        }
         let isInternalLocalRequest = requestURL?.scheme?.lowercased() == "internal"
             && requestURL?.host?.lowercased() == "local"
         if let requestURL, isInternalLocalRequest {
@@ -4029,22 +4166,36 @@ fileprivate struct ReaderDocStateUserScript {
             const html = document.documentElement;
             const body = document.body;
             const readerContent = document.getElementById("reader-content");
+            const readerStage = document.getElementById("reader-stage");
+            const foliateView = readerStage?.querySelector?.("foliate-view") ?? document.querySelector("foliate-view");
             const bodyStyle = body ? window.getComputedStyle(body) : null;
             const htmlStyle = html ? window.getComputedStyle(html) : null;
+            const foliateViewStyle = foliateView ? window.getComputedStyle(foliateView) : null;
             const bodyRect = body?.getBoundingClientRect?.() ?? null;
             const readerContentRect = readerContent?.getBoundingClientRect?.() ?? null;
+            const readerStageRect = readerStage?.getBoundingClientRect?.() ?? null;
+            const foliateViewRect = foliateView?.getBoundingClientRect?.() ?? null;
             const centerX = Math.max(0, Math.round(window.innerWidth / 2));
             const centerY = Math.max(0, Math.round(window.innerHeight / 2));
             const elementAtCenter = document.elementFromPoint(centerX, centerY);
+            const hasReaderModeContent = !!readerContent;
+            const hasVisibleFoliateView = !!foliateView
+                && !!foliateViewRect
+                && foliateViewRect.width > 1
+                && foliateViewRect.height > 1
+                && foliateViewStyle?.visibility !== 'hidden'
+                && foliateViewStyle?.display !== 'none'
+                && Number.parseFloat(foliateViewStyle?.opacity || "1") > 0.01;
             return {
                 href: window.location.href,
                 elapsedMs: rounded(bootstrapNow() - bootstrapStartedAt),
                 readyState: document.readyState,
                 hasBody: !!body,
-                hasReaderContent: !!readerContent,
+                hasReaderContent: hasReaderModeContent || hasVisibleFoliateView,
                 hasReadabilityGlobal: typeof window.manabi_readability === 'function',
                 manabiFontPending: html?.dataset?.manabiFontPending ?? null,
                 manabiFontReady: html?.dataset?.manabiFontReady ?? null,
+                bodyLoading: body?.classList?.contains?.("loading") ?? false,
                 hasCustomFontStyle: !!document.getElementById("manabi-custom-fonts-inline"),
                 hasCustomFontGate: !!document.getElementById("manabi-custom-font-gate"),
                 fontsStatus: document.fonts?.status ?? null,
@@ -4065,6 +4216,19 @@ fileprivate struct ReaderDocStateUserScript {
                     width: rounded(readerContentRect.width),
                     height: rounded(readerContentRect.height)
                 } : null,
+                readerStageRect: readerStageRect ? {
+                    x: rounded(readerStageRect.x),
+                    y: rounded(readerStageRect.y),
+                    width: rounded(readerStageRect.width),
+                    height: rounded(readerStageRect.height)
+                } : null,
+                foliateViewRect: foliateViewRect ? {
+                    x: rounded(foliateViewRect.x),
+                    y: rounded(foliateViewRect.y),
+                    width: rounded(foliateViewRect.width),
+                    height: rounded(foliateViewRect.height)
+                } : null,
+                hasVisibleFoliateView,
                 readerContentChildCount: readerContent?.childElementCount ?? null,
                 readerContentTextLength: (readerContent?.textContent || "").trim().length,
                 visibleMarkAsReadButtonCount: Array.from(document.querySelectorAll(".manabi-mark-section-as-read-button")).filter((button) => {
@@ -4074,9 +4238,10 @@ fileprivate struct ReaderDocStateUserScript {
                         && Number.parseFloat(style.opacity || "1") > 0.01;
                 }).length,
                 hasReaderRenderReady:
-                    (html?.dataset?.manabiReaderRenderReady === '1'
+                    (((html?.dataset?.manabiReaderRenderReady === '1'
                     || body?.dataset?.manabiReaderRenderReady === '1')
-                    && !!readerContent
+                    && hasReaderModeContent)
+                    || hasVisibleFoliateView)
                     && (html?.dataset?.manabiFontPending ?? null) !== '1'
                     && bodyStyle?.visibility !== 'hidden'
                     && bodyStyle?.display !== 'none'
