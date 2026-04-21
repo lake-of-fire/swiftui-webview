@@ -2174,6 +2174,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
                 "elapsedSinceCommit": readerLoadElapsedString(since: navigator.readerLoadCommittedAt, now: finishNow),
+                "elapsedSinceDataLoadIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: finishNow),
+                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: finishNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: finishNow),
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
@@ -2418,6 +2420,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             "webView.nav.commit",
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceDataLoadIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: commitNow),
+                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: commitNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: commitNow),
                 "elapsedSinceProvisionalStart": readerLoadElapsedString(since: navigator.readerLoadProvisionalStartedAt, now: commitNow),
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
@@ -2528,6 +2532,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             "webView.nav.provisionalStart",
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceDataLoadIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: provisionalNow),
+                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: provisionalNow),
                 "elapsedSinceIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: provisionalNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: provisionalNow),
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
@@ -2767,6 +2773,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor fileprivate var readerLoadRequestedAt: Date?
     @MainActor fileprivate var readerLoadRequestedURL: URL?
     @MainActor fileprivate var readerLoadIssuedAt: Date?
+    @MainActor fileprivate var readerLoadDirectDataReturnedAt: Date?
     @MainActor fileprivate var readerLoadProvisionalStartedAt: Date?
     @MainActor fileprivate var readerLoadCommittedAt: Date?
     public var attachFallbackURL: URL?
@@ -2787,6 +2794,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadRequestedAt = now
         readerLoadRequestedURL = request.url
         readerLoadIssuedAt = nil
+        readerLoadDirectDataReturnedAt = nil
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
         readerLoadLog(
@@ -2923,6 +2931,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "requestURL": readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+    }
+
+    @MainActor
+    fileprivate func readerLoadDirectDataReturnedElapsedString(now: Date = Date()) -> String {
+        readerLoadElapsedString(since: readerLoadDirectDataReturnedAt, now: now)
     }
 
     @MainActor
@@ -3476,6 +3489,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadRequestedAt = Date()
         readerLoadRequestedURL = baseURL
         readerLoadIssuedAt = readerLoadRequestedAt
+        readerLoadDirectDataReturnedAt = nil
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
         readerLoadLog(
@@ -3511,11 +3525,28 @@ public class WebViewNavigator: NSObject, ObservableObject {
             "mimeType=\(mimeType)",
             "baseURL=\(baseURL.absoluteString)"
         )
+        readerLoadLog(
+            "webViewNavigator.dataLoadDirect",
+            [
+                "baseURL": baseURL.absoluteString,
+                "bytes": "\(data.count)",
+                "hasSuperview": "\(webView.superview != nil)",
+                "hasWindow": "\(webView.window != nil)"
+            ]
+        )
         webView.load(
             data,
             mimeType: mimeType,
             characterEncodingName: characterEncodingName,
             baseURL: baseURL
+        )
+        readerLoadDirectDataReturnedAt = Date()
+        readerLoadLog(
+            "webViewNavigator.dataLoadReturned",
+            [
+                "baseURL": baseURL.absoluteString,
+                "elapsedSinceDataLoadIssued": readerLoadElapsedString(since: readerLoadIssuedAt, now: readerLoadDirectDataReturnedAt ?? Date())
+            ]
         )
     }
 
@@ -3531,6 +3562,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadRequestedAt = Date()
         readerLoadRequestedURL = baseURL
         readerLoadIssuedAt = readerLoadRequestedAt
+        readerLoadDirectDataReturnedAt = nil
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
         readerLoadLog(
@@ -4192,13 +4224,190 @@ fileprivate struct ReaderDocStateUserScript {
 (function () {
     try {
         const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.readerDocState;
+        const printHandler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.print;
         if (!handler || typeof handler.postMessage !== "function") { return; }
         let stateMachine = { stopped: false, attempts: 0 };
         let rafHandle = { value: 0 };
         let timeoutHandle = { value: 0 };
+        let lastTextVisibleSignature = null;
         let observer = new MutationObserver(() => {
             postState("mutation");
         });
+        function hiddenReason(node) {
+            if (!node || typeof window.getComputedStyle !== "function") { return null; }
+            let current = node;
+            while (current) {
+                const style = window.getComputedStyle(current);
+                const opacity = Number.parseFloat(style.opacity || "1");
+                if (style.visibility === "hidden") { return "visibility:hidden"; }
+                if (style.display === "none") { return "display:none"; }
+                if (current.hidden) { return "hidden-attr"; }
+                if (opacity <= 0.01) { return "opacity"; }
+                current = current.parentElement ?? null;
+            }
+            return null;
+        }
+        function trackingStateForSegment(segment) {
+            if (!segment?.classList) { return "unknown"; }
+            if (segment.classList.contains("manabi-tracking-known")) { return "known"; }
+            if (segment.classList.contains("manabi-tracking-learning") || segment.classList.contains("manabi-tracking-flashcard-created-in-manabi-reader")) {
+                return "learning";
+            }
+            if (segment.classList.contains("manabi-tracking-read")) { return "familiar"; }
+            if (segment.classList.contains("manabi-tracking-suspended")) { return "suspended"; }
+            return "unknown";
+        }
+        function summarizeSegment(segment) {
+            if (!segment) { return null; }
+            return {
+                id: segment.id ?? null,
+                state: trackingStateForSegment(segment),
+                className: segment.className || null,
+                textSample: typeof segment.textContent === "string" ? segment.textContent.trim().slice(0, 48) : null,
+                hasSurface: segment.querySelector("manabi-surface") !== null,
+                hiddenReason: hiddenReason(segment),
+                jlptLevel: segment.dataset?.jlptLevel ?? null,
+                lookup: segment.dataset?.jmdictSearchString ?? null
+            };
+        }
+        function summarizeSettings(body, html) {
+            return {
+                colorScheme: body?.dataset?.manabiColorScheme ?? null,
+                lightTheme: body?.dataset?.manabiLightTheme ?? null,
+                darkTheme: body?.dataset?.manabiDarkTheme ?? null,
+                trackingEnabled: body?.dataset?.manabiTrackingEnabled ?? null,
+                trackingHighlightsEnabled: body?.dataset?.manabiTrackingHighlightsEnabled ?? null,
+                learningStatusVisibility: body?.dataset?.manabiLearningStatusVisibility ?? null,
+                showFamiliar: body?.dataset?.manabiShowFamiliar ?? null,
+                showKnown: body?.dataset?.manabiShowKnown ?? null,
+                lookupHighlightMode: body?.dataset?.manabiLookupHighlightMode ?? null,
+                furiganaEnabled: body?.dataset?.manabiFuriganaEnabled ?? null,
+                readerRenderReady: body?.dataset?.manabiReaderRenderReady ?? html?.dataset?.manabiReaderRenderReady ?? null,
+                fontPending: html?.dataset?.manabiFontPending ?? null,
+                fontReady: html?.dataset?.manabiFontReady ?? null,
+                layoutComplete: html?.dataset?.manabiLayoutComplete ?? null,
+                subscriptionActive: body?.dataset?.manabiSubscriptionIsActive ?? null
+            };
+        }
+        function summarizeTracking(readerContent) {
+            const root = readerContent ?? document;
+            const segments = Array.from(root.querySelectorAll("manabi-segment"));
+            const surfaces = Array.from(root.querySelectorAll("manabi-surface"));
+            const trackedWords = (typeof document.manabi_trackedWords === "object" && document.manabi_trackedWords) ? document.manabi_trackedWords : null;
+            const trackedWordKeys = trackedWords ? Object.keys(trackedWords) : [];
+            const counts = {
+                segments: segments.length,
+                surfaces: surfaces.length,
+                applied: 0,
+                familiar: 0,
+                learning: 0,
+                known: 0,
+                suspended: 0,
+                unknown: 0,
+                hiddenSegments: 0,
+                visibleSegments: 0,
+                segmentsWithoutSurface: 0
+            };
+            for (const segment of segments) {
+                if (segment.classList.contains("manabi-tracking-applied")) {
+                    counts.applied += 1;
+                }
+                const state = trackingStateForSegment(segment);
+                counts[state] = (counts[state] ?? 0) + 1;
+                if (hiddenReason(segment)) {
+                    counts.hiddenSegments += 1;
+                } else {
+                    counts.visibleSegments += 1;
+                }
+                if (!segment.querySelector("manabi-surface")) {
+                    counts.segmentsWithoutSurface += 1;
+                }
+            }
+            const samples = segments.slice(0, 8).map(summarizeSegment);
+            return {
+                counts,
+                trackedWords: {
+                    count: trackedWordKeys.length,
+                    sampleEntryIDs: trackedWordKeys.slice(0, 8)
+                },
+                samples
+            };
+        }
+        function diagnoseTextVisibleIssue(settings, tracking, state) {
+            const counts = tracking.counts;
+            const diagnoses = [];
+            if (!state?.hasReaderContent) {
+                diagnoses.push("reader-content-missing");
+                return diagnoses;
+            }
+            if (settings.fontPending === "1" && settings.fontReady !== "1") {
+                diagnoses.push("font-gate-still-pending");
+            }
+            if (settings.layoutComplete === "false") {
+                diagnoses.push("layout-still-building");
+            }
+            if (counts.segments === 0) {
+                diagnoses.push("no-tracked-segments-in-live-dom");
+                return diagnoses;
+            }
+            if (counts.applied === 0) {
+                diagnoses.push("tracking-classes-not-applied");
+            }
+            if ((tracking.trackedWords?.count ?? 0) === 0) {
+                diagnoses.push("no-tracked-words-in-js");
+            }
+            if (counts.surfaces === 0) {
+                diagnoses.push("no-manabi-surface-nodes-in-live-dom");
+            }
+            if (counts.segmentsWithoutSurface === counts.segments && counts.segments > 0) {
+                diagnoses.push("all-segments-lost-surface-wrappers");
+            }
+            if ((tracking.trackedWords?.count ?? 0) > 0 && counts.applied === 0) {
+                diagnoses.push("tracked-words-loaded-but-no-segment-status-applied");
+            }
+            if (counts.hiddenSegments === counts.segments && counts.segments > 0) {
+                diagnoses.push("all-tracked-segments-hidden");
+            }
+            if (counts.learning === 0 && counts.unknown === 0 && counts.familiar > 0 && settings.showFamiliar !== "true") {
+                diagnoses.push("only-familiar-segments-present-and-familiar-highlights-disabled");
+            }
+            if (counts.learning === 0 && counts.unknown === 0 && counts.known > 0 && settings.showKnown !== "true") {
+                diagnoses.push("known-segments-present-but-known-highlights-disabled");
+            }
+            if (diagnoses.length === 0) {
+                diagnoses.push("tracked-segments-present-check-css-rendering");
+            }
+            return diagnoses;
+        }
+        function postTextVisible(reason, state) {
+            try {
+                if (!printHandler || typeof printHandler.postMessage !== "function") { return; }
+                const body = document.body;
+                const html = document.documentElement;
+                const readerContent = document.getElementById('reader-content');
+                const tracking = summarizeTracking(readerContent);
+                const settings = summarizeSettings(body, html);
+                const payload = {
+                    message: "# TEXTVISIBLE",
+                    probeVersion: 2,
+                    reason,
+                    href: window.location.href,
+                    readyState: document.readyState,
+                    state: {
+                        hasReaderContent: !!readerContent,
+                        hasReaderRenderReady: !!state?.hasReaderRenderReady,
+                        bodyClassName: body?.className ?? null
+                    },
+                    settings,
+                    tracking,
+                    diagnosis: diagnoseTextVisibleIssue(settings, tracking, state)
+                };
+                const signature = JSON.stringify(payload);
+                if (signature === lastTextVisibleSignature) { return; }
+                lastTextVisibleSignature = signature;
+                printHandler.postMessage(payload);
+            } catch (_error) {}
+        }
         function currentState(reason) {
             return {
                 href: window.location.href,
@@ -4227,6 +4436,7 @@ fileprivate struct ReaderDocStateUserScript {
         function postState(reason) {
             const state = currentState(reason);
             handler.postMessage(state);
+            postTextVisible(reason, state);
             if (state.hasReaderRenderReady) {
                 stopPolling();
                 return true;
