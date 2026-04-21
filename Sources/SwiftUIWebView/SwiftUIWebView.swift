@@ -3762,6 +3762,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         "# EPUB  scriptCaller.error.resultTypeUnsupported",
                         "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                         "jsPrefix=\(js.prefix(80))",
+                        "containsGoToSnapshot=\(js.contains("manabiGetReaderGoToSheetSnapshot"))",
                         "note=treated as nil"
                     )
                 }
