@@ -124,6 +124,24 @@ private func isInternalReaderLoaderURL(_ url: URL?) -> Bool {
 }
 
 @inline(__always)
+private func shouldResetThroughAboutBlankBeforeInternalReaderLoad(
+    currentURL: URL?,
+    requestURL: URL?
+) -> Bool {
+    guard isInternalReaderLoaderURL(requestURL),
+          let currentURL else {
+        return false
+    }
+    if currentURL.absoluteString == "about:blank" || isInternalReaderLoaderURL(currentURL) {
+        return false
+    }
+    guard let scheme = currentURL.scheme?.lowercased() else {
+        return false
+    }
+    return !["http", "https", "about"].contains(scheme)
+}
+
+@inline(__always)
 private func readerLoadObjectIDString(_ value: AnyObject?) -> String {
     guard let value else { return "nil" }
     return String(describing: ObjectIdentifier(value))
@@ -1812,15 +1830,12 @@ public class WebViewCoordinator: NSObject {
             )
         }
         navigator.webView = webView
-        #if os(macOS)
         (webView as? EnhancedWKWebView)?.onDidMoveToWindow = { [weak navigator, weak webView] isAttached in
             guard let navigator, let webView else { return }
             Task { @MainActor in
                 navigator.handleWindowAttachmentChanged(isAttached: isAttached, webView: webView)
             }
         }
-        navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
-        #endif
         schedulePaginationStateUpdate(paginationController.attach(webView: webView))
         navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
 
@@ -2893,6 +2908,50 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    private func resetInFlightAboutBlankIfNeeded(
+        for request: URLRequest,
+        on webView: WKWebView,
+        reason: String
+    ) -> Bool {
+        guard let requestURL = request.url,
+              requestURL.absoluteString != "about:blank",
+              webView.url?.absoluteString == "about:blank"
+        else {
+            return false
+        }
+
+        let estimatedProgress = webView.estimatedProgress
+        let isLoading = webView.isLoading
+        let hasInFlightAboutBlankLoad = isLoading
+            || (estimatedProgress > readerLoadStaleLoadingStateThreshold && estimatedProgress < 0.999)
+        guard hasInFlightAboutBlankLoad else {
+            return false
+        }
+
+        pendingRequest = request
+        readerLoadLog(
+            "webViewNavigator.inFlightAboutBlankReset",
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "estimatedProgress": String(format: "%.3f", estimatedProgress),
+                "isLoading": "\(isLoading)",
+                "reason": reason,
+                "requestURL": requestURL.absoluteString,
+                "sceneState": readerLoadSceneStateString(for: webView),
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
+        )
+        webView.stopLoading()
+        schedulePendingRequestLoadRetry(
+            request: request,
+            webView: webView,
+            attempt: 1,
+            generation: pendingRequestLoadGeneration
+        )
+        return true
+    }
+
+    @MainActor
     private func markReaderLoadIssued(for request: URLRequest, reason: String) {
         let now = Date()
         readerLoadIssuedAt = now
@@ -3175,6 +3234,31 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    private func stagePendingRequestThroughAboutBlank(
+        _ request: URLRequest,
+        on webView: WKWebView,
+        diagnosticsReason: String
+    ) {
+        pendingRequest = request
+        readerLoadLog(
+            "webViewNavigator.customSchemeTransitionReset",
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "reason": diagnosticsReason,
+                "requestURL": request.url?.absoluteString ?? "nil"
+            ]
+        )
+        webView.stopLoading()
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
+        schedulePendingRequestLoadRetry(
+            request: request,
+            webView: webView,
+            attempt: 1,
+            generation: pendingRequestLoadGeneration
+        )
+    }
+
+    @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
         logPreIssueLoadState(for: request, reason: "issuePendingRequestLoad:\(diagnosticsReason)")
         if recoverFromStaleAboutBlankIfNeeded(
@@ -3182,6 +3266,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
             on: webView,
             reason: "issuePendingRequestLoad:\(diagnosticsReason)"
         ) {
+            return
+        }
+        if resetInFlightAboutBlankIfNeeded(
+            for: request,
+            on: webView,
+            reason: "issuePendingRequestLoad:\(diagnosticsReason)"
+        ) {
+            return
+        }
+        if shouldResetThroughAboutBlankBeforeInternalReaderLoad(
+            currentURL: webView.url,
+            requestURL: request.url
+        ) {
+            stagePendingRequestThroughAboutBlank(
+                request,
+                on: webView,
+                diagnosticsReason: diagnosticsReason
+            )
             return
         }
         let disposition = PendingRequestLoadDisposition.resolve(
@@ -3464,6 +3566,20 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 return
             }
             if recoverFromStaleAboutBlankIfNeeded(for: request, on: webView, reason: "navigator.load") {
+                return
+            }
+            if resetInFlightAboutBlankIfNeeded(for: request, on: webView, reason: "navigator.load") {
+                return
+            }
+            if shouldResetThroughAboutBlankBeforeInternalReaderLoad(
+                currentURL: webView.url,
+                requestURL: request.url
+            ) {
+                stagePendingRequestThroughAboutBlank(
+                    request,
+                    on: webView,
+                    diagnosticsReason: "navigator.load"
+                )
                 return
             }
             if let url = request.url, url.isFileURL {
@@ -4877,6 +4993,7 @@ enum PendingRequestLoadDisposition: Equatable {
 public class EnhancedWKWebView: WKWebView {
     var persistedUserScriptsSignature: String?
     var persistedAppliedContentRules: String?
+    public var onDidMoveToWindow: ((Bool) -> Void)?
 
     public override init(frame: CGRect, configuration: WKWebViewConfiguration) {
         super.init(frame: frame, configuration: configuration)
@@ -4887,8 +5004,6 @@ public class EnhancedWKWebView: WKWebView {
     }
 
 #if os(macOS)
-    public var onDidMoveToWindow: ((Bool) -> Void)?
-
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onDidMoveToWindow?(window != nil || superview != nil)
@@ -4901,6 +5016,16 @@ public class EnhancedWKWebView: WKWebView {
 #endif
 
 #if os(iOS)
+    public override func didMoveToWindow() {
+        super.didMoveToWindow()
+        onDidMoveToWindow?(window != nil || superview != nil)
+    }
+
+    public override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        onDidMoveToWindow?(window != nil || superview != nil)
+    }
+
     var buildMenu: BuildMenuType?
 #endif
     
