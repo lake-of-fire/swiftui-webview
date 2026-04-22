@@ -46,6 +46,9 @@ private let internalReaderLoaderStartedAtKeyPrefix = "InternalURLSchemeHandler.r
 private let internalReaderLoaderResponseAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.responseAt."
 private let internalReaderLoaderDataAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.dataAt."
 private let internalReaderLoaderFinishedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.finishedAt."
+private let activeInternalReaderLoaderTraceIDKey = "SwiftUIWebView.activeInternalReaderLoader.traceID"
+private let activeInternalReaderLoaderURLKey = "SwiftUIWebView.activeInternalReaderLoader.url"
+private let readerLoadPreProvisionalWarningThreshold: TimeInterval = 2.0
 private let readerLoadVerboseUIViewControllerLoggingEnabled =
     ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
 private let readerLoadCorrelationMaxAge: TimeInterval = 30
@@ -2542,6 +2545,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "isLoading=\(webView.isLoading)")
         let provisionalNow = Date()
         navigator.readerLoadProvisionalStartedAt = provisionalNow
+        navigator.cancelPreProvisionalWarningTask()
+        navigator.syncActiveInternalReaderLoaderSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didStartProvisionalNavigation")
         readerLoadLog(
             "webView.nav.provisionalStart",
@@ -2778,6 +2783,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
+    @MainActor private var readerLoadTraceID: UUID?
+    @MainActor private var preProvisionalWarningGeneration: Int = 0
+    @MainActor private var preProvisionalWarningTask: Task<Void, Never>?
+    @MainActor fileprivate var didLogReaderLoadHeartbeatForCurrentRequest = false
+    @MainActor fileprivate var didLogHostPreProvisionalForCurrentRequest = false
     @MainActor private var readerLoadHeartbeatGeneration: Int = 0
     @MainActor private var readerLoadHeartbeatTask: Task<Void, Never>?
     @MainActor private var contentProcessPrewarmGeneration: Int = 0
@@ -2805,6 +2815,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
         let now = Date()
+        cancelPreProvisionalWarningTask()
+        readerLoadTraceID = UUID()
+        didLogReaderLoadHeartbeatForCurrentRequest = false
+        didLogHostPreProvisionalForCurrentRequest = false
         cancelReaderLoadHeartbeat()
         readerLoadRequestedAt = now
         readerLoadRequestedURL = request.url
@@ -2812,6 +2826,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadDirectDataReturnedAt = nil
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
+        syncActiveInternalReaderLoaderSignal()
         readerLoadLog(
             "webViewNavigator.loadRequest",
             [
@@ -2955,6 +2970,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
     private func markReaderLoadIssued(for request: URLRequest, reason: String) {
         let now = Date()
         readerLoadIssuedAt = now
+        syncActiveInternalReaderLoaderSignal()
+        schedulePreProvisionalWarningIfNeeded()
         readerLoadLog(
             "webViewNavigator.requestIssued",
             [
@@ -2973,6 +2990,86 @@ public class WebViewNavigator: NSObject, ObservableObject {
             ]
         )
         startReaderLoadHeartbeatIfNeeded()
+    }
+
+    @MainActor
+    fileprivate func syncActiveInternalReaderLoaderSignal() {
+        let defaults = UserDefaults.standard
+        if let requestURL = readerLoadRequestedURL,
+           isInternalReaderLoaderURL(requestURL),
+           readerLoadIssuedAt != nil,
+           readerLoadProvisionalStartedAt == nil {
+            defaults.set(requestURL.absoluteString, forKey: activeInternalReaderLoaderURLKey)
+            defaults.set(readerLoadTraceID?.uuidString ?? requestURL.absoluteString, forKey: activeInternalReaderLoaderTraceIDKey)
+        } else {
+            defaults.removeObject(forKey: activeInternalReaderLoaderTraceIDKey)
+            defaults.removeObject(forKey: activeInternalReaderLoaderURLKey)
+        }
+    }
+
+    @MainActor
+    fileprivate func cancelPreProvisionalWarningTask() {
+        preProvisionalWarningGeneration &+= 1
+        preProvisionalWarningTask?.cancel()
+        preProvisionalWarningTask = nil
+    }
+
+    @MainActor
+    fileprivate func schedulePreProvisionalWarningIfNeeded() {
+        cancelPreProvisionalWarningTask()
+        guard let requestURL = readerLoadRequestedURL,
+              isInternalReaderLoaderURL(requestURL),
+              readerLoadIssuedAt != nil,
+              readerLoadProvisionalStartedAt == nil else {
+            syncActiveInternalReaderLoaderSignal()
+            return
+        }
+        syncActiveInternalReaderLoaderSignal()
+        let generation = preProvisionalWarningGeneration
+        let traceID = readerLoadTraceID?.uuidString ?? requestURL.absoluteString
+        preProvisionalWarningTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(readerLoadPreProvisionalWarningThreshold * 1_000_000_000))
+            guard let self,
+                  !Task.isCancelled,
+                  self.preProvisionalWarningGeneration == generation,
+                  self.readerLoadRequestedURL == requestURL,
+                  self.readerLoadProvisionalStartedAt == nil,
+                  let issuedAt = self.readerLoadIssuedAt else { return }
+            let now = Date()
+            readerLoadLog(
+                "webViewNavigator.preProvisionalWatchdog",
+                [
+                    "currentURL": self.webView?.url?.absoluteString ?? "nil",
+                    "elapsedSinceIssued": String(format: "%.3fs", now.timeIntervalSince(issuedAt)),
+                    "estimatedProgress": self.webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil",
+                    "hasSuperview": "\(self.webView?.superview != nil)",
+                    "hasWindow": "\(self.webView?.window != nil)",
+                    "isLoading": "\(self.webView?.isLoading ?? false)",
+                    "requestURL": requestURL.absoluteString,
+                    "sceneState": readerLoadSceneStateString(for: self.webView),
+                    "traceID": traceID
+                ]
+            )
+        }
+    }
+
+    @MainActor
+    fileprivate func logCompetingOperationIfNeeded(_ operation: String, metadata: [String: String] = [:]) {
+        guard let requestURL = readerLoadRequestedURL,
+              isInternalReaderLoaderURL(requestURL),
+              let issuedAt = readerLoadIssuedAt,
+              readerLoadProvisionalStartedAt == nil else { return }
+        var payload = metadata
+        payload["currentURL"] = webView?.url?.absoluteString ?? "nil"
+        payload["elapsedSinceIssued"] = String(format: "%.3fs", Date().timeIntervalSince(issuedAt))
+        payload["estimatedProgress"] = webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil"
+        payload["hasSuperview"] = "\(webView?.superview != nil)"
+        payload["hasWindow"] = "\(webView?.window != nil)"
+        payload["isLoading"] = "\(webView?.isLoading ?? false)"
+        payload["requestURL"] = requestURL.absoluteString
+        payload["sceneState"] = readerLoadSceneStateString(for: webView)
+        payload["traceID"] = readerLoadTraceID?.uuidString ?? requestURL.absoluteString
+        readerLoadLog("webViewNavigator.competingOperation.\(operation)", payload)
     }
 
     @MainActor
@@ -3024,6 +3121,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                       strongSelf.readerLoadProvisionalStartedAt == nil else {
                     return
                 }
+                guard !strongSelf.didLogReaderLoadHeartbeatForCurrentRequest else {
+                    continue
+                }
+                strongSelf.didLogReaderLoadHeartbeatForCurrentRequest = true
                 let webView = strongSelf.webView
                 readerLoadLog(
                     "webViewNavigator.requestHeartbeat",
@@ -3602,12 +3703,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask(reason: "explicitDataLoad")
         cancelReaderLoadHeartbeat(reason: "explicitDataLoad")
         cancelContentProcessPrewarm(reason: "explicitDataLoad")
+        cancelPreProvisionalWarningTask()
+        readerLoadTraceID = UUID()
         readerLoadRequestedAt = Date()
         readerLoadRequestedURL = baseURL
         readerLoadIssuedAt = readerLoadRequestedAt
         readerLoadDirectDataReturnedAt = nil
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
+        syncActiveInternalReaderLoaderSignal()
         readerLoadLog(
             "webViewNavigator.dataLoadIssued",
             [
@@ -3616,6 +3720,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "hasSuperview": "\(webView?.superview != nil)",
                 "hasWindow": "\(webView?.window != nil)",
                 "mimeType": mimeType
+            ]
+        )
+        logCompetingOperationIfNeeded(
+            "loadData",
+            metadata: [
+                "baseURL": baseURL.absoluteString,
+                "bytes": "\(data.count)"
             ]
         )
         guard let webView else {
@@ -3675,12 +3786,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask(reason: "explicitHTMLLoad")
         cancelReaderLoadHeartbeat(reason: "explicitHTMLLoad")
         cancelContentProcessPrewarm(reason: "explicitHTMLLoad")
+        cancelPreProvisionalWarningTask()
+        readerLoadTraceID = UUID()
         readerLoadRequestedAt = Date()
         readerLoadRequestedURL = baseURL
         readerLoadIssuedAt = readerLoadRequestedAt
         readerLoadDirectDataReturnedAt = nil
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
+        syncActiveInternalReaderLoaderSignal()
         readerLoadLog(
             "webViewNavigator.htmlLoadIssued",
             [
@@ -3688,6 +3802,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "bytes": "\(html.utf8.count)",
                 "hasSuperview": "\(webView?.superview != nil)",
                 "hasWindow": "\(webView?.window != nil)"
+            ]
+        )
+        logCompetingOperationIfNeeded(
+            "loadHTML",
+            metadata: [
+                "baseURL": baseURL?.absoluteString ?? "nil",
+                "bytes": "\(html.utf8.count)"
             ]
         )
         guard let webView else {
@@ -3723,6 +3844,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func reload() {
+        logCompetingOperationIfNeeded("reload", metadata: [:])
         webView?.reload()
     }
 
@@ -3750,6 +3872,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     func prepareForReloadAfterReattach() {
+        logCompetingOperationIfNeeded("prepareForReloadAfterReattach", metadata: [:])
         if let lastLoadedHTML {
             pendingHTML = lastLoadedHTML
         } else if let lastLoadedDataLoad {
@@ -3762,6 +3885,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func reloadWithoutContentRules() {
         bypassContentRulesForNextNavigation = true
+        logCompetingOperationIfNeeded("reloadWithoutContentRules", metadata: [:])
         webView?.reload()
     }
 
@@ -5852,6 +5976,13 @@ extension WebView: UIViewControllerRepresentable {
                 coordinator.prepareForReloadIfNeeded(controller: controller)
                 coordinator.navigator.prepareForReloadAfterReattach()
                 let newWebView = makeWebView(config: config, coordinator: coordinator)
+                coordinator.navigator.logCompetingOperationIfNeeded(
+                    "replaceWebView",
+                    metadata: [
+                        "newWebViewID": readerLoadObjectIDString(newWebView),
+                        "oldWebViewID": readerLoadObjectIDString(controller.webView)
+                    ]
+                )
                 controller.replaceWebView(newWebView)
                 configureWebView(newWebView, controller: controller, context: context)
             }
@@ -5938,7 +6069,9 @@ extension WebView: UIViewControllerRepresentable {
         }
         if let requestedAt, requestedBeforeProvisional {
             let waitElapsed = Date().timeIntervalSince(requestedAt)
-            if waitElapsed >= readerLoadIssueGapWarningThreshold {
+            if waitElapsed >= readerLoadIssueGapWarningThreshold,
+               !context.coordinator.navigator.didLogHostPreProvisionalForCurrentRequest {
+                context.coordinator.navigator.didLogHostPreProvisionalForCurrentRequest = true
                 let correlationBaseline = context.coordinator.navigator.readerLoadIssuedAt ?? context.coordinator.navigator.readerLoadRequestedAt
                 let requestURLString = context.coordinator.navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
                 let internalSchemeStartGap = context.coordinator.navigator.readerLoadRequestedURL.flatMap { requestedURL in
