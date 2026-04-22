@@ -5823,6 +5823,31 @@ extension WebView: UIViewControllerRepresentable {
                     "webViewID": readerLoadObjectIDString(controller.webView)
                 ]
             )
+            let pageURLString = state.pageURL.absoluteString
+            let currentURLString = controller.webView.url?.absoluteString ?? "nil"
+            if pageURLString.hasPrefix("ebook://") {
+                let scrollView = controller.webView.scrollView
+                let frame = controller.webView.frame
+                let bounds = controller.webView.bounds
+                print(
+                    "# APR21 webView.host.layoutUpdate",
+                    "pageURL=\(pageURLString)",
+                    "currentURL=\(currentURLString)",
+                    "elapsedSinceRequested=\(String(format: "%.3f", elapsedSinceRequested))",
+                    "pageTopInset=\(String(format: "%.1f", additionalSafeAreaInsets.top))",
+                    "pageBottomInset=\(String(format: "%.1f", additionalSafeAreaInsets.bottom))",
+                    "obscuredTop=\(String(format: "%.1f", resolvedObscuredInsets.top))",
+                    "obscuredBottom=\(String(format: "%.1f", resolvedObscuredInsets.bottom))",
+                    "contentInsetTop=\(String(format: "%.1f", scrollView.contentInset.top))",
+                    "contentInsetBottom=\(String(format: "%.1f", scrollView.contentInset.bottom))",
+                    "adjustedInsetTop=\(String(format: "%.1f", scrollView.adjustedContentInset.top))",
+                    "adjustedInsetBottom=\(String(format: "%.1f", scrollView.adjustedContentInset.bottom))",
+                    "contentOffsetY=\(String(format: "%.1f", scrollView.contentOffset.y))",
+                    "contentSize=\(String(format: "%.1f", scrollView.contentSize.width))x\(String(format: "%.1f", scrollView.contentSize.height))",
+                    "frame=\(String(format: "%.1f", frame.width))x\(String(format: "%.1f", frame.height))",
+                    "bounds=\(String(format: "%.1f", bounds.width))x\(String(format: "%.1f", bounds.height))"
+                )
+            }
         }
         // _obscuredInsets ignores sides, probably
         controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
