@@ -556,6 +556,7 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var pageIconURL: URL?
     public internal(set) var pageHTML: String?
     public internal(set) var hasReaderRenderReady: Bool
+    public internal(set) var mainFrameHTTPStatusCode: Int?
     public internal(set) var error: Error?
     public internal(set) var canGoBack: Bool
     public internal(set) var canGoForward: Bool
@@ -573,6 +574,7 @@ public struct WebViewState: Equatable, Sendable {
         pageIconURL: nil,
         pageHTML: nil,
         hasReaderRenderReady: false,
+        mainFrameHTTPStatusCode: nil,
         error: nil,
         canGoBack: false,
         canGoForward: false,
@@ -590,6 +592,7 @@ public struct WebViewState: Equatable, Sendable {
         && lhs.pageIconURL == rhs.pageIconURL
         && lhs.pageHTML == rhs.pageHTML
         && lhs.hasReaderRenderReady == rhs.hasReaderRenderReady
+        && lhs.mainFrameHTTPStatusCode == rhs.mainFrameHTTPStatusCode
         && lhs.error?.localizedDescription == rhs.error?.localizedDescription
         && lhs.canGoBack == rhs.canGoBack
         && lhs.canGoForward == rhs.canGoForward
@@ -2168,6 +2171,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
+        var newState = self.webView.state
+        newState.mainFrameHTTPStatusCode = nil
+        self.webView.state = newState
+        debugPrint(
+            "# 404 webView.nav.statusReset",
+            "url=\(webView.url?.absoluteString ?? "<nil>")"
+        )
     }
     
     @MainActor
@@ -2315,6 +2325,17 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "status=\(response.statusCode)",
                 "expectedLength=\(response.expectedContentLength)"
             )
+            if navigationResponse.isForMainFrame {
+                var newState = self.webView.state
+                newState.mainFrameHTTPStatusCode = response.statusCode
+                self.webView.state = newState
+                debugPrint(
+                    "# 404 webView.nav.mainFrameResponse",
+                    "url=\(response.url?.absoluteString ?? "<nil>")",
+                    "status=\(response.statusCode)",
+                    "isHTTPError=\(response.statusCode >= 400)"
+                )
+            }
         }
         return .allow
     }
