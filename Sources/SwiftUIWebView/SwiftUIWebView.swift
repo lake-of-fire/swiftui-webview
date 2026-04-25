@@ -2097,12 +2097,15 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
         } else if message.name == "swiftUIWebViewPaginationReadback" {
             guard let body = message.body as? [String: Any] else { return }
+            let refreshedState = try? paginationController.refreshReadback(reason: "runtime-pagination-readback")
             let spreadSequence = webViewPaginationSpreadSequence(from: body["spreadSequence"])
-            guard let paginationState = paginationController.updateRuntimeSpreadSequence(
+            let paginationState = paginationController.updateRuntimeSpreadSequence(
                 spreadSequence,
                 reason: "runtime-pagination-readback"
-            ) else { return }
-            schedulePaginationStateUpdate(paginationState)
+            ) ?? refreshedState
+            if let paginationState {
+                schedulePaginationStateUpdate(paginationState)
+            }
             return
         }
         /* else if message.name == "swiftUIWebViewIsWarm" {
