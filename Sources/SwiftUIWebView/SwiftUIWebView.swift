@@ -4253,7 +4253,7 @@ fileprivate struct ReaderDocStateUserScript {
                 hasVisibleFoliateView,
                 readerContentChildCount: readerContent?.childElementCount ?? null,
                 readerContentTextLength: (readerContent?.textContent || "").trim().length,
-                visibleMarkAsReadButtonCount: Array.from(document.querySelectorAll(".manabi-mark-section-as-read-button")).filter((button) => {
+                visibleMarkAsReadButtonCount: Array.from(document.querySelectorAll(".mnb-tracking-button")).filter((button) => {
                     const style = window.getComputedStyle(button);
                     return style.display !== "none"
                         && style.visibility !== "hidden"
@@ -5115,12 +5115,12 @@ public class WebViewController: UIViewController {
           const viewportX = \(x);
           const viewportY = \(y);
           const elementAtCenter = document.elementFromPoint(viewportX, viewportY);
-          const firstVisibleButton = Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).find((button) => {
+          const firstVisibleButton = Array.from(document.querySelectorAll('.mnb-tracking-button')).find((button) => {
             const style = getComputedStyle(button);
             return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
           }) ?? null;
-          const firstSegment = document.querySelector('manabi-segment');
-          const firstSurface = document.querySelector('manabi-surface');
+          const firstSegment = document.querySelector('mnb-seg');
+          const firstSurface = document.querySelector('mnb-sur');
           const describe = (node) => {
             if (!node) return null;
             const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
@@ -5147,15 +5147,15 @@ public class WebViewController: UIViewController {
             viewportY,
             bodyClassName: document.body?.className ?? null,
             readerContentClassName: document.getElementById('reader-content')?.className ?? null,
-            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).filter((button) => {
+            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.mnb-tracking-button')).filter((button) => {
               const style = getComputedStyle(button);
               return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
             }).length,
-            sectionCount: document.querySelectorAll('.manabi-tracking-section').length,
-            segmentCount: document.querySelectorAll('manabi-segment').length,
+            sectionCount: document.querySelectorAll('.mnb-tracking-section').length,
+            segmentCount: document.querySelectorAll('mnb-seg').length,
             elementAtCenter: describe(elementAtCenter),
-            centerClosestSegment: describe(elementAtCenter?.closest?.('manabi-segment') ?? null),
-            centerClosestSurface: describe(elementAtCenter?.closest?.('manabi-surface') ?? null),
+            centerClosestSegment: describe(elementAtCenter?.closest?.('mnb-seg') ?? null),
+            centerClosestSurface: describe(elementAtCenter?.closest?.('mnb-sur') ?? null),
             firstVisibleButton: describe(firstVisibleButton),
             firstSegment: describe(firstSegment),
             firstSurface: describe(firstSurface)
@@ -5255,10 +5255,10 @@ public class WebViewController: UIViewController {
           const x = \(x);
           const y = \(y);
           const element = document.elementFromPoint(x, y);
-          const closestSegment = element?.closest?.('manabi-segment') ?? null;
-          const closestSurface = element?.closest?.('manabi-surface') ?? null;
-          const closestButton = element?.closest?.('.manabi-mark-section-as-read-button') ?? null;
-          const firstVisibleButton = Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).find((button) => {
+          const closestSegment = element?.closest?.('mnb-seg') ?? null;
+          const closestSurface = element?.closest?.('mnb-sur') ?? null;
+          const closestButton = element?.closest?.('.mnb-tracking-button') ?? null;
+          const firstVisibleButton = Array.from(document.querySelectorAll('.mnb-tracking-button')).find((button) => {
             const style = getComputedStyle(button);
             return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
           }) ?? null;
@@ -5284,11 +5284,11 @@ public class WebViewController: UIViewController {
             pointX: x,
             pointY: y,
             bodyClassName: document.body?.className ?? null,
-            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.manabi-mark-section-as-read-button')).filter((button) => {
+            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.mnb-tracking-button')).filter((button) => {
               const style = getComputedStyle(button);
               return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
             }).length,
-            segmentCount: document.querySelectorAll('manabi-segment').length,
+            segmentCount: document.querySelectorAll('mnb-seg').length,
             element: describe(element),
             closestSegment: describe(closestSegment),
             closestSurface: describe(closestSurface),
