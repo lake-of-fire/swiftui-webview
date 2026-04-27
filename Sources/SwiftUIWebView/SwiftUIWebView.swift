@@ -922,15 +922,24 @@ public class WebViewCoordinator: NSObject {
     private var lastMainFrameNavigationMainDocumentURL: URL?
     private var lastMainFrameNavigationType: WKNavigationType?
     var lastHostUpdateContextSignature: String?
+    var lastAppliedHostLayoutPulseID: UInt64?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
     private weak var snapshotHostController: WebViewController?
+    weak var hostLayoutController: WebViewController?
     private var awaitingSnapshotReload = false
     private var snapshotReloadCommitted = false
     private var snapshotReloadDocumentReady = false
     private var pendingSnapshotRestore = false
     private var activeSnapshotCacheKey: WebViewSnapshotCacheKey?
+#endif
+
+#if os(iOS)
+    @MainActor
+    private func reapplyHostObscuredInsetsForNavigation(_ reason: String) {
+        hostLayoutController?.reapplyObscuredInsets(reason: reason)
+    }
 #endif
     
     // UIScrollViewDelegate
@@ -1761,6 +1770,9 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+#if os(iOS)
+        reapplyHostObscuredInsetsForNavigation("navigationFinish")
+#endif
         debugPrint("# EPUB  webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
@@ -2029,6 +2041,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+#if os(iOS)
+        reapplyHostObscuredInsetsForNavigation("navigationCommit")
+#endif
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
         }
@@ -2076,6 +2091,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+#if os(iOS)
+        reapplyHostObscuredInsetsForNavigation("navigationStart")
+#endif
         debugPrint("# EPUB  webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
@@ -4863,7 +4881,7 @@ public class WebViewController: UIViewController {
     
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        updateObscuredInsets()
+        updateObscuredInsets(reason: "viewDidLayoutSubviews")
         let size = webView.bounds.size
         if size.width > 1, size.height > 1 {
             lastKnownWebViewSize = size
@@ -4899,7 +4917,7 @@ public class WebViewController: UIViewController {
     
     override public func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
-        updateObscuredInsets()
+        updateObscuredInsets(reason: "viewSafeAreaInsetsDidChange")
     }
 
     @MainActor
@@ -4918,27 +4936,43 @@ public class WebViewController: UIViewController {
             self.obscuredInsets = obscuredInsets
             lastAppliedObscuredInsets = obscuredInsets
         }
+        if changedAdditionalSafeAreaInsets && !changedObscuredInsets {
+            updateObscuredInsets(reason: "applyHostLayout.additionalSafeAreaOnly")
+        }
+        if changedAdditionalSafeAreaInsets || changedObscuredInsets {
+            view.setNeedsLayout()
+            webView.setNeedsLayout()
+            webView.scrollView.setNeedsLayout()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await Task.yield()
+                self.updateObscuredInsets(reason: "applyHostLayout.yieldReapply")
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                self.updateObscuredInsets(reason: "applyHostLayout.delayedReapply")
+            }
+        }
 
         return (changedAdditionalSafeAreaInsets, changedObscuredInsets)
     }
     
-    private func updateObscuredInsets() {
+    private func applyObscuredInsets(_ insets: UIEdgeInsets) {
         guard let webView = view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
-        let insets = UIEdgeInsets(
-            top: obscuredInsets.top,
-            left: obscuredInsets.left,
-            bottom: obscuredInsets.bottom,
-            right: obscuredInsets.right
-        )
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
         //        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
         let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
         webView.setValue(insets, forKey: key)
         
+        let windowSafeAreaInsets = view.window?.safeAreaInsets ?? .zero
+        let unobscuredInsets = UIEdgeInsets(
+            top: max(0, windowSafeAreaInsets.top - insets.top),
+            left: 0,
+            bottom: max(0, windowSafeAreaInsets.bottom - insets.bottom),
+            right: 0
+        )
         let unobscuredArgument: [Any] = ["un", "obsc", "uredSa", "feAre", "aInsets"]
         webView.setValue(
-            UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0),
+            unobscuredInsets,
             forKey: unobscuredArgument.compactMap({ $0 as? String }).joined()
         )
         if #available(iOS 15.5, *) {
@@ -4948,12 +4982,30 @@ public class WebViewController: UIViewController {
         //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
         //            webView.setValue(insets, forKey: "obscuredInsets")
         //        webView.safeAreaInsetsDidChange()
-        //            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
-        //            let key2 = argument2.compactMap({ $0 as? String }).joined()
-        //            webView.setValue(true, forKey: key2)
-        //            webView.setValue(true, forKey: "_haveSetUnobscuredSafeAreaInsets")
-        //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
+    }
+
+    private func updateObscuredInsets(reason _: String = "unknown") {
+        let insets = UIEdgeInsets(
+            top: obscuredInsets.top,
+            left: obscuredInsets.left,
+            bottom: obscuredInsets.bottom,
+            right: obscuredInsets.right
+        )
+        applyObscuredInsets(insets)
+    }
+
+    @MainActor
+    func reapplyObscuredInsets(reason: String) {
+        updateObscuredInsets(reason: reason)
+        view.setNeedsLayout()
+        webView.setNeedsLayout()
+        webView.scrollView.setNeedsLayout()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await Task.yield()
+            self.updateObscuredInsets(reason: "\(reason).yield")
+        }
     }
 
     @MainActor
@@ -4964,7 +5016,7 @@ public class WebViewController: UIViewController {
         webView = newWebView
         attachWebView(newWebView)
         isWebViewUnloaded = false
-        updateObscuredInsets()
+        updateObscuredInsets(reason: "replaceWebView")
     }
 
     @MainActor
@@ -5341,6 +5393,7 @@ public struct WebView {
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
+    let hostLayoutPulseID: UInt64
     var bounces = true
     let webViewPool: WebViewPool?
     let webViewPrewarmer: WebViewPrewarmer?
@@ -5359,6 +5412,7 @@ public struct WebView {
                 blockedHosts: Set<String>? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
+                hostLayoutPulseID: UInt64 = 0,
                 bounces: Bool = true,
                 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
@@ -5381,6 +5435,7 @@ public struct WebView {
         self.blockedHosts = blockedHosts
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
+        self.hostLayoutPulseID = hostLayoutPulseID
         self.bounces = bounces
         //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
@@ -5540,6 +5595,9 @@ extension WebView: UIViewControllerRepresentable {
         controller: WebViewController,
         context: Context
     ) {
+#if os(iOS)
+        context.coordinator.hostLayoutController = controller
+#endif
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
         let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
@@ -5845,6 +5903,40 @@ extension WebView: UIViewControllerRepresentable {
                 ]
             )
         }
+
+#if os(iOS)
+        let shouldPulseHostLayout = context.coordinator.lastAppliedHostLayoutPulseID != hostLayoutPulseID
+        if shouldPulseHostLayout {
+            context.coordinator.lastAppliedHostLayoutPulseID = hostLayoutPulseID
+            controller.view.setNeedsLayout()
+            controller.webView.setNeedsLayout()
+            controller.webView.scrollView.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            controller.webView.layoutIfNeeded()
+            controller.webView.scrollView.layoutIfNeeded()
+
+            Task { @MainActor [weak controller] in
+                guard let controller else { return }
+                controller.view.setNeedsLayout()
+                controller.webView.setNeedsLayout()
+                controller.webView.scrollView.setNeedsLayout()
+                controller.view.layoutIfNeeded()
+                controller.webView.layoutIfNeeded()
+                controller.webView.scrollView.layoutIfNeeded()
+            }
+
+            Task { @MainActor [weak controller] in
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard let controller else { return }
+                controller.view.setNeedsLayout()
+                controller.webView.setNeedsLayout()
+                controller.webView.scrollView.setNeedsLayout()
+                controller.view.layoutIfNeeded()
+                controller.webView.layoutIfNeeded()
+                controller.webView.scrollView.layoutIfNeeded()
+            }
+        }
+#endif
         // _obscuredInsets ignores sides, probably
         controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
             coordinator?.navigator.logCompetingOperationIfNeeded(
