@@ -922,7 +922,6 @@ public class WebViewCoordinator: NSObject {
     private var lastMainFrameNavigationMainDocumentURL: URL?
     private var lastMainFrameNavigationType: WKNavigationType?
     var lastHostUpdateContextSignature: String?
-    var lastAppliedHostLayoutPulseID: UInt64?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
@@ -5393,7 +5392,6 @@ public struct WebView {
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
-    let hostLayoutPulseID: UInt64
     var bounces = true
     let webViewPool: WebViewPool?
     let webViewPrewarmer: WebViewPrewarmer?
@@ -5412,7 +5410,6 @@ public struct WebView {
                 blockedHosts: Set<String>? = nil,
                 htmlInState: Bool = false,
                 obscuredInsets: EdgeInsets = EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0),
-                hostLayoutPulseID: UInt64 = 0,
                 bounces: Bool = true,
                 //                onWarm: (() async -> Void)? = nil,
                 schemeHandlers: [(WKURLSchemeHandler, String)] = [],
@@ -5435,7 +5432,6 @@ public struct WebView {
         self.blockedHosts = blockedHosts
         self.htmlInState = htmlInState
         self.obscuredInsets = obscuredInsets
-        self.hostLayoutPulseID = hostLayoutPulseID
         self.bounces = bounces
         //        self.onWarm = onWarm
         self.schemeHandlers = schemeHandlers
@@ -5904,39 +5900,6 @@ extension WebView: UIViewControllerRepresentable {
             )
         }
 
-#if os(iOS)
-        let shouldPulseHostLayout = context.coordinator.lastAppliedHostLayoutPulseID != hostLayoutPulseID
-        if shouldPulseHostLayout {
-            context.coordinator.lastAppliedHostLayoutPulseID = hostLayoutPulseID
-            controller.view.setNeedsLayout()
-            controller.webView.setNeedsLayout()
-            controller.webView.scrollView.setNeedsLayout()
-            controller.view.layoutIfNeeded()
-            controller.webView.layoutIfNeeded()
-            controller.webView.scrollView.layoutIfNeeded()
-
-            Task { @MainActor [weak controller] in
-                guard let controller else { return }
-                controller.view.setNeedsLayout()
-                controller.webView.setNeedsLayout()
-                controller.webView.scrollView.setNeedsLayout()
-                controller.view.layoutIfNeeded()
-                controller.webView.layoutIfNeeded()
-                controller.webView.scrollView.layoutIfNeeded()
-            }
-
-            Task { @MainActor [weak controller] in
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                guard let controller else { return }
-                controller.view.setNeedsLayout()
-                controller.webView.setNeedsLayout()
-                controller.webView.scrollView.setNeedsLayout()
-                controller.view.layoutIfNeeded()
-                controller.webView.layoutIfNeeded()
-                controller.webView.scrollView.layoutIfNeeded()
-            }
-        }
-#endif
         // _obscuredInsets ignores sides, probably
         controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
             coordinator?.navigator.logCompetingOperationIfNeeded(
