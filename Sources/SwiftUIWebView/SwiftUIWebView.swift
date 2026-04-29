@@ -1908,13 +1908,24 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 const html = document.documentElement;
                 const bodyStyle = body ? window.getComputedStyle(body) : null;
                 const readerContent = document.getElementById("reader-content");
+                const readerContentRect = readerContent?.getBoundingClientRect?.() ?? null;
+                const readerContentStyle = readerContent ? window.getComputedStyle(readerContent) : null;
                 const readerStage = document.getElementById("reader-stage");
                 const foliateView = readerStage?.querySelector?.("foliate-view") ?? document.querySelector("foliate-view");
                 const foliateViewStyle = foliateView ? window.getComputedStyle(foliateView) : null;
                 const foliateViewRect = foliateView?.getBoundingClientRect?.() ?? null;
                 const bodyText = (body?.innerText || "").trim();
                 const bodyHTML = body?.innerHTML || "";
+                const readerContentText = (readerContent?.textContent || "").trim();
                 const hasReaderModeContent = !!readerContent;
+                const hasVisibleReaderModeContent = !!readerContent
+                    && !!readerContentRect
+                    && readerContentRect.width > 1
+                    && readerContentRect.height > 1
+                    && readerContentStyle?.visibility !== 'hidden'
+                    && readerContentStyle?.display !== 'none'
+                    && Number.parseFloat(readerContentStyle?.opacity || "1") > 0.01
+                    && readerContentText.length > 0;
                 const hasVisibleFoliateView = !!foliateView
                     && !!foliateViewRect
                     && foliateViewRect.width > 1
@@ -1929,8 +1940,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
                     hasReaderRenderReady:
-                        (((html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
+                        ((((html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
                         && hasReaderModeContent)
+                        || hasVisibleReaderModeContent)
                         || hasVisibleFoliateView)
                         && (html?.dataset?.manabiFontPending ?? null) !== '1'
                         && bodyStyle?.visibility !== 'hidden'
@@ -4209,6 +4221,7 @@ fileprivate struct ReaderDocStateUserScript {
             const foliateView = readerStage?.querySelector?.("foliate-view") ?? document.querySelector("foliate-view");
             const bodyStyle = body ? window.getComputedStyle(body) : null;
             const htmlStyle = html ? window.getComputedStyle(html) : null;
+            const readerContentStyle = readerContent ? window.getComputedStyle(readerContent) : null;
             const foliateViewStyle = foliateView ? window.getComputedStyle(foliateView) : null;
             const bodyRect = body?.getBoundingClientRect?.() ?? null;
             const readerContentRect = readerContent?.getBoundingClientRect?.() ?? null;
@@ -4217,7 +4230,16 @@ fileprivate struct ReaderDocStateUserScript {
             const centerX = Math.max(0, Math.round(window.innerWidth / 2));
             const centerY = Math.max(0, Math.round(window.innerHeight / 2));
             const elementAtCenter = document.elementFromPoint(centerX, centerY);
+            const readerContentText = (readerContent?.textContent || "").trim();
             const hasReaderModeContent = !!readerContent;
+            const hasVisibleReaderModeContent = !!readerContent
+                && !!readerContentRect
+                && readerContentRect.width > 1
+                && readerContentRect.height > 1
+                && readerContentStyle?.visibility !== 'hidden'
+                && readerContentStyle?.display !== 'none'
+                && Number.parseFloat(readerContentStyle?.opacity || "1") > 0.01
+                && readerContentText.length > 0;
             const hasVisibleFoliateView = !!foliateView
                 && !!foliateViewRect
                 && foliateViewRect.width > 1
@@ -4269,7 +4291,7 @@ fileprivate struct ReaderDocStateUserScript {
                 } : null,
                 hasVisibleFoliateView,
                 readerContentChildCount: readerContent?.childElementCount ?? null,
-                readerContentTextLength: (readerContent?.textContent || "").trim().length,
+                readerContentTextLength: readerContentText.length,
                 visibleMarkAsReadButtonCount: Array.from(document.querySelectorAll(".mnb-tracking-button")).filter((button) => {
                     const style = window.getComputedStyle(button);
                     return style.display !== "none"
@@ -4277,9 +4299,10 @@ fileprivate struct ReaderDocStateUserScript {
                         && Number.parseFloat(style.opacity || "1") > 0.01;
                 }).length,
                 hasReaderRenderReady:
-                    (((html?.dataset?.manabiReaderRenderReady === '1'
+                    ((((html?.dataset?.manabiReaderRenderReady === '1'
                     || body?.dataset?.manabiReaderRenderReady === '1')
                     && hasReaderModeContent)
+                    || hasVisibleReaderModeContent)
                     || hasVisibleFoliateView)
                     && (html?.dataset?.manabiFontPending ?? null) !== '1'
                     && bodyStyle?.visibility !== 'hidden'
