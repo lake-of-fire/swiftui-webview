@@ -1950,6 +1950,9 @@ public class WebViewCoordinator: NSObject {
         if let error {
             newState.error = error
         }
+        if pageURLChanged {
+            newState.mainFrameHTTPStatusCode = nil
+        }
         //        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
         
@@ -2022,6 +2025,28 @@ public class WebViewCoordinator: NSObject {
 
         var newState = webView.state
         newState.loadingProgress = progress
+        webView.state = newState
+    }
+
+    @MainActor
+    fileprivate func forceClearLoadingIndicators(reason: String, pageURL: URL?) {
+        let effectivePageURL = pageURL ?? navigator.webView?.url ?? webView.state.pageURL
+        let hadLoadingState = webView.state.isLoading || webView.state.loadingProgress != nil || latestIsLoading
+        guard hadLoadingState else { return }
+
+        pendingProgressUpdateTask?.cancel()
+        pendingProgressUpdateTask = nil
+        latestIsLoading = false
+        latestEstimatedProgress = 1
+        lastEmittedProgress = nil
+
+        var newState = webView.state
+        newState.isLoading = false
+        newState.isProvisionallyNavigating = false
+        newState.loadingProgress = nil
+        if newState.pageURL.absoluteString == "about:blank" {
+            newState.pageURL = effectivePageURL
+        }
         webView.state = newState
     }
 }
@@ -2791,6 +2816,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
 }
 
 public class WebViewNavigator: NSObject, ObservableObject {
+    public struct DebugLoadSnapshot: Sendable {
+        public let currentWebViewURL: String
+        public let lastRequestURL: String
+        public let lastDataLoadBaseURL: String
+        public let lastHTMLBaseURL: String
+        public let hasAttachedWebView: Bool
+        public let isLoading: Bool
+    }
+
     fileprivate var pendingRequest: URLRequest?
     fileprivate var pendingHTML: (html: String, baseURL: URL?)?
     fileprivate var pendingDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
@@ -2829,6 +2863,19 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
     public var shouldLoadFallbackOnAttach = true
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
+    @MainActor fileprivate var forceClearLoadingIndicatorsHandler: ((String, URL?) -> Void)?
+
+    @MainActor
+    public var debugLoadSnapshot: DebugLoadSnapshot {
+        DebugLoadSnapshot(
+            currentWebViewURL: webView?.url?.absoluteString ?? "nil",
+            lastRequestURL: lastLoadedRequest?.url?.absoluteString ?? "nil",
+            lastDataLoadBaseURL: lastLoadedDataLoad?.baseURL.absoluteString ?? "nil",
+            lastHTMLBaseURL: lastLoadedHTML?.baseURL?.absoluteString ?? "nil",
+            hasAttachedWebView: hasAttachedWebView,
+            isLoading: webView?.isLoading ?? false
+        )
+    }
 
     @MainActor
     public var isReadyForDirectLoad: Bool {
@@ -3914,6 +3961,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    public func forceClearLoadingIndicators(reason: String, pageURL: URL? = nil) {
+        forceClearLoadingIndicatorsHandler?(reason, pageURL)
+    }
+
+    @MainActor
     func consumeContentRulesBypass() -> Bool {
         let value = bypassContentRulesForNextNavigation
         bypassContentRulesForNextNavigation = false
@@ -3954,6 +4006,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         return webView.window != nil
             && webView.superview != nil
             && webView.navigationDelegate != nil
+            && !webView.isLoading
     }
 
     public override init() {
@@ -5792,6 +5845,11 @@ public struct WebView {
         coordinator.webViewPool = resolvedWebViewPool
         coordinator.lifecycleConfig = lifecycleConfig
         coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator] reason, pageURL in
+            Task { @MainActor in
+                coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
+            }
+        }
         return coordinator
     }
 
@@ -6507,6 +6565,11 @@ extension WebView {
         context.coordinator.webViewPool = resolvedWebViewPool
         context.coordinator.lifecycleConfig = lifecycleConfig
         context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        context.coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator = context.coordinator] reason, pageURL in
+            Task { @MainActor in
+                coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
+            }
+        }
         context.coordinator.hideNavigationDueToScroll = $hideNavigationDueToScroll
         context.coordinator.textSelection = $textSelection
     }
