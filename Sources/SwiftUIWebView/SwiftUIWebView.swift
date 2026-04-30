@@ -3676,6 +3676,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
+    @Published public private(set) var hasAsyncCaller = false
+    @Published public private(set) var hasUnsafeCaller = false
+    private var asyncCallerReadinessGeneration = 0
+    private var unsafeCallerReadinessGeneration = 0
+
     var asyncCaller: ( @Sendable
                        (
                         String,
@@ -3683,12 +3689,32 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         WKFrameInfo?,
                         WKContentWorld?
                        ) async throws -> JavaScriptEvaluationResult
-    )? = nil
-    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
-
-    /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
-    public var hasAsyncCaller: Bool { asyncCaller != nil }
-    public var hasUnsafeCaller: Bool { unsafeCaller != nil }
+    )? = nil {
+        didSet {
+            asyncCallerReadinessGeneration += 1
+            let generation = asyncCallerReadinessGeneration
+            let isReady = asyncCaller != nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.asyncCallerReadinessGeneration == generation else { return }
+                if self.hasAsyncCaller != isReady {
+                    self.hasAsyncCaller = isReady
+                }
+            }
+        }
+    }
+    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil {
+        didSet {
+            unsafeCallerReadinessGeneration += 1
+            let generation = unsafeCallerReadinessGeneration
+            let isReady = unsafeCaller != nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.unsafeCallerReadinessGeneration == generation else { return }
+                if self.hasUnsafeCaller != isReady {
+                    self.hasUnsafeCaller = isReady
+                }
+            }
+        }
+    }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
@@ -5423,12 +5449,15 @@ extension WKWebView {
 
     @available(iOS 15.0, *)
     func applyUnderPageBackgroundColor(config: WebViewConfig) {
+        underPageBackgroundColor = resolvedUnderPageBackgroundColor(config: config)
+    }
+
+    func resolvedUnderPageBackgroundColor(config: WebViewConfig) -> UIColor {
         let fallbackColor = UIColor(config.backgroundColor)
-        if config.usesSampledPageTopColorForUnderPageBackground {
-            underPageBackgroundColor = sampledPageTopColor ?? fallbackColor
-        } else {
-            underPageBackgroundColor = fallbackColor
+        guard config.usesSampledPageTopColorForUnderPageBackground else {
+            return fallbackColor
         }
+        return sampledPageTopColor ?? fallbackColor
     }
 }
 #endif
@@ -5632,7 +5661,7 @@ extension WebView: UIViewControllerRepresentable {
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             webView.backgroundColor = UIColor(config.backgroundColor)
-            webView.scrollView.backgroundColor = UIColor(config.backgroundColor)
+            webView.scrollView.backgroundColor = webView.resolvedUnderPageBackgroundColor(config: config)
         } else {
             webView.backgroundColor = config.isOpaque ? .systemBackground : .clear
             webView.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
@@ -5701,7 +5730,7 @@ extension WebView: UIViewControllerRepresentable {
             webView.backgroundColor = .clear
         }
         if #available(iOS 14.0, *) {
-            webView.scrollView.backgroundColor = UIColor(config.backgroundColor)
+            webView.scrollView.backgroundColor = webView.resolvedUnderPageBackgroundColor(config: config)
         } else {
             webView.scrollView.backgroundColor = .clear
         }
@@ -6407,7 +6436,7 @@ extension WebView {
         if #available(iOS 14.0, *) {
             let resolvedColor = UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedColor
-            webView.scrollView.backgroundColor = resolvedColor
+            webView.scrollView.backgroundColor = webView.resolvedUnderPageBackgroundColor(config: config)
             containerView?.backgroundColor = config.isOpaque ? nil : resolvedColor
         } else {
             let resolvedColor: UIColor = config.isOpaque ? .systemBackground : .clear
