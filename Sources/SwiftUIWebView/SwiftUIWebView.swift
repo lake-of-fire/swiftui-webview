@@ -4042,6 +4042,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
+    @Published public private(set) var hasAsyncCaller = false
+    @Published public private(set) var hasUnsafeCaller = false
+    private var asyncCallerReadinessGeneration = 0
+    private var unsafeCallerReadinessGeneration = 0
+
     var asyncCaller: ( @Sendable
                        (
                         String,
@@ -4049,12 +4055,32 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         WKFrameInfo?,
                         WKContentWorld?
                        ) async throws -> JavaScriptEvaluationResult
-    )? = nil
-    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
-
-    /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
-    public var hasAsyncCaller: Bool { asyncCaller != nil }
-    public var hasUnsafeCaller: Bool { unsafeCaller != nil }
+    )? = nil {
+        didSet {
+            asyncCallerReadinessGeneration += 1
+            let generation = asyncCallerReadinessGeneration
+            let isReady = asyncCaller != nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.asyncCallerReadinessGeneration == generation else { return }
+                if self.hasAsyncCaller != isReady {
+                    self.hasAsyncCaller = isReady
+                }
+            }
+        }
+    }
+    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil {
+        didSet {
+            unsafeCallerReadinessGeneration += 1
+            let generation = unsafeCallerReadinessGeneration
+            let isReady = unsafeCaller != nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.unsafeCallerReadinessGeneration == generation else { return }
+                if self.hasUnsafeCaller != isReady {
+                    self.hasUnsafeCaller = isReady
+                }
+            }
+        }
+    }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
