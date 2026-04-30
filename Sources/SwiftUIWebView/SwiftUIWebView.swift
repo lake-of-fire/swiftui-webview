@@ -1852,6 +1852,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
 
 #if os(iOS)
+        if #available(iOS 15.0, *) {
+            webView.applyUnderPageBackgroundColor(config: config)
+        }
+#endif
+
+#if os(iOS)
         if awaitingSnapshotReload {
             snapshotReloadDocumentReady = true
             logLookupPerf("webview.reload.nav.finish")
@@ -2091,6 +2097,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         newState.hasReaderRenderReady = false
         newState.error = nil
         onNavigationCommitted?(newState)
+#if os(iOS)
+        if #available(iOS 15.0, *) {
+            webView.applyUnderPageBackgroundColor(config: config)
+        }
+#endif
 #if os(iOS)
         if awaitingSnapshotReload {
             snapshotReloadCommitted = true
@@ -4583,6 +4594,7 @@ public struct WebViewConfig: Sendable {
     public let pageZoom: CGFloat
     public let isOpaque: Bool
     public let backgroundColor: Color
+    public let usesSampledPageTopColorForUnderPageBackground: Bool
     public let userScripts: [WebViewUserScript]
     public let darkModeSetting: DarkModeSetting
     public let paginationConfiguration: WebViewPaginationConfiguration
@@ -4598,6 +4610,7 @@ public struct WebViewConfig: Sendable {
         pageZoom: CGFloat = 1,
         isOpaque: Bool = true,
         backgroundColor: Color = .clear,
+        usesSampledPageTopColorForUnderPageBackground: Bool = false,
         userScripts: [WebViewUserScript] = [],
         darkModeSetting: DarkModeSetting = .system,
         paginationConfiguration: WebViewPaginationConfiguration = .disabled
@@ -4612,6 +4625,7 @@ public struct WebViewConfig: Sendable {
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
         self.backgroundColor = backgroundColor
+        self.usesSampledPageTopColorForUnderPageBackground = usesSampledPageTopColorForUnderPageBackground
         self.userScripts = userScripts
         self.darkModeSetting = darkModeSetting
         self.paginationConfiguration = paginationConfiguration
@@ -5397,6 +5411,28 @@ public class WebViewController: UIViewController {
 }
 #endif
 
+#if os(iOS)
+extension WKWebView {
+    var sampledPageTopColor: UIColor? {
+        let selector = Selector("_sampl\("edPageTopC")olor")
+        guard responds(to: selector), let result = perform(selector) else {
+            return nil
+        }
+        return result.takeUnretainedValue() as? UIColor
+    }
+
+    @available(iOS 15.0, *)
+    func applyUnderPageBackgroundColor(config: WebViewConfig) {
+        let fallbackColor = UIColor(config.backgroundColor)
+        if config.usesSampledPageTopColorForUnderPageBackground {
+            underPageBackgroundColor = sampledPageTopColor ?? fallbackColor
+        } else {
+            underPageBackgroundColor = fallbackColor
+        }
+    }
+}
+#endif
+
 public struct WebView {
     private let config: WebViewConfig
     var navigator: WebViewNavigator
@@ -5603,7 +5639,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         webView.scrollView.isOpaque = config.isOpaque
         if #available(iOS 15.0, *) {
-            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+            webView.applyUnderPageBackgroundColor(config: config)
         }
         return webView
     }
@@ -5671,7 +5707,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         webView.scrollView.isOpaque = config.isOpaque
         if #available(iOS 15.0, *) {
-            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+            webView.applyUnderPageBackgroundColor(config: config)
         }
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
@@ -6381,7 +6417,7 @@ extension WebView {
         }
 
         if #available(iOS 15.0, *) {
-            webView.underPageBackgroundColor = UIColor(config.backgroundColor)
+            webView.applyUnderPageBackgroundColor(config: config)
         }
     }
     #endif
