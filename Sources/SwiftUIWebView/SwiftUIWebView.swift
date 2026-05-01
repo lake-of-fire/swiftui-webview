@@ -4044,9 +4044,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
     @Published public private(set) var hasAsyncCaller = false
-    @Published public private(set) var hasUnsafeCaller = false
     private var asyncCallerReadinessGeneration = 0
-    private var unsafeCallerReadinessGeneration = 0
 
     var asyncCaller: ( @Sendable
                        (
@@ -4068,19 +4066,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
     }
-    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil {
-        didSet {
-            unsafeCallerReadinessGeneration += 1
-            let generation = unsafeCallerReadinessGeneration
-            let isReady = unsafeCaller != nil
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.unsafeCallerReadinessGeneration == generation else { return }
-                if self.hasUnsafeCaller != isReady {
-                    self.hasUnsafeCaller = isReady
-                }
-            }
-        }
-    }
+    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
