@@ -5245,28 +5245,11 @@ public class WebViewController: UIViewController {
     private func installTouchProbeIfNeeded() {
         guard touchProbeGestureRecognizer == nil else { return }
         let recognizer = WebViewTouchProbeGestureRecognizer()
-        recognizer.delegate = gestureDelegate
         recognizer.onTouchBegan = { [weak self] point in
-            Task { @MainActor in
-                self?.logLookupSmar10Touch(pointInController: point)
-            }
+            self?.logLookupSmar10Touch(pointInController: point)
         }
         view.addGestureRecognizer(recognizer)
         touchProbeGestureRecognizer = recognizer
-
-        let tapRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleNativeTap(_:)))
-        tapRecognizer.cancelsTouchesInView = false
-        tapRecognizer.delaysTouchesBegan = false
-        tapRecognizer.delaysTouchesEnded = false
-        tapRecognizer.delegate = gestureDelegate
-        view.addGestureRecognizer(tapRecognizer)
-        nativeTapGestureRecognizer = tapRecognizer
-    }
-
-    @MainActor
-    @objc private func handleNativeTap(_ recognizer: UITapGestureRecognizer) {
-        guard recognizer.state == .ended else { return }
-        onNativeUnhandledTap?(recognizer.location(in: view))
     }
 
     @MainActor
@@ -5396,28 +5379,6 @@ public class WebViewController: UIViewController {
         let hitView = view.hitTest(pointInController, with: nil)
         let pointInWebView = view.convert(pointInController, to: webView)
         let webViewHitView = webView.hitTest(pointInWebView, with: nil)
-        let isEBookURL = webView.url?.scheme == "ebook"
-        if isEBookURL {
-            debugPrint(
-                "# HIDENAV native.webView.touch",
-                "pageURL=\(webView.url?.absoluteString ?? "nil")",
-                "controllerFrame=\(NSCoder.string(for: view.frame))",
-                "controllerBounds=\(NSCoder.string(for: view.bounds))",
-                "pointInController=\(NSCoder.string(for: pointInController))",
-                "webViewFrame=\(NSCoder.string(for: webView.frame))",
-                "webViewBounds=\(NSCoder.string(for: webView.bounds))",
-                "pointInWebView=\(NSCoder.string(for: pointInWebView))",
-                "hitViewClass=\(hitView.map { String(describing: type(of: $0)) } ?? "nil")",
-                "webViewHitViewClass=\(webViewHitView.map { String(describing: type(of: $0)) } ?? "nil")",
-                "hitInsideWebView=\(webView.bounds.contains(pointInWebView))",
-                "webViewHidden=\(webView.isHidden)",
-                "webViewAlpha=\(webView.alpha)",
-                "scrollViewFrame=\(NSCoder.string(for: webView.scrollView.frame))",
-                "scrollViewBounds=\(NSCoder.string(for: webView.scrollView.bounds))",
-                "scrollViewAdjustedContentInset=\(NSCoder.string(for: webView.scrollView.adjustedContentInset))",
-                "isWebViewUnloaded=\(isWebViewUnloaded)"
-            )
-        }
         let payload: [String: Any] = [
             "stage": "native.webView.touch",
             "pageURL": webView.url?.absoluteString ?? "nil",
@@ -6167,10 +6128,6 @@ extension WebView: UIViewControllerRepresentable {
         configureWebView(webView, controller: controller, context: context)
         context.coordinator.markSnapshotRestoreIfNeeded()
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
-        controller.onNativeUnhandledTap = { [weak coordinator = context.coordinator, weak controller] point in
-            guard let coordinator, let controller else { return }
-            coordinator.handleNativeUnhandledTap(controller: controller, pointInController: point)
-        }
         controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
             coordinator?.navigator.logCompetingOperationIfNeeded(
                 "replaceWebView",
@@ -6372,10 +6329,6 @@ extension WebView: UIViewControllerRepresentable {
         }
 
         // _obscuredInsets ignores sides, probably
-        controller.onNativeUnhandledTap = { [weak coordinator = context.coordinator, weak controller] point in
-            guard let coordinator, let controller else { return }
-            coordinator.handleNativeUnhandledTap(controller: controller, pointInController: point)
-        }
         controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
             coordinator?.navigator.logCompetingOperationIfNeeded(
                 "replaceWebView",
