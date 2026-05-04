@@ -149,6 +149,7 @@ public final class WebViewPool: ObservableObject {
     }
 
     private func log(event: String, extra: [String: Any] = [:]) {
+#if DEBUG
         guard let debugLabel else { return }
         var payload: [String: Any] = [
             "label": debugLabel,
@@ -162,6 +163,7 @@ public final class WebViewPool: ObservableObject {
             payload[key] = value
         }
         debugPrint("# LOOKUPPREWARM \(event)", payload)
+#endif
     }
 
     private var poolIdentifier: String {

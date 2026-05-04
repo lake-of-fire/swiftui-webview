@@ -28,6 +28,7 @@ private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> 
 
 @inline(__always)
 private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) {
+#if DEBUG
     let payload = metadata
         .sorted { $0.key < $1.key }
         .map { "\($0.key)=\($0.value)" }
@@ -37,6 +38,22 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
     } else {
         Swift.debugPrint("# READERLOAD stage=\(stage) \(payload)")
     }
+#endif
+}
+
+@inline(__always)
+private func safeAreaLog(_ stage: String, _ metadata: [String: String] = [:]) {
+#if DEBUG
+    let payload = metadata
+        .sorted { $0.key < $1.key }
+        .map { "\($0.key)=\($0.value)" }
+        .joined(separator: " ")
+    if payload.isEmpty {
+        Swift.debugPrint("# SAFEAREA stage=\(stage)")
+    } else {
+        Swift.debugPrint("# SAFEAREA stage=\(stage) \(payload)")
+    }
+#endif
 }
 
 @inline(__always)
@@ -970,8 +987,10 @@ public class WebViewCoordinator: NSObject {
 
 #if os(iOS)
     private func logLookupPerf(_ message: String) {
+#if DEBUG
         let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
         print("# LOOKUPPERF", timestamp, message)
+#endif
     }
 
     @MainActor
@@ -1371,6 +1390,7 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func logEpubNavigationTransition(_ stage: String, webView: WKWebView, requestURL: URL? = nil) {
+#if DEBUG
         let currentURL = webView.url
         let targetURL = requestURL ?? lastMainFrameNavigationRequestURL ?? navigator.activeReaderLoadRequestURL(for: currentURL)
         let sourceURL = lastMainFrameNavigationSourceURL ?? self.webView.state.pageURL
@@ -1396,6 +1416,7 @@ public class WebViewCoordinator: NSObject {
             "statePageURL=\(self.webView.state.pageURL.absoluteString)",
             "isLoading=\(webView.isLoading)"
         )
+#endif
     }
     
     @discardableResult func setLoading(
@@ -1832,9 +1853,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #if os(iOS)
         reapplyHostObscuredInsetsForNavigation("navigationFinish")
 #endif
+#if DEBUG
         debugPrint("# EPUB  webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+#endif
         logEpubNavigationTransition("finish", webView: webView)
         let finishNow = Date()
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
@@ -2134,9 +2157,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
         }
+#if DEBUG
         debugPrint("# EPUB  webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+#endif
         logEpubNavigationTransition("commit", webView: webView)
         let commitNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
@@ -2196,9 +2221,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #if os(iOS)
         reapplyHostObscuredInsetsForNavigation("navigationStart")
 #endif
+#if DEBUG
         debugPrint("# EPUB  webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
                    "isLoading=\(webView.isLoading)")
+#endif
         logEpubNavigationTransition("start", webView: webView)
         let provisionalNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
@@ -2303,9 +2330,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         let startedAt = Date()
+#if DEBUG
         debugPrint("# EPUB  webView.nav.decide",
                    "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
+#endif
         let requestURL = navigationAction.request.url
         if navigationAction.targetFrame?.isMainFrame == true {
             lastMainFrameNavigationSourceURL = webView.url ?? self.webView.state.pageURL
@@ -2438,6 +2467,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         if let response = navigationResponse.response as? HTTPURLResponse {
+#if DEBUG
             debugPrint(
                 "# EPUB  webView.nav.response",
                 "url=\(response.url?.absoluteString ?? "<nil>")",
@@ -2445,6 +2475,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "status=\(response.statusCode)",
                 "expectedLength=\(response.expectedContentLength)"
             )
+#endif
             if navigationResponse.isForMainFrame {
                 var newState = self.webView.state
                 newState.mainFrameHTTPStatusCode = response.statusCode
@@ -3897,11 +3928,13 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                             world
                         ).value
                         handled = true
+#if DEBUG
                         debugPrint(
                             "# EPUB  scriptCaller.error.resultTypeUnsupported.coerced",
                             "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                             "note=coerced to string for href"
                         )
+#endif
                     } catch {
                         primaryError = error
                         nsError = error as NSError
@@ -3911,6 +3944,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     // Treat unsupported result types as a benign nil so DOM snapshot can continue.
                     result = nil
                     handled = true
+#if DEBUG
                     debugPrint(
                         "# EPUB  scriptCaller.error.resultTypeUnsupported",
                         "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
@@ -3918,6 +3952,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         "containsGoToSnapshot=\(js.contains("manabiGetReaderGoToSheetSnapshot"))",
                         "note=treated as nil"
                     )
+#endif
                 }
             } else if nsError.domain == WKError.errorDomain,
                       nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
@@ -3928,14 +3963,17 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 }
                 result = nil
                 handled = true
+#if DEBUG
                 debugPrint(
                     "# EPUB  scriptCaller.error.invalidFrame",
                     "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                     "jsPrefix=\(js.prefix(80))",
                     "note=cleared stale frame; returning nil"
                 )
+#endif
             }
             if !handled {
+#if DEBUG
                 debugPrint(
                     "# EPUB  scriptCaller.error",
                     "code=\(nsError.code)",
@@ -3944,6 +3982,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
                     "jsPrefix=\(js.prefix(80))"
                 )
+#endif
                 throw primaryError
             }
         }
@@ -3990,13 +4029,16 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             lastKnownMainFrame = frame
         }
         if frame.request.url == nil {
+#if DEBUG
             debugPrint(
                 "# EPUB  scriptCaller.frame.nilURL",
                 "uuid=\(uuid)",
                 "debug=\(frame.debugDescription)",
                 "isMain=\(frame.isMainFrame)"
             )
+#endif
         }
+#if DEBUG
         debugPrint(
             "# EPUB  scriptCaller.frame.add",
             "uuid=\(uuid)",
@@ -4005,17 +4047,20 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             "isMain=\(frame.isMainFrame)",
             "inserted=\(inserted)"
         )
+#endif
         return inserted
     }
     
     @MainActor
     public func removeAllMultiTargetFrames() {
         if !multiTargetFrames.isEmpty || !framesByCanonicalURL.isEmpty {
+#if DEBUG
             debugPrint(
                 "# EPUB  scriptCaller.frame.clear",
                 "byUUID=\(multiTargetFrames.count)",
                 "byCanonical=\(framesByCanonicalURL.count)"
             )
+#endif
         }
         multiTargetFrames.removeAll()
         framesByCanonicalURL.removeAll()
@@ -5068,6 +5113,21 @@ public class WebViewController: UIViewController {
             self.obscuredInsets = obscuredInsets
             lastAppliedObscuredInsets = obscuredInsets
         }
+        safeAreaLog(
+            "webViewController.applyHostLayout",
+            [
+                "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
+                "changedAdditional": "\(changedAdditionalSafeAreaInsets)",
+                "changedObscured": "\(changedObscuredInsets)",
+                "controllerAdditionalBottom": "\(self.additionalSafeAreaInsets.bottom)",
+                "controllerObscuredBottom": "\(self.obscuredInsets.bottom)",
+                "inputObscuredBottom": "\(obscuredInsets.bottom)",
+                "lastAppliedAdditionalBottom": "\(lastAppliedAdditionalSafeAreaInsets.bottom)",
+                "lastAppliedObscuredBottom": "\(lastAppliedObscuredInsets.bottom)",
+                "viewWindowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
+        )
         if changedAdditionalSafeAreaInsets && !changedObscuredInsets {
             updateObscuredInsets(reason: "applyHostLayout.additionalSafeAreaOnly")
         }
@@ -5110,6 +5170,18 @@ public class WebViewController: UIViewController {
         if #available(iOS 15.5, *) {
             webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
         }
+        safeAreaLog(
+            "webViewController.applyObscuredInsets",
+            [
+                "appliedBottom": "\(insets.bottom)",
+                "controllerObscuredBottom": "\(obscuredInsets.bottom)",
+                "scrollAdjustedContentInsetBottom": "\(webView.scrollView.adjustedContentInset.bottom)",
+                "scrollContentInsetBottom": "\(webView.scrollView.contentInset.bottom)",
+                "unobscuredBottom": "\(unobscuredInsets.bottom)",
+                "windowSafeAreaBottom": "\(windowSafeAreaInsets.bottom)",
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
+        )
         
         //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
         //            webView.setValue(insets, forKey: "obscuredInsets")
@@ -5117,12 +5189,21 @@ public class WebViewController: UIViewController {
         // TODO: investigate _isChangingObscuredInsetsInteractively
     }
 
-    private func updateObscuredInsets(reason _: String = "unknown") {
+    private func updateObscuredInsets(reason: String = "unknown") {
         let insets = UIEdgeInsets(
             top: obscuredInsets.top,
             left: obscuredInsets.left,
             bottom: obscuredInsets.bottom,
             right: obscuredInsets.right
+        )
+        safeAreaLog(
+            "webViewController.updateObscuredInsets",
+            [
+                "bottom": "\(insets.bottom)",
+                "reason": reason,
+                "viewWindowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
+                "webViewID": readerLoadObjectIDString(webView)
+            ]
         )
         applyObscuredInsets(insets)
     }
@@ -6139,7 +6220,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6153,7 +6234,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6167,7 +6248,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewDidDisappear = { [weak controller] in
             guard let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6291,10 +6372,21 @@ extension WebView: UIViewControllerRepresentable {
 
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
         //        print(obscuredInsets)
+        let incomingBottomObscuredInset = max(0, obscuredInsets.bottom)
+        let treatsIncomingBottomAsAdditionalClearance =
+            bottomSafeAreaInset > 0
+            && incomingBottomObscuredInset > 0
+            && incomingBottomObscuredInset < bottomSafeAreaInset
+        let resolvedAdditionalBottomSafeAreaInset = treatsIncomingBottomAsAdditionalClearance
+            ? incomingBottomObscuredInset
+            : max(0, incomingBottomObscuredInset - bottomSafeAreaInset)
+        let resolvedObscuredBottomInset = treatsIncomingBottomAsAdditionalClearance
+            ? bottomSafeAreaInset + incomingBottomObscuredInset
+            : incomingBottomObscuredInset
         let additionalSafeAreaInsets = UIEdgeInsets(
             top: max(0, obscuredInsets.top - topSafeAreaInset),
             left: 0,
-            bottom: max(0, obscuredInsets.bottom - bottomSafeAreaInset),
+            bottom: resolvedAdditionalBottomSafeAreaInset,
             right: 0
         )
         //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
@@ -6302,12 +6394,39 @@ extension WebView: UIViewControllerRepresentable {
         let resolvedObscuredInsets = UIEdgeInsets(
             top: obscuredInsets.top,
             left: 0,
-            bottom: obscuredInsets.bottom,
+            bottom: resolvedObscuredBottomInset,
             right: 0
+        )
+        safeAreaLog(
+            "swiftUIWebView.updateBottom",
+            [
+                "incomingObscuredBottom": "\(obscuredInsets.bottom)",
+                "windowSafeAreaBottom": "\(bottomSafeAreaInset)",
+                "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
+                "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
+                "resolvedObscuredBottom": "\(resolvedObscuredInsets.bottom)",
+                "controllerAdditionalBottomBefore": "\(controller.additionalSafeAreaInsets.bottom)",
+                "controllerObscuredBottomBefore": "\(controller.obscuredInsets.bottom)",
+                "scrollAdjustedContentInsetBottomBefore": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
+                "scrollContentInsetBottomBefore": "\(controller.webView.scrollView.contentInset.bottom)",
+                "webViewID": readerLoadObjectIDString(controller.webView)
+            ]
         )
         let hostLayoutChanges = controller.applyHostLayout(
             additionalSafeAreaInsets: additionalSafeAreaInsets,
             obscuredInsets: resolvedObscuredInsets
+        )
+        safeAreaLog(
+            "swiftUIWebView.updateBottom.applied",
+            [
+                "changedAdditional": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
+                "changedObscured": "\(hostLayoutChanges.changedObscuredInsets)",
+                "controllerAdditionalBottomAfter": "\(controller.additionalSafeAreaInsets.bottom)",
+                "controllerObscuredBottomAfter": "\(controller.obscuredInsets.bottom)",
+                "scrollAdjustedContentInsetBottomAfter": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
+                "scrollContentInsetBottomAfter": "\(controller.webView.scrollView.contentInset.bottom)",
+                "webViewID": readerLoadObjectIDString(controller.webView)
+            ]
         )
         if (hostLayoutChanges.changedAdditionalSafeAreaInsets || hostLayoutChanges.changedObscuredInsets),
            let requestedAt = context.coordinator.navigator.readerLoadRequestedAt,
@@ -6340,7 +6459,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6354,7 +6473,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6368,7 +6487,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewDidDisappear = { [weak controller] in
             guard let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6447,6 +6566,7 @@ extension WebView: NSViewRepresentable {
             guard let webView else {
                 throw ScriptCallerError.evaluationTimedOut
             }
+#if DEBUG
             let jsPrefix = js.prefix(120)
             let frameURL = frame?.request.url?.absoluteString ?? "nil"
             let isMainFrame = frame?.isMainFrame ?? true
@@ -6460,6 +6580,7 @@ extension WebView: NSViewRepresentable {
                   "world=\(String(describing: resolvedWorld.name))",
                   "args=\(args?.count ?? 0)",
                   "jsPrefix=\(jsPrefix)")
+#endif
             do {
                 let value: Any?
                 if let args {
@@ -6467,6 +6588,7 @@ extension WebView: NSViewRepresentable {
                 } else {
                     value = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
                 }
+#if DEBUG
                 let elapsed = Date().timeIntervalSince(startedAt)
                 let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
                 let stringLength = (value as? String)?.count
@@ -6479,8 +6601,10 @@ extension WebView: NSViewRepresentable {
                       "type=\(typeDescription)",
                       "stringLength=\(stringLength.map(String.init) ?? "nil")",
                       String(format: "elapsed=%.3fs", elapsed))
+#endif
                 return WebViewScriptCaller.JavaScriptEvaluationResult(value)
             } catch {
+#if DEBUG
                 let elapsed = Date().timeIntervalSince(startedAt)
                 print("# EPUB  scriptCaller.call.error",
                       "url=\(currentURL)",
@@ -6490,6 +6614,7 @@ extension WebView: NSViewRepresentable {
                       "jsPrefix=\(jsPrefix)",
                       "error=\(error)",
                       String(format: "elapsed=%.3fs", elapsed))
+#endif
                 throw error
             }
         }
@@ -6870,7 +6995,9 @@ extension WebView {
         ) { ruleList, error in
             guard let ruleList else {
                 if let error {
+#if DEBUG
                     print("# contentRules.compile error", error)
+#endif
                 }
                 readerLoadLog(
                     "webView.contentRules.refreshCompileFailed",
@@ -7009,7 +7136,9 @@ extension WebView {
         }
         coordinator.lastUserScriptsContentController = userContentController
         if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
+#if DEBUG
             debugPrint("# EPUB  userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
+#endif
             coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         }
         (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
