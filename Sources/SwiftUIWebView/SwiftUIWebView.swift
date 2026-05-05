@@ -5116,14 +5116,21 @@ public class WebViewController: UIViewController {
         safeAreaLog(
             "webViewController.applyHostLayout",
             [
+                "additionalTop": "\(additionalSafeAreaInsets.top)",
                 "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
                 "changedAdditional": "\(changedAdditionalSafeAreaInsets)",
                 "changedObscured": "\(changedObscuredInsets)",
+                "controllerAdditionalTop": "\(self.additionalSafeAreaInsets.top)",
                 "controllerAdditionalBottom": "\(self.additionalSafeAreaInsets.bottom)",
+                "controllerObscuredTop": "\(self.obscuredInsets.top)",
                 "controllerObscuredBottom": "\(self.obscuredInsets.bottom)",
+                "inputObscuredTop": "\(obscuredInsets.top)",
                 "inputObscuredBottom": "\(obscuredInsets.bottom)",
+                "lastAppliedAdditionalTop": "\(lastAppliedAdditionalSafeAreaInsets.top)",
                 "lastAppliedAdditionalBottom": "\(lastAppliedAdditionalSafeAreaInsets.bottom)",
+                "lastAppliedObscuredTop": "\(lastAppliedObscuredInsets.top)",
                 "lastAppliedObscuredBottom": "\(lastAppliedObscuredInsets.bottom)",
+                "viewWindowSafeAreaTop": "\(view.window?.safeAreaInsets.top ?? 0)",
                 "viewWindowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
                 "webViewID": readerLoadObjectIDString(webView)
             ]
@@ -5173,11 +5180,17 @@ public class WebViewController: UIViewController {
         safeAreaLog(
             "webViewController.applyObscuredInsets",
             [
+                "appliedTop": "\(insets.top)",
                 "appliedBottom": "\(insets.bottom)",
+                "controllerObscuredTop": "\(obscuredInsets.top)",
                 "controllerObscuredBottom": "\(obscuredInsets.bottom)",
+                "scrollAdjustedContentInsetTop": "\(webView.scrollView.adjustedContentInset.top)",
                 "scrollAdjustedContentInsetBottom": "\(webView.scrollView.adjustedContentInset.bottom)",
+                "scrollContentInsetTop": "\(webView.scrollView.contentInset.top)",
                 "scrollContentInsetBottom": "\(webView.scrollView.contentInset.bottom)",
+                "unobscuredTop": "\(unobscuredInsets.top)",
                 "unobscuredBottom": "\(unobscuredInsets.bottom)",
+                "windowSafeAreaTop": "\(windowSafeAreaInsets.top)",
                 "windowSafeAreaBottom": "\(windowSafeAreaInsets.bottom)",
                 "webViewID": readerLoadObjectIDString(webView)
             ]
@@ -5199,8 +5212,10 @@ public class WebViewController: UIViewController {
         safeAreaLog(
             "webViewController.updateObscuredInsets",
             [
+                "top": "\(insets.top)",
                 "bottom": "\(insets.bottom)",
                 "reason": reason,
+                "viewWindowSafeAreaTop": "\(view.window?.safeAreaInsets.top ?? 0)",
                 "viewWindowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
                 "webViewID": readerLoadObjectIDString(webView)
             ]
@@ -6400,14 +6415,22 @@ extension WebView: UIViewControllerRepresentable {
         safeAreaLog(
             "swiftUIWebView.updateBottom",
             [
+                "incomingObscuredTop": "\(obscuredInsets.top)",
                 "incomingObscuredBottom": "\(obscuredInsets.bottom)",
+                "windowSafeAreaTop": "\(topSafeAreaInset)",
                 "windowSafeAreaBottom": "\(bottomSafeAreaInset)",
                 "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
+                "additionalTop": "\(additionalSafeAreaInsets.top)",
                 "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
+                "resolvedObscuredTop": "\(resolvedObscuredInsets.top)",
                 "resolvedObscuredBottom": "\(resolvedObscuredInsets.bottom)",
+                "controllerAdditionalTopBefore": "\(controller.additionalSafeAreaInsets.top)",
                 "controllerAdditionalBottomBefore": "\(controller.additionalSafeAreaInsets.bottom)",
+                "controllerObscuredTopBefore": "\(controller.obscuredInsets.top)",
                 "controllerObscuredBottomBefore": "\(controller.obscuredInsets.bottom)",
+                "scrollAdjustedContentInsetTopBefore": "\(controller.webView.scrollView.adjustedContentInset.top)",
                 "scrollAdjustedContentInsetBottomBefore": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
+                "scrollContentInsetTopBefore": "\(controller.webView.scrollView.contentInset.top)",
                 "scrollContentInsetBottomBefore": "\(controller.webView.scrollView.contentInset.bottom)",
                 "webViewID": readerLoadObjectIDString(controller.webView)
             ]
@@ -6421,9 +6444,13 @@ extension WebView: UIViewControllerRepresentable {
             [
                 "changedAdditional": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
                 "changedObscured": "\(hostLayoutChanges.changedObscuredInsets)",
+                "controllerAdditionalTopAfter": "\(controller.additionalSafeAreaInsets.top)",
                 "controllerAdditionalBottomAfter": "\(controller.additionalSafeAreaInsets.bottom)",
+                "controllerObscuredTopAfter": "\(controller.obscuredInsets.top)",
                 "controllerObscuredBottomAfter": "\(controller.obscuredInsets.bottom)",
+                "scrollAdjustedContentInsetTopAfter": "\(controller.webView.scrollView.adjustedContentInset.top)",
                 "scrollAdjustedContentInsetBottomAfter": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
+                "scrollContentInsetTopAfter": "\(controller.webView.scrollView.contentInset.top)",
                 "scrollContentInsetBottomAfter": "\(controller.webView.scrollView.contentInset.bottom)",
                 "webViewID": readerLoadObjectIDString(controller.webView)
             ]
