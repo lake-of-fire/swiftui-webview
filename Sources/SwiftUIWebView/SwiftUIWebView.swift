@@ -28,6 +28,7 @@ private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> 
 
 @inline(__always)
 private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) {
+#if DEBUG
     let payload = metadata
         .sorted { $0.key < $1.key }
         .map { "\($0.key)=\($0.value)" }
@@ -37,6 +38,7 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
     } else {
         Swift.debugPrint("# READERLOAD stage=\(stage) \(payload)")
     }
+#endif
 }
 
 private let readerLoadIssueGapWarningThreshold: TimeInterval = 0.750
@@ -1565,8 +1567,10 @@ public class WebViewCoordinator: NSObject {
 
 #if os(iOS)
     private func logLookupPerf(_ message: String) {
+#if DEBUG
         let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
         print("# LOOKUPPERF", timestamp, message)
+#endif
     }
 
     @MainActor
@@ -6246,7 +6250,7 @@ extension WebView: UIViewControllerRepresentable {
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6283,7 +6287,7 @@ extension WebView: UIViewControllerRepresentable {
                     ] as [String : Any]
                 )
             }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6313,7 +6317,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewDidDisappear = { [weak controller] in
             guard let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6470,10 +6474,21 @@ extension WebView: UIViewControllerRepresentable {
 
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
         //        print(obscuredInsets)
+        let incomingBottomObscuredInset = max(0, obscuredInsets.bottom)
+        let treatsIncomingBottomAsAdditionalClearance =
+            bottomSafeAreaInset > 0
+            && incomingBottomObscuredInset > 0
+            && incomingBottomObscuredInset < bottomSafeAreaInset
+        let resolvedAdditionalBottomSafeAreaInset = treatsIncomingBottomAsAdditionalClearance
+            ? incomingBottomObscuredInset
+            : max(0, incomingBottomObscuredInset - bottomSafeAreaInset)
+        let resolvedObscuredBottomInset = treatsIncomingBottomAsAdditionalClearance
+            ? bottomSafeAreaInset + incomingBottomObscuredInset
+            : incomingBottomObscuredInset
         controller.additionalSafeAreaInsets = UIEdgeInsets(
             top: max(0, obscuredInsets.top - topSafeAreaInset),
             left: 0,
-            bottom: max(0, obscuredInsets.bottom - bottomSafeAreaInset),
+            bottom: resolvedAdditionalBottomSafeAreaInset,
             right: 0
         )
         //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
@@ -6481,13 +6496,13 @@ extension WebView: UIViewControllerRepresentable {
         controller.obscuredInsets = UIEdgeInsets(
             top: obscuredInsets.top,
             left: 0,
-            bottom: obscuredInsets.bottom,
+            bottom: resolvedObscuredBottomInset,
             right: 0
         )
         // _obscuredInsets ignores sides, probably
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6501,7 +6516,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewWillDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6515,7 +6530,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         controller.onViewDidDisappear = { [weak controller] in
             guard let controller else { return }
-            #if os(iOS)
+            #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidDisappear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
             #endif
@@ -6848,7 +6863,9 @@ extension WebView {
         ) { ruleList, error in
             guard let ruleList else {
                 if let error {
+#if DEBUG
                     print("# contentRules.compile error", error)
+#endif
                 }
                 return
             }
@@ -6946,7 +6963,9 @@ extension WebView {
         }
         coordinator.lastUserScriptsContentController = userContentController
         if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
+#if DEBUG
             debugPrint("# READER userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
+#endif
             coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         }
         (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
