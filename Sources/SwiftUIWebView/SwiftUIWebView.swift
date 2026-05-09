@@ -43,17 +43,8 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
 
 @inline(__always)
 private func safeAreaLog(_ stage: String, _ metadata: [String: String] = [:]) {
-#if DEBUG
-    let payload = metadata
-        .sorted { $0.key < $1.key }
-        .map { "\($0.key)=\($0.value)" }
-        .joined(separator: " ")
-    if payload.isEmpty {
-        Swift.debugPrint("# SAFEAREA stage=\(stage)")
-    } else {
-        Swift.debugPrint("# SAFEAREA stage=\(stage) \(payload)")
-    }
-#endif
+    _ = stage
+    _ = metadata
 }
 
 @inline(__always)
