@@ -4979,9 +4979,6 @@ fileprivate struct UnhandledTapUserScript {
         }
         const suppressUntil = Number(window.__manabiSuppressUnhandledTapHideNavigationUntil || 0);
         if (suppressUntil > Date.now()) {
-            try {
-                console.log('# TABBAR webUnhandledTapHideNavSuppressed reason=lookup-close-touch');
-            } catch (_error) {}
             return;
         }
         window.webkit.messageHandlers[handlerName].postMessage({
