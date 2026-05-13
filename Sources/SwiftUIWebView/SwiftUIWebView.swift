@@ -1895,24 +1895,48 @@ public class WebViewCoordinator: NSObject {
             sampledPageTopColorObservation = WebViewStringKeyPathObserver(
                 object: webView,
                 keyPath: "_sampl\("edPageTopC")olor"
-            ) { [weak self, weak webView] _ in
+            ) { [weak self, weak webView] observedColor in
                 Task { @MainActor [weak self, weak webView] in
                     guard let self, let webView else { return }
                     if #available(iOS 15.0, *) {
-                        webView.applyUnderPageBackgroundColor(config: self.config)
+                        self.applySampledPageTopColorChange(
+                            webView: webView,
+                            observedColor: observedColor
+                        )
                     }
-                    if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(config: self.config) {
-                        webView.scrollView.backgroundColor = resolvedUnderPageColor
-                    }
-                    webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(
-                        config: self.config,
-                        reason: "sampledPageTopColor.changed"
-                    )
                 }
             }
         }
 #endif
     }
+
+#if os(iOS)
+    @MainActor
+    private func beginSampledPageTopColorNavigation(_ webView: WKWebView) {
+        webView.applyUnderPageFallbackBackgroundColor(config: config)
+    }
+
+    @available(iOS 15.0, *)
+    @MainActor
+    private func applySampledPageTopColorChange(webView: WKWebView, observedColor: UIColor?) {
+        guard observedColor != nil else {
+            webView.applyUnderPageFallbackBackgroundColor(config: config)
+            return
+        }
+
+        webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: true)
+        if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
+            config: config,
+            allowSampledPageTopColor: true
+        ) {
+            webView.scrollView.backgroundColor = resolvedUnderPageColor
+        }
+        webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(
+            config: config,
+            reason: "sampledPageTopColor.changed"
+        )
+    }
+#endif
 
     @MainActor
     func applyPaginationConfigurationIfNeeded(reason: String) {
@@ -2294,7 +2318,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
 #if os(iOS)
         if #available(iOS 15.0, *) {
-            webView.applyUnderPageBackgroundColor(config: config)
+            webView.applyUnderPageFallbackBackgroundColor(config: config)
         }
         webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.finish")
 #endif
@@ -2591,9 +2615,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         newState.error = nil
         onNavigationCommitted?(newState)
 #if os(iOS)
-        if #available(iOS 15.0, *) {
-            webView.applyUnderPageBackgroundColor(config: config)
-        }
+        webView.applyUnderPageFallbackBackgroundColor(config: config)
         webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.commit")
 #endif
 #if os(iOS)
@@ -2744,6 +2766,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             navigator.cancelPendingRequestLoadTask()
         }
 #if os(iOS)
+        beginSampledPageTopColorNavigation(webView)
         pendingSnapshotRestore = false
 #endif
         _ = setLoading(
@@ -5849,7 +5872,7 @@ private final class WebViewStringKeyPathObserver<Object: NSObject, Value>: NSObj
         self.keyPath = keyPath
         self.changeHandler = changeHandler
         super.init()
-        object.addObserver(self, forKeyPath: keyPath, options: [.initial, .new], context: nil)
+        object.addObserver(self, forKeyPath: keyPath, options: [.new], context: nil)
     }
 
     func invalidate() {
@@ -5886,11 +5909,24 @@ extension WKWebView {
         responds(to: Selector("_sampl\("edPageTopC")olor"))
     }
 
+    func underPageFallbackBackgroundColor(config: WebViewConfig) -> UIColor {
+        UIColor(config.backgroundColor)
+    }
+
+    @MainActor
+    func applyUnderPageFallbackBackgroundColor(config: WebViewConfig) {
+        let fallbackColor = underPageFallbackBackgroundColor(config: config)
+        if #available(iOS 15.0, *) {
+            underPageBackgroundColor = fallbackColor
+        }
+        scrollView.backgroundColor = fallbackColor
+    }
+
     @available(iOS 15.0, *)
-    func applyUnderPageBackgroundColor(config: WebViewConfig) {
+    func applyUnderPageBackgroundColor(config: WebViewConfig, allowSampledPageTopColor: Bool = true) {
         let canUseSampledColor = manabiCanUseSampledPageTopColorBackground()
         let fallbackColor = UIColor(config.backgroundColor)
-        if config.usesSampledPageTopColorForUnderPageBackground {
+        if config.usesSampledPageTopColorForUnderPageBackground, allowSampledPageTopColor {
             if canUseSampledColor {
                 if let sampledPageTopColor {
                     underPageBackgroundColor = sampledPageTopColor
@@ -5903,9 +5939,12 @@ extension WKWebView {
         }
     }
 
-    func resolvedUnderPageBackgroundColor(config: WebViewConfig) -> UIColor? {
+    func resolvedUnderPageBackgroundColor(config: WebViewConfig, allowSampledPageTopColor: Bool = true) -> UIColor? {
         let fallbackColor = UIColor(config.backgroundColor)
         guard config.usesSampledPageTopColorForUnderPageBackground else {
+            return fallbackColor
+        }
+        guard allowSampledPageTopColor else {
             return fallbackColor
         }
         guard manabiCanUseSampledPageTopColorBackground() else {
@@ -6126,7 +6165,10 @@ extension WebView: UIViewControllerRepresentable {
                 ? (config.isOpaque ? .systemBackground : .clear)
                 : UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedBackgroundColor
-            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(config: config) {
+            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
+                config: config,
+                allowSampledPageTopColor: false
+            ) {
                 webView.scrollView.backgroundColor = resolvedUnderPageColor
             }
         } else {
@@ -6135,7 +6177,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         webView.scrollView.isOpaque = config.isOpaque
         if #available(iOS 15.0, *) {
-            webView.applyUnderPageBackgroundColor(config: config)
+            webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: false)
         }
         return webView
     }
@@ -6187,7 +6229,10 @@ extension WebView: UIViewControllerRepresentable {
             webView.backgroundColor = .clear
         }
         if #available(iOS 14.0, *) {
-            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(config: config) {
+            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
+                config: config,
+                allowSampledPageTopColor: false
+            ) {
                 webView.scrollView.backgroundColor = resolvedUnderPageColor
             }
         } else {
@@ -6195,7 +6240,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         webView.scrollView.isOpaque = config.isOpaque
         if #available(iOS 15.0, *) {
-            webView.applyUnderPageBackgroundColor(config: config)
+            webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: false)
         }
         if #available(iOS 16.4, *) {
             webView.isInspectable = true
@@ -6824,7 +6869,10 @@ extension WebView {
                 ? (config.isOpaque ? .systemBackground : .clear)
                 : UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedColor
-            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(config: config) {
+            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
+                config: config,
+                allowSampledPageTopColor: false
+            ) {
                 webView.scrollView.backgroundColor = resolvedUnderPageColor
             }
             containerView?.backgroundColor = config.isOpaque ? nil : resolvedColor
@@ -6837,7 +6885,7 @@ extension WebView {
         }
 
         if #available(iOS 15.0, *) {
-            webView.applyUnderPageBackgroundColor(config: config)
+            webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: false)
         }
     }
     #endif
