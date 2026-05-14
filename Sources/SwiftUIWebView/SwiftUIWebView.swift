@@ -4649,12 +4649,12 @@ fileprivate struct ReaderDocStateUserScript {
         }
         function trackingStateForSegment(segment) {
             if (!segment?.classList) { return "unknown"; }
-            if (segment.classList.contains("manabi-tracking-known")) { return "known"; }
-            if (segment.classList.contains("manabi-tracking-learning") || segment.classList.contains("manabi-tracking-flashcard-created-in-manabi-reader")) {
+            if (segment.classList.contains("mnb-known")) { return "known"; }
+            if (segment.classList.contains("mnb-learning") || segment.classList.contains("mnb-card-created")) {
                 return "learning";
             }
-            if (segment.classList.contains("manabi-tracking-read")) { return "familiar"; }
-            if (segment.classList.contains("manabi-tracking-suspended")) { return "suspended"; }
+            if (segment.classList.contains("mnb-read")) { return "familiar"; }
+            if (segment.classList.contains("mnb-suspended")) { return "suspended"; }
             return "unknown";
         }
         function summarizeSegment(segment) {
@@ -4698,7 +4698,6 @@ fileprivate struct ReaderDocStateUserScript {
             const counts = {
                 segments: segments.length,
                 surfaces: surfaces.length,
-                applied: 0,
                 familiar: 0,
                 learning: 0,
                 known: 0,
@@ -4709,9 +4708,6 @@ fileprivate struct ReaderDocStateUserScript {
                 segmentsWithoutSurface: 0
             };
             for (const segment of segments) {
-                if (segment.classList.contains("manabi-tracking-applied")) {
-                    counts.applied += 1;
-                }
                 const state = trackingStateForSegment(segment);
                 counts[state] = (counts[state] ?? 0) + 1;
                 if (hiddenReason(segment)) {
