@@ -5433,7 +5433,7 @@ public class WebViewController: UIViewController {
             return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
           }) ?? null;
           const firstSegment = document.querySelector('mnb-seg');
-          const firstSurface = document.querySelector('span.mnb-sur');
+          const firstSurface = document.querySelector('mnb-sur');
           const describe = (node) => {
             if (!node) return null;
             const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
@@ -5468,7 +5468,7 @@ public class WebViewController: UIViewController {
             segmentCount: document.querySelectorAll('mnb-seg').length,
             elementAtCenter: describe(elementAtCenter),
             centerClosestSegment: describe(elementAtCenter?.closest?.('mnb-seg') ?? null),
-            centerClosestSurface: describe(elementAtCenter?.closest?.('span.mnb-sur') ?? null),
+            centerClosestSurface: describe(elementAtCenter?.closest?.('mnb-sur') ?? null),
             firstVisibleButton: describe(firstVisibleButton),
             firstSegment: describe(firstSegment),
             firstSurface: describe(firstSurface)
@@ -5569,7 +5569,7 @@ public class WebViewController: UIViewController {
           const y = \(y);
           const element = document.elementFromPoint(x, y);
           const closestSegment = element?.closest?.('mnb-seg') ?? null;
-          const closestSurface = element?.closest?.('span.mnb-sur') ?? null;
+          const closestSurface = element?.closest?.('mnb-sur') ?? null;
           const closestButton = element?.closest?.('.mnb-tracking-button') ?? null;
           const firstVisibleButton = Array.from(document.querySelectorAll('.mnb-tracking-button')).find((button) => {
             const style = getComputedStyle(button);
