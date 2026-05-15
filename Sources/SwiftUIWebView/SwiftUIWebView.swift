@@ -11,16 +11,6 @@ import AppKit
 #endif
 
 @inline(__always)
-private func lookupSmar10NativeWebViewLog(_ stage: String, _ metadata: [String: Any] = [:]) {
-    #if DEBUG
-    guard ProcessInfo.processInfo.environment["MANABI_LOOKUPSMAR10_NATIVE"] == "1" else { return }
-    var payload = metadata
-    payload["stage"] = stage
-    Swift.debugPrint("# LOOKUPSMAR10", payload)
-    #endif
-}
-
-@inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
     guard let start else { return "nil" }
     return String(format: "%.3fs", now.timeIntervalSince(start))
@@ -633,6 +623,203 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
     public static func == (lhs: WebViewMessage, rhs: WebViewMessage) -> Bool {
         lhs.uuid == rhs.uuid
         && lhs.name == rhs.name && lhs.frameInfo == rhs.frameInfo
+    }
+}
+
+public struct WebViewNativeLookupHitTarget {
+    public let elementID: String
+    public let rects: [CGRect]
+
+    public init(elementID: String, rects: [CGRect]) {
+        self.elementID = elementID
+        self.rects = rects
+    }
+}
+
+public struct WebViewNativeLookupHit {
+    public let elementID: String
+    public let point: CGPoint
+
+    public init(elementID: String, point: CGPoint) {
+        self.elementID = elementID
+        self.point = point
+    }
+}
+
+public final class WebViewNativeLookupHitTestStore {
+    private struct ViewportBounds {
+        let x: CGFloat
+        let y: CGFloat
+        let width: CGFloat
+        let height: CGFloat
+    }
+
+    private struct Entry {
+        let target: WebViewNativeLookupHitTarget
+        let rects: [CGRect]
+        let hitRects: [CGRect]
+    }
+
+    private struct Candidate {
+        let target: WebViewNativeLookupHitTarget
+        let distance: CGFloat
+        let centerDistance: CGFloat
+        let area: CGFloat
+        let index: Int
+    }
+
+    private let hitSlop: CGFloat
+    private var entries: [Entry] = []
+    private var viewportBounds: ViewportBounds?
+    public var onHit: ((WebViewNativeLookupHit) -> Void)?
+
+    public init(hitSlop: CGFloat = 6) {
+        self.hitSlop = hitSlop
+    }
+
+    public func updateTargets(
+        _ targets: [WebViewNativeLookupHitTarget],
+        viewportSize: CGSize? = nil,
+        viewportOrigin: CGPoint = .zero
+    ) {
+        self.viewportBounds = Self.validViewportBounds(size: viewportSize, origin: viewportOrigin)
+        entries = targets.compactMap { target in
+            let rects = target.rects
+                .filter { !$0.isNull && !$0.isEmpty }
+            let hitRects = rects.map { $0.insetBy(dx: -hitSlop, dy: -hitSlop) }
+            guard !hitRects.isEmpty else { return nil }
+            return Entry(target: target, rects: rects, hitRects: hitRects)
+        }
+    }
+
+    public func removeAllTargets() {
+        entries.removeAll()
+        viewportBounds = nil
+    }
+
+    public func hitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
+        let lookupPoint = pointInViewportCoordinates(point, containerSize: containerSize)
+        let exactCandidate = bestCandidate(at: lookupPoint, usingInflatedRects: false)
+        if let exactCandidate {
+            return exactCandidate.target
+        }
+        return bestCandidate(at: lookupPoint, usingInflatedRects: true)?.target
+    }
+
+    private func bestCandidate(at point: CGPoint, usingInflatedRects: Bool) -> Candidate? {
+        var best: Candidate?
+        for (index, entry) in entries.enumerated() {
+            let searchRects = usingInflatedRects ? entry.hitRects : entry.rects
+            guard searchRects.contains(where: { $0.contains(point) }) else { continue }
+            guard let candidate = bestRectCandidate(
+                for: entry,
+                point: point,
+                searchRects: searchRects,
+                index: index
+            ) else { continue }
+            if isBetter(candidate, than: best) {
+                best = candidate
+            }
+        }
+        return best
+    }
+
+    private func bestRectCandidate(
+        for entry: Entry,
+        point: CGPoint,
+        searchRects: [CGRect],
+        index: Int
+    ) -> Candidate? {
+        searchRects
+            .map { rect in
+                Candidate(
+                    target: entry.target,
+                    distance: distance(from: point, to: rect),
+                    centerDistance: hypot(point.x - rect.midX, point.y - rect.midY),
+                    area: rect.width * rect.height,
+                    index: index
+                )
+            }
+            .min { lhs, rhs in isBetter(lhs, than: rhs) }
+    }
+
+    private func isBetter(_ candidate: Candidate, than other: Candidate?) -> Bool {
+        guard let other else { return true }
+        if candidate.distance != other.distance {
+            return candidate.distance < other.distance
+        }
+        if candidate.centerDistance != other.centerDistance {
+            return candidate.centerDistance < other.centerDistance
+        }
+        if candidate.area != other.area {
+            return candidate.area < other.area
+        }
+        return candidate.index < other.index
+    }
+
+    private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        let dx: CGFloat
+        if point.x < rect.minX {
+            dx = rect.minX - point.x
+        } else if point.x > rect.maxX {
+            dx = point.x - rect.maxX
+        } else {
+            dx = 0
+        }
+        let dy: CGFloat
+        if point.y < rect.minY {
+            dy = rect.minY - point.y
+        } else if point.y > rect.maxY {
+            dy = point.y - rect.maxY
+        } else {
+            dy = 0
+        }
+        if dx == 0 {
+            return dy
+        }
+        if dy == 0 {
+            return dx
+        }
+        return hypot(dx, dy)
+    }
+
+    public func containsTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        hitTarget(at: point, in: containerSize) != nil
+    }
+
+    public func handleTap(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        let lookupPoint = pointInViewportCoordinates(point, containerSize: containerSize)
+        guard let target = hitTarget(at: point, in: containerSize) else { return false }
+        onHit?(WebViewNativeLookupHit(elementID: target.elementID, point: lookupPoint))
+        return true
+    }
+
+    private static func validViewportBounds(size: CGSize?, origin: CGPoint) -> ViewportBounds? {
+        guard let size,
+              origin.x.isFinite,
+              origin.y.isFinite,
+              size.width.isFinite,
+              size.height.isFinite,
+              size.width > 0,
+              size.height > 0 else {
+            return nil
+        }
+        return ViewportBounds(x: origin.x, y: origin.y, width: size.width, height: size.height)
+    }
+
+    private func pointInViewportCoordinates(_ point: CGPoint, containerSize: CGSize?) -> CGPoint {
+        guard let viewportBounds,
+              let containerSize,
+              containerSize.width.isFinite,
+              containerSize.height.isFinite,
+              containerSize.width > 0,
+              containerSize.height > 0 else {
+            return point
+        }
+        return CGPoint(
+            x: viewportBounds.x + point.x * viewportBounds.width / containerSize.width,
+            y: viewportBounds.y + point.y * viewportBounds.height / containerSize.height
+        )
     }
 }
 
@@ -2236,6 +2423,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        navigator.nativeLookupHitTesting.removeAllTargets()
 #if os(iOS)
         reapplyHostObscuredInsetsForNavigation("navigationStart")
 #endif
@@ -2553,6 +2741,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
     public var shouldLoadFallbackOnAttach = true
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
+    public let nativeLookupHitTesting = WebViewNativeLookupHitTestStore()
     @MainActor fileprivate var forceClearLoadingIndicatorsHandler: ((String, URL?) -> Void)?
 
     public struct DebugLoadSnapshot {
@@ -5017,52 +5206,128 @@ public class EnhancedWKWebView: WKWebView {
 }
 
 #if os(iOS)
-private final class WebViewTouchProbeGestureRecognizer: UIGestureRecognizer {
-    var onTouchBegan: ((CGPoint) -> Void)?
+private final class NativeLookupHitTestOverlayView: UIView {
+    weak var store: WebViewNativeLookupHitTestStore?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = true
+        isAccessibilityElement = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        store?.containsTarget(at: point, in: bounds.size) == true
+    }
+}
+
+private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer {
+    private static let segmentTapMovementTolerance: CGFloat = 12
+    private static let segmentTapMaximumDuration: TimeInterval = 0.32
+
+    weak var store: WebViewNativeLookupHitTestStore?
+    private var touchStartPoint: CGPoint?
+    private var touchStartTime: TimeInterval?
+    private var tapExpirationWorkItem: DispatchWorkItem?
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
-        cancelsTouchesInView = false
-        delaysTouchesBegan = false
-        delaysTouchesEnded = false
+        cancelsTouchesInView = true
+        delaysTouchesBegan = true
+        delaysTouchesEnded = true
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard let touch = touches.first, let view else {
+        guard state == .possible,
+              touches.count == 1,
+              event.allTouches?.count == 1,
+              let touch = touches.first,
+              let view else {
             state = .failed
             return
         }
         let point = touch.location(in: view)
-        onTouchBegan?(point)
-        state = .failed
+        guard store?.containsTarget(at: point, in: view.bounds.size) == true else {
+            state = .failed
+            return
+        }
+        touchStartPoint = point
+        touchStartTime = event.timestamp
+        tapExpirationWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .possible else { return }
+            self.failGesture()
+        }
+        tapExpirationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        state = .failed
+        guard let start = touchStartPoint,
+              let touch = touches.first,
+              let view else { return }
+        let point = touch.location(in: view)
+        if hypot(point.x - start.x, point.y - start.y) > Self.segmentTapMovementTolerance {
+            failGesture()
+        }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        state = .failed
+        defer { resetTrackingState() }
+        guard let start = touchStartPoint,
+              let startedAt = touchStartTime,
+              let touch = touches.first,
+              let view else {
+            state = .failed
+            return
+        }
+        guard event.timestamp - startedAt <= Self.segmentTapMaximumDuration else {
+            state = .failed
+            return
+        }
+        let point = touch.location(in: view)
+        guard hypot(point.x - start.x, point.y - start.y) <= Self.segmentTapMovementTolerance,
+              store?.handleTap(at: point, in: view.bounds.size) == true else {
+            state = .failed
+            return
+        }
+        state = .recognized
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        state = .cancelled
+        resetTrackingState()
+        state = .failed
     }
 
-    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
-        false
+    override func reset() {
+        resetTrackingState()
     }
 
-    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
-        false
+    private func resetTrackingState() {
+        tapExpirationWorkItem?.cancel()
+        tapExpirationWorkItem = nil
+        touchStartPoint = nil
+        touchStartTime = nil
+    }
+
+    private func failGesture() {
+        resetTrackingState()
+        state = .failed
     }
 }
 
 public class WebViewController: UIViewController {
     var webView: EnhancedWKWebView
     private var webViewConstraints: [NSLayoutConstraint] = []
+    private var nativeLookupOverlayConstraints: [NSLayoutConstraint] = []
     private var snapshotImageView: UIImageView?
-    private var touchProbeGestureRecognizer: WebViewTouchProbeGestureRecognizer?
+    private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
+    private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
     private var lastKnownWebViewSize: CGSize = .zero
     private var lastAppliedAdditionalSafeAreaInsets = UIEdgeInsets.zero
     private var lastAppliedObscuredInsets = UIEdgeInsets.zero
@@ -5081,7 +5346,6 @@ public class WebViewController: UIViewController {
     public init(webView: EnhancedWKWebView) {
         self.webView = webView
         super.init(nibName: nil, bundle: nil)
-        installTouchProbeIfNeeded()
         attachWebView(webView)
     }
     
@@ -5101,12 +5365,6 @@ public class WebViewController: UIViewController {
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         onViewDidAppear?()
-        logLookupSmar10SurfaceState(source: "native.webView.surfaceState.viewDidAppear")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            self.logLookupSmar10SurfaceState(source: "native.webView.surfaceState.viewDidAppear.delayed")
-        }
     }
 
     public override func viewDidDisappear(_ animated: Bool) {
@@ -5281,9 +5539,18 @@ public class WebViewController: UIViewController {
     }
 
     @MainActor
+    func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
+        nativeLookupHitTestOverlayView.store = store
+        nativeLookupHitTestGestureRecognizer.store = store
+    }
+
+    @MainActor
     func detachWebView() {
         NSLayoutConstraint.deactivate(webViewConstraints)
         webViewConstraints.removeAll()
+        NSLayoutConstraint.deactivate(nativeLookupOverlayConstraints)
+        nativeLookupOverlayConstraints.removeAll()
+        nativeLookupHitTestOverlayView.removeFromSuperview()
         webView.removeFromSuperview()
     }
 
@@ -5359,6 +5626,7 @@ public class WebViewController: UIViewController {
             view.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(webViewConstraints)
+        installNativeLookupHitTestOverlay(over: webView)
         readerLoadLog(
             "webViewController.attachWebView",
             [
@@ -5371,266 +5639,22 @@ public class WebViewController: UIViewController {
     }
 
     @MainActor
-    private func installTouchProbeIfNeeded() {
-        guard touchProbeGestureRecognizer == nil else { return }
-        let recognizer = WebViewTouchProbeGestureRecognizer()
-        recognizer.onTouchBegan = { [weak self] point in
-            self?.logLookupSmar10Touch(pointInController: point)
+    private func installNativeLookupHitTestOverlay(over webView: EnhancedWKWebView) {
+        nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
+        nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+        nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+        if let snapshotImageView {
+            view.insertSubview(nativeLookupHitTestOverlayView, belowSubview: snapshotImageView)
+        } else {
+            view.addSubview(nativeLookupHitTestOverlayView)
         }
-        view.addGestureRecognizer(recognizer)
-        touchProbeGestureRecognizer = recognizer
-    }
-
-    @MainActor
-    private func colorDescription(_ color: UIColor?) -> String {
-        guard let color else { return "nil" }
-        return String(describing: color)
-    }
-
-    @MainActor
-    private func logLookupSmar10SurfaceState(source: String) {
-        let snapshotOverlay = snapshotImageView
-        let payload: [String: Any] = [
-            "stage": source,
-            "pageURL": webView.url?.absoluteString ?? "nil",
-            "liveWebViewURL": webView.url?.absoluteString ?? "nil",
-            "controllerFrame": NSCoder.string(for: view.frame),
-            "controllerBounds": NSCoder.string(for: view.bounds),
-            "controllerHidden": view.isHidden,
-            "controllerAlpha": view.alpha,
-            "viewBackgroundColor": colorDescription(view.backgroundColor),
-            "webViewFrame": NSCoder.string(for: webView.frame),
-            "webViewBounds": NSCoder.string(for: webView.bounds),
-            "webViewHidden": webView.isHidden,
-            "webViewAlpha": webView.alpha,
-            "window": String(describing: view.window.map(ObjectIdentifier.init)),
-            "subviewCount": view.subviews.count,
-            "subviewTypes": view.subviews.map { String(describing: type(of: $0)) },
-            "snapshotOverlayPresent": snapshotOverlay != nil,
-            "snapshotOverlayHidden": snapshotOverlay?.isHidden ?? false,
-            "snapshotOverlayAlpha": snapshotOverlay?.alpha ?? 0,
-            "snapshotOverlayFrame": snapshotOverlay.map { NSCoder.string(for: $0.frame) } ?? "nil",
-            "snapshotOverlayUserInteractionEnabled": snapshotOverlay?.isUserInteractionEnabled ?? false,
-            "isWebViewUnloaded": isWebViewUnloaded
+        nativeLookupOverlayConstraints = [
+            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: webView.topAnchor),
+            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: webView.leftAnchor),
+            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
-        lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-    }
-
-    @MainActor
-    private func logLookupSmar10ViewportDOMProbe(source: String) {
-        guard webView.url?.absoluteString != "about:blank" else { return }
-        let pointInWebView = CGPoint(x: webView.bounds.midX, y: webView.bounds.midY)
-        guard webView.bounds.contains(pointInWebView) else { return }
-        let x = pointInWebView.x
-        let y = pointInWebView.y
-        let js = """
-        (function() {
-          const viewportX = \(x);
-          const viewportY = \(y);
-          const elementAtCenter = document.elementFromPoint(viewportX, viewportY);
-          const firstVisibleButton = Array.from(document.querySelectorAll('.mnb-tracking-button')).find((button) => {
-            const style = getComputedStyle(button);
-            return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
-          }) ?? null;
-          const firstSegment = document.querySelector('mnb-seg');
-          const firstSurface = document.querySelector('mnb-sur');
-          const describe = (node) => {
-            if (!node) return null;
-            const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
-            const style = getComputedStyle(node);
-            return {
-              tag: node.tagName ?? null,
-              id: node.id ?? null,
-              className: typeof node.className === 'string' ? node.className : null,
-              textSample: (node.textContent || '').trim().slice(0, 80),
-              pointerEvents: style.pointerEvents ?? null,
-              userSelect: style.userSelect ?? null,
-              touchAction: style.touchAction ?? null,
-              opacity: style.opacity ?? null,
-              display: style.display ?? null,
-              visibility: style.visibility ?? null,
-              backgroundColor: style.backgroundColor ?? null,
-              color: style.color ?? null,
-              rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
-            };
-          };
-          return JSON.stringify({
-            source: \(String(reflecting: source)),
-            viewportX,
-            viewportY,
-            bodyClassName: document.body?.className ?? null,
-            readerContentClassName: document.getElementById('reader-content')?.className ?? null,
-            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.mnb-tracking-button')).filter((button) => {
-              const style = getComputedStyle(button);
-              return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
-            }).length,
-            sectionCount: document.querySelectorAll('.mnb-tracking-section').length,
-            segmentCount: document.querySelectorAll('mnb-seg').length,
-            elementAtCenter: describe(elementAtCenter),
-            centerClosestSegment: describe(elementAtCenter?.closest?.('mnb-seg') ?? null),
-            centerClosestSurface: describe(elementAtCenter?.closest?.('mnb-sur') ?? null),
-            firstVisibleButton: describe(firstVisibleButton),
-            firstSegment: describe(firstSegment),
-            firstSurface: describe(firstSurface)
-            });
-        })()
-        """
-        webView.evaluateJavaScript(js) { result, error in
-            var payload: [String: Any] = [
-                "stage": "native.webView.viewport.domProbe",
-                "pageURL": self.webView.url?.absoluteString ?? "nil"
-            ]
-            if let error {
-                payload["error"] = error.localizedDescription
-                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-                return
-            }
-            if let string = result as? String,
-               let data = string.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                self.appendFlattenedLookupSmar10Probe(object, into: &payload)
-                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-                return
-            }
-            payload["error"] = result == nil ? "nilResult" : "unexpectedResultType"
-            payload["type"] = result.map { String(describing: type(of: $0)) } ?? "nil"
-            lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-        }
-    }
-
-    @MainActor
-    func logLookupSmar10ViewportDOMProbeFromHost(source: String) {
-        logLookupSmar10ViewportDOMProbe(source: source)
-    }
-
-    @MainActor
-    private func logLookupSmar10Touch(pointInController: CGPoint) {
-        let hitView = view.hitTest(pointInController, with: nil)
-        let pointInWebView = view.convert(pointInController, to: webView)
-        let webViewHitView = webView.hitTest(pointInWebView, with: nil)
-        let payload: [String: Any] = [
-            "stage": "native.webView.touch",
-            "pageURL": webView.url?.absoluteString ?? "nil",
-            "liveWebViewURL": webView.url?.absoluteString ?? "nil",
-            "controllerFrame": NSCoder.string(for: view.frame),
-            "controllerBounds": NSCoder.string(for: view.bounds),
-            "controllerHidden": view.isHidden,
-            "controllerAlpha": view.alpha,
-            "controllerWindow": String(describing: view.window.map(ObjectIdentifier.init)),
-            "pointInController": NSCoder.string(for: pointInController),
-            "webViewFrame": NSCoder.string(for: webView.frame),
-            "webViewBounds": NSCoder.string(for: webView.bounds),
-            "webViewHidden": webView.isHidden,
-            "webViewAlpha": webView.alpha,
-            "webViewWindow": String(describing: webView.window.map(ObjectIdentifier.init)),
-            "pointInWebView": NSCoder.string(for: pointInWebView),
-            "hitViewClass": hitView.map { String(describing: type(of: $0)) } ?? "nil",
-            "webViewHitViewClass": webViewHitView.map { String(describing: type(of: $0)) } ?? "nil",
-            "hitInsideWebView": webView.bounds.contains(pointInWebView),
-            "isWebViewUnloaded": isWebViewUnloaded
-        ]
-        lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-        logLookupSmar10TouchDOMProbe(pointInWebView: pointInWebView)
-    }
-
-    @MainActor
-    private func appendFlattenedLookupSmar10Probe(_ object: [String: Any], into payload: inout [String: Any]) {
-        func stringify(_ value: Any?) -> String {
-            guard let value else { return "nil" }
-            if let string = value as? String { return string }
-            if let number = value as? NSNumber { return number.stringValue }
-            if let dictionary = value as? [String: Any],
-               let data = try? JSONSerialization.data(withJSONObject: dictionary, options: [.sortedKeys]),
-               let string = String(data: data, encoding: .utf8) {
-                return string
-            }
-            if let array = value as? [Any],
-               let data = try? JSONSerialization.data(withJSONObject: array, options: [.sortedKeys]),
-               let string = String(data: data, encoding: .utf8) {
-                return string
-            }
-            return String(describing: value)
-        }
-
-        for (key, value) in object {
-            payload[key] = stringify(value)
-        }
-    }
-
-    @MainActor
-    private func logLookupSmar10TouchDOMProbe(pointInWebView: CGPoint) {
-        guard webView.url?.absoluteString != "about:blank" else { return }
-        guard webView.bounds.contains(pointInWebView) else { return }
-        let x = pointInWebView.x
-        let y = pointInWebView.y
-        let js = """
-        (function() {
-          const x = \(x);
-          const y = \(y);
-          const element = document.elementFromPoint(x, y);
-          const closestSegment = element?.closest?.('mnb-seg') ?? null;
-          const closestSurface = element?.closest?.('mnb-sur') ?? null;
-          const closestButton = element?.closest?.('.mnb-tracking-button') ?? null;
-          const firstVisibleButton = Array.from(document.querySelectorAll('.mnb-tracking-button')).find((button) => {
-            const style = getComputedStyle(button);
-            return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
-          }) ?? null;
-          const describe = (node) => {
-            if (!node) return null;
-            const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null;
-            const style = getComputedStyle(node);
-            return {
-              tag: node.tagName ?? null,
-              id: node.id ?? null,
-              className: typeof node.className === 'string' ? node.className : null,
-              textSample: (node.textContent || '').trim().slice(0, 80),
-              pointerEvents: style.pointerEvents ?? null,
-              userSelect: style.userSelect ?? null,
-              touchAction: style.touchAction ?? null,
-              opacity: style.opacity ?? null,
-              display: style.display ?? null,
-              visibility: style.visibility ?? null,
-              rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
-            };
-          };
-          return JSON.stringify({
-            pointX: x,
-            pointY: y,
-            bodyClassName: document.body?.className ?? null,
-            visibleTrackingButtonCount: Array.from(document.querySelectorAll('.mnb-tracking-button')).filter((button) => {
-              const style = getComputedStyle(button);
-              return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.01;
-            }).length,
-            segmentCount: document.querySelectorAll('mnb-seg').length,
-            element: describe(element),
-            closestSegment: describe(closestSegment),
-            closestSurface: describe(closestSurface),
-            closestButton: describe(closestButton),
-            firstVisibleButton: describe(firstVisibleButton)
-          });
-        })()
-        """
-        webView.evaluateJavaScript(js) { result, error in
-            var payload: [String: Any] = [
-                "stage": "native.webView.touch.domProbe",
-                "pageURL": self.webView.url?.absoluteString ?? "nil"
-            ]
-            if let error {
-                payload["error"] = error.localizedDescription
-                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-                return
-            }
-            if let string = result as? String,
-               let data = string.data(using: .utf8),
-               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                self.appendFlattenedLookupSmar10Probe(object, into: &payload)
-                lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-                return
-            }
-            payload["error"] = result == nil ? "nilResult" : "unexpectedResultType"
-            payload["type"] = result.map { String(describing: type(of: $0)) } ?? "nil"
-            lookupSmar10NativeWebViewLog(payload["stage"] as? String ?? "native.webView.unknown", payload)
-        }
+        NSLayoutConstraint.activate(nativeLookupOverlayConstraints)
     }
 
 }
@@ -6274,6 +6298,7 @@ extension WebView: UIViewControllerRepresentable {
             }
         }
         context.coordinator.textSelection = $textSelection
+        controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         refreshDarkModeSetting(webView: webView)
         applyVisualConfiguration(webView: webView, containerView: controller.view)
     }
@@ -6337,6 +6362,7 @@ extension WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
+        controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         if let resolvedWebViewPool {
             resolvedWebViewPool.attachWarmShelfIfNeeded(to: controller.view.window)
         }
@@ -6596,6 +6622,7 @@ extension WebView: UIViewControllerRepresentable {
             ]
         )
         controller.clearSnapshotOverlay()
+        coordinator.navigator.nativeLookupHitTesting.removeAllTargets()
         coordinator.tearDownBindingsForDetachedWebView(controller.webView)
         if let pool = coordinator.webViewPool {
             if !controller.isWebViewUnloaded {
@@ -6610,9 +6637,74 @@ extension WebView: UIViewControllerRepresentable {
 #endif
 
 #if os(macOS)
+private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRecognizer {
+    weak var store: WebViewNativeLookupHitTestStore?
+
+    override func mouseDown(with event: NSEvent) {
+        guard let view else {
+            state = .failed
+            return
+        }
+        let point = view.convert(event.locationInWindow, from: nil)
+        guard store?.containsTarget(at: point, in: view.bounds.size) == true else {
+            state = .failed
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+public final class WebViewHostNSView: NSView {
+    let webView: EnhancedWKWebView
+    private lazy var nativeLookupHitTestGestureRecognizer = NativeLookupHitTestClickGestureRecognizer(
+        target: self,
+        action: #selector(handleNativeLookupHitTestClick(_:))
+    )
+
+    public override var isFlipped: Bool { true }
+
+    init(webView: EnhancedWKWebView) {
+        self.webView = webView
+        super.init(frame: .zero)
+        attachWebView()
+        installNativeLookupHitTestGestureRecognizer()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @MainActor
+    func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
+        nativeLookupHitTestGestureRecognizer.store = store
+    }
+
+    private func attachWebView() {
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(webView)
+        NSLayoutConstraint.activate([
+            topAnchor.constraint(equalTo: webView.topAnchor),
+            leftAnchor.constraint(equalTo: webView.leftAnchor),
+            bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            rightAnchor.constraint(equalTo: webView.rightAnchor)
+        ])
+    }
+
+    private func installNativeLookupHitTestGestureRecognizer() {
+        nativeLookupHitTestGestureRecognizer.numberOfClicksRequired = 1
+        nativeLookupHitTestGestureRecognizer.delaysPrimaryMouseButtonEvents = true
+        webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+    }
+
+    @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        _ = recognizer.store?.handleTap(at: recognizer.location(in: webView), in: webView.bounds.size)
+    }
+}
+
 extension WebView: NSViewRepresentable {
     @MainActor
-    public func makeNSView(context: Context) -> EnhancedWKWebView {
+    public func makeNSView(context: Context) -> WebViewHostNSView {
         if let resolvedWebViewPool {
             resolvedWebViewPool.setCreationClosureIfNeeded {
                 makeNewWebView(context: context)
@@ -6717,7 +6809,9 @@ extension WebView: NSViewRepresentable {
         
         refreshDarkModeSetting(webView: webView)
         
-        return webView
+        let hostView = WebViewHostNSView(webView: webView)
+        hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+        return hostView
     }
 
     @MainActor
@@ -6747,13 +6841,15 @@ extension WebView: NSViewRepresentable {
     }
     
     @MainActor
-    public func updateNSView(_ uiView: EnhancedWKWebView, context: Context) {
+    public func updateNSView(_ uiView: WebViewHostNSView, context: Context) {
         updateCoordinatorBindings(context: context)
+        uiView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+        let webView = uiView.webView
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
-        let resolvedDomain = resolvedUserScriptDomain(currentURL: uiView.url)
+        let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
         let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
         let currentConfigurationState = webViewConfigurationState(
-            webView: uiView,
+            webView: webView,
             resolvedDomain: resolvedDomain,
             resolvedUserScriptsState: resolvedUserScriptsState,
             resolvedContentRules: resolvedContentRules,
@@ -6762,28 +6858,28 @@ extension WebView: NSViewRepresentable {
 
         if context.coordinator.lastAppliedConfigurationState != currentConfigurationState {
             applyCommonConfiguration(
-                webView: uiView,
+                webView: webView,
                 context: context,
                 resolvedContentRules: resolvedContentRules
             )
             updateUserScripts(
-                userContentController: uiView.configuration.userContentController,
+                userContentController: webView.configuration.userContentController,
                 coordinator: context.coordinator,
                 forDomain: resolvedDomain,
                 config: config,
                 resolvedState: resolvedUserScriptsState
             )
-            refreshDarkModeSetting(webView: uiView)
+            refreshDarkModeSetting(webView: webView)
             let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-            uiView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+            webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
             if #available(macOS 11.0, *) {
                 let resolvedBackgroundColor: NSColor = config.usesSampledPageTopColorForUnderPageBackground
                     && !manabiCanUseSampledPageTopColorBackground()
                     ? (config.isOpaque ? .windowBackgroundColor : .clear)
                     : NSColor(config.backgroundColor)
-                uiView.layer?.backgroundColor = resolvedBackgroundColor.cgColor
+                webView.layer?.backgroundColor = resolvedBackgroundColor.cgColor
             } else {
-                uiView.layer?.backgroundColor = NSColor.clear.cgColor
+                webView.layer?.backgroundColor = NSColor.clear.cgColor
             }
             context.coordinator.lastAppliedConfigurationState = currentConfigurationState
         }
@@ -6794,10 +6890,13 @@ extension WebView: NSViewRepresentable {
         
     }
     
-    public static func dismantleNSView(_ nsView: EnhancedWKWebView, coordinator: WebViewCoordinator) {
-        coordinator.tearDownBindingsForDetachedWebView(nsView)
+    public static func dismantleNSView(_ nsView: WebViewHostNSView, coordinator: WebViewCoordinator) {
+        let webView = nsView.webView
+        coordinator.navigator.nativeLookupHitTesting.removeAllTargets()
+        coordinator.tearDownBindingsForDetachedWebView(webView)
         if let pool = coordinator.webViewPool {
-            pool.enqueue(nsView)
+            webView.removeFromSuperview()
+            pool.enqueue(webView)
         }
     }
 }
