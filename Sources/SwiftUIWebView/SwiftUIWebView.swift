@@ -1126,31 +1126,63 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
 public struct WebViewNativeLookupHitTarget {
     public let elementID: String
     public let rects: [CGRect]
+    public let frameInfo: WKFrameInfo?
+    public let debugUsedInflatedHitRect: Bool?
+    public let debugHitRects: [CGRect]
+    public let debugDistance: CGFloat?
+    public let debugCenterDistance: CGFloat?
 
-    public init(elementID: String, rects: [CGRect]) {
+    public init(
+        elementID: String,
+        rects: [CGRect],
+        frameInfo: WKFrameInfo? = nil,
+        debugUsedInflatedHitRect: Bool? = nil,
+        debugHitRects: [CGRect] = [],
+        debugDistance: CGFloat? = nil,
+        debugCenterDistance: CGFloat? = nil
+    ) {
         self.elementID = elementID
         self.rects = rects
+        self.frameInfo = frameInfo
+        self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
+        self.debugHitRects = debugHitRects
+        self.debugDistance = debugDistance
+        self.debugCenterDistance = debugCenterDistance
     }
 }
 
 public struct WebViewNativeLookupHit {
     public let elementID: String
     public let point: CGPoint
+    public let rects: [CGRect]
+    public let debugUsedInflatedHitRect: Bool?
+    public let debugHitRects: [CGRect]
+    public let debugDistance: CGFloat?
+    public let debugCenterDistance: CGFloat?
+    public let frameInfo: WKFrameInfo?
 
-    public init(elementID: String, point: CGPoint) {
+    public init(
+        elementID: String,
+        point: CGPoint,
+        rects: [CGRect] = [],
+        debugUsedInflatedHitRect: Bool? = nil,
+        debugHitRects: [CGRect] = [],
+        debugDistance: CGFloat? = nil,
+        debugCenterDistance: CGFloat? = nil,
+        frameInfo: WKFrameInfo? = nil
+    ) {
         self.elementID = elementID
         self.point = point
+        self.rects = rects
+        self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
+        self.debugHitRects = debugHitRects
+        self.debugDistance = debugDistance
+        self.debugCenterDistance = debugCenterDistance
+        self.frameInfo = frameInfo
     }
 }
 
 public final class WebViewNativeLookupHitTestStore {
-    private struct ViewportBounds {
-        let x: CGFloat
-        let y: CGFloat
-        let width: CGFloat
-        let height: CGFloat
-    }
-
     private struct Entry {
         let target: WebViewNativeLookupHitTarget
         let rects: [CGRect]
@@ -1159,6 +1191,8 @@ public final class WebViewNativeLookupHitTestStore {
 
     private struct Candidate {
         let target: WebViewNativeLookupHitTarget
+        let rect: CGRect
+        let hitRect: CGRect
         let distance: CGFloat
         let centerDistance: CGFloat
         let area: CGFloat
@@ -1167,19 +1201,22 @@ public final class WebViewNativeLookupHitTestStore {
 
     private let hitSlop: CGFloat
     private var entries: [Entry] = []
-    private var viewportBounds: ViewportBounds?
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
+    public var onActiveTargetTouchDown: ((WebViewNativeLookupHitTarget) -> Void)?
+    public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
+    public var activeLookupElementID: (() -> String?)?
+    public var activeElementID: String?
+    public var targetCount: Int { entries.count }
 
-    public init(hitSlop: CGFloat = 6) {
+    public init(hitSlop: CGFloat = 8) {
         self.hitSlop = hitSlop
     }
 
     public func updateTargets(
         _ targets: [WebViewNativeLookupHitTarget],
-        viewportSize: CGSize? = nil,
-        viewportOrigin: CGPoint = .zero
+        viewportSize _: CGSize? = nil,
+        viewportOrigin _: CGPoint = .zero
     ) {
-        self.viewportBounds = Self.validViewportBounds(size: viewportSize, origin: viewportOrigin)
         entries = targets.compactMap { target in
             let rects = target.rects
                 .filter { !$0.isNull && !$0.isEmpty }
@@ -1187,20 +1224,37 @@ public final class WebViewNativeLookupHitTestStore {
             guard !hitRects.isEmpty else { return nil }
             return Entry(target: target, rects: rects, hitRects: hitRects)
         }
+        debugPrint(
+            "# MAY15 nativeHitTargets.update",
+            [
+                "targetCount": targets.count,
+                "entryCount": entries.count,
+                "firstElementID": entries.first?.target.elementID as Any,
+                "firstRects": entries.first.map { Self.debugRectStrings($0.rects.prefix(3)) } as Any,
+                "lastElementID": entries.last?.target.elementID as Any,
+                "lastRects": entries.last.map { Self.debugRectStrings($0.rects.suffix(3)) } as Any,
+            ] as [String : Any]
+        )
     }
 
     public func removeAllTargets() {
         entries.removeAll()
-        viewportBounds = nil
     }
 
     public func hitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
-        let lookupPoint = pointInViewportCoordinates(point, containerSize: containerSize)
-        let exactCandidate = bestCandidate(at: lookupPoint, usingInflatedRects: false)
+        let exactCandidate = bestCandidate(at: point, usingInflatedRects: false)
         if let exactCandidate {
-            return exactCandidate.target
+            return target(for: exactCandidate, usedInflatedHitRect: false)
         }
-        return bestCandidate(at: lookupPoint, usingInflatedRects: true)?.target
+        return bestCandidate(at: point, usingInflatedRects: true).map {
+            target(for: $0, usedInflatedHitRect: true)
+        }
+    }
+
+    public func exactHitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
+        bestCandidate(at: point, usingInflatedRects: false).map {
+            target(for: $0, usedInflatedHitRect: false)
+        }
     }
 
     private func bestCandidate(at point: CGPoint, usingInflatedRects: Bool) -> Candidate? {
@@ -1211,7 +1265,7 @@ public final class WebViewNativeLookupHitTestStore {
             guard let candidate = bestRectCandidate(
                 for: entry,
                 point: point,
-                searchRects: searchRects,
+                usingInflatedRects: usingInflatedRects,
                 index: index
             ) else { continue }
             if isBetter(candidate, than: best) {
@@ -1224,16 +1278,22 @@ public final class WebViewNativeLookupHitTestStore {
     private func bestRectCandidate(
         for entry: Entry,
         point: CGPoint,
-        searchRects: [CGRect],
+        usingInflatedRects: Bool,
         index: Int
     ) -> Candidate? {
-        searchRects
-            .map { rect in
-                Candidate(
+        let searchRects = usingInflatedRects ? entry.hitRects : entry.rects
+        return searchRects
+            .enumerated()
+            .filter { _, hitRect in hitRect.contains(point) }
+            .map { rectIndex, hitRect in
+                let rect = entry.rects[rectIndex]
+                return Candidate(
                     target: entry.target,
-                    distance: distance(from: point, to: rect),
-                    centerDistance: hypot(point.x - rect.midX, point.y - rect.midY),
-                    area: rect.width * rect.height,
+                    rect: rect,
+                    hitRect: hitRect,
+                    distance: distance(from: point, to: hitRect),
+                    centerDistance: hypot(point.x - hitRect.midX, point.y - hitRect.midY),
+                    area: hitRect.width * hitRect.height,
                     index: index
                 )
             }
@@ -1252,6 +1312,18 @@ public final class WebViewNativeLookupHitTestStore {
             return candidate.area < other.area
         }
         return candidate.index < other.index
+    }
+
+    private func target(for candidate: Candidate, usedInflatedHitRect: Bool) -> WebViewNativeLookupHitTarget {
+        WebViewNativeLookupHitTarget(
+            elementID: candidate.target.elementID,
+            rects: candidate.target.rects,
+            frameInfo: candidate.target.frameInfo,
+            debugUsedInflatedHitRect: usedInflatedHitRect,
+            debugHitRects: [candidate.hitRect],
+            debugDistance: candidate.distance,
+            debugCenterDistance: candidate.centerDistance
+        )
     }
 
     private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
@@ -1284,39 +1356,142 @@ public final class WebViewNativeLookupHitTestStore {
         hitTarget(at: point, in: containerSize) != nil
     }
 
+    public func containsExactTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        exactHitTarget(at: point, in: containerSize) != nil
+    }
+
+    public func containsClaimableTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        hitTarget(at: point, in: containerSize) != nil
+    }
+
+    public func diagnostics(at point: CGPoint, limit: Int = 5) -> [[String: Any]] {
+        let exact = diagnosticCandidates(at: point, usingInflatedRects: false, limit: limit)
+        let inflated = diagnosticCandidates(at: point, usingInflatedRects: true, limit: limit)
+        return [
+            [
+                "mode": "exact",
+                "candidates": exact
+            ],
+            [
+                "mode": "inflated",
+                "candidates": inflated
+            ]
+        ]
+    }
+
+    private func diagnosticCandidates(at point: CGPoint, usingInflatedRects: Bool, limit: Int) -> [[String: Any]] {
+        var candidates: [(candidate: Candidate, hitRect: CGRect)] = []
+        for (entryIndex, entry) in entries.enumerated() {
+            let searchRects = usingInflatedRects ? entry.hitRects : entry.rects
+            for (rectIndex, hitRect) in searchRects.enumerated() {
+                let rect = entry.rects[rectIndex]
+                let candidate = Candidate(
+                    target: entry.target,
+                    rect: rect,
+                    hitRect: hitRect,
+                    distance: distance(from: point, to: hitRect),
+                    centerDistance: hypot(point.x - hitRect.midX, point.y - hitRect.midY),
+                    area: hitRect.width * hitRect.height,
+                    index: entryIndex
+                )
+                candidates.append((candidate, hitRect))
+            }
+        }
+        candidates.sort { lhs, rhs in isBetter(lhs.candidate, than: rhs.candidate) }
+        return candidates.prefix(limit).map { item in
+            let candidate = item.candidate
+            let hitRect = item.hitRect
+            return [
+                "elementID": candidate.target.elementID,
+                "contains": hitRect.contains(point),
+                "distance": candidate.distance,
+                "centerDistance": candidate.centerDistance,
+                "rect": Self.debugRectStrings([candidate.rect]).first ?? "",
+                "hitRect": Self.debugRectStrings([candidate.hitRect]).first ?? "",
+            ] as [String : Any]
+        }
+    }
+
     public func handleTap(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
-        let lookupPoint = pointInViewportCoordinates(point, containerSize: containerSize)
-        guard let target = hitTarget(at: point, in: containerSize) else { return false }
-        onHit?(WebViewNativeLookupHit(elementID: target.elementID, point: lookupPoint))
+        let exactCandidate = bestCandidate(at: point, usingInflatedRects: false)
+        let inflatedCandidate = exactCandidate == nil ? bestCandidate(at: point, usingInflatedRects: true) : nil
+        guard let candidate = exactCandidate ?? inflatedCandidate else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.tapMiss",
+                [
+                    "point": Self.debugPointString(point),
+                    "containerSize": containerSize.map(Self.debugSizeString) as Any,
+                    "entryCount": entries.count,
+                ] as [String : Any]
+            )
+            return false
+        }
+        debugPrint(
+            "# MAY15 nativeHitTargets.tapHit",
+            [
+                "point": Self.debugPointString(point),
+                "containerSize": containerSize.map(Self.debugSizeString) as Any,
+                "elementID": candidate.target.elementID,
+                "usedInflatedRects": exactCandidate == nil,
+                "distance": candidate.distance,
+                "centerDistance": candidate.centerDistance,
+                "rects": Self.debugRectStrings([candidate.rect]),
+                "hitRects": Self.debugRectStrings([candidate.hitRect]),
+            ] as [String : Any]
+        )
+        let target = target(for: candidate, usedInflatedHitRect: exactCandidate == nil)
+        onHit?(WebViewNativeLookupHit(
+            elementID: target.elementID,
+            point: point,
+            rects: target.rects,
+            debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
+            debugHitRects: target.debugHitRects,
+            debugDistance: target.debugDistance,
+            debugCenterDistance: target.debugCenterDistance,
+            frameInfo: target.frameInfo
+        ))
         return true
     }
 
-    private static func validViewportBounds(size: CGSize?, origin: CGPoint) -> ViewportBounds? {
-        guard let size,
-              origin.x.isFinite,
-              origin.y.isFinite,
-              size.width.isFinite,
-              size.height.isFinite,
-              size.width > 0,
-              size.height > 0 else {
-            return nil
-        }
-        return ViewportBounds(x: origin.x, y: origin.y, width: size.width, height: size.height)
+    public func handleTap(on target: WebViewNativeLookupHitTarget, at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        debugPrint(
+            "# MAY15 nativeHitTargets.tapHit",
+            [
+                "point": Self.debugPointString(point),
+                "containerSize": containerSize.map(Self.debugSizeString) as Any,
+                "elementID": target.elementID,
+                "usedInflatedRects": false,
+                "source": "capturedStartTarget",
+                "rects": Self.debugRectStrings(target.rects.prefix(4)),
+                "hitRects": Self.debugRectStrings(target.debugHitRects.prefix(4)),
+                "targetUsedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
+                "targetDistance": target.debugDistance as Any,
+                "targetCenterDistance": target.debugCenterDistance as Any,
+            ] as [String : Any]
+        )
+        onHit?(WebViewNativeLookupHit(
+            elementID: target.elementID,
+            point: point,
+            rects: target.rects,
+            debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
+            debugHitRects: target.debugHitRects,
+            debugDistance: target.debugDistance,
+            debugCenterDistance: target.debugCenterDistance,
+            frameInfo: target.frameInfo
+        ))
+        return true
     }
 
-    private func pointInViewportCoordinates(_ point: CGPoint, containerSize: CGSize?) -> CGPoint {
-        guard let viewportBounds,
-              let containerSize,
-              containerSize.width.isFinite,
-              containerSize.height.isFinite,
-              containerSize.width > 0,
-              containerSize.height > 0 else {
-            return point
-        }
-        return CGPoint(
-            x: viewportBounds.x + point.x * viewportBounds.width / containerSize.width,
-            y: viewportBounds.y + point.y * viewportBounds.height / containerSize.height
-        )
+    static func debugPointString(_ point: CGPoint) -> String {
+        "{\(point.x), \(point.y)}"
+    }
+
+    static func debugSizeString(_ size: CGSize) -> String {
+        "{\(size.width), \(size.height)}"
+    }
+
+    static func debugRectStrings<S: Sequence>(_ rects: S) -> [String] where S.Element == CGRect {
+        rects.map { "{{\($0.origin.x), \($0.origin.y)}, {\($0.width), \($0.height)}}" }
     }
 }
 
@@ -5532,32 +5707,169 @@ public class EnhancedWKWebView: WKWebView {
 
 #if os(iOS)
 private final class NativeLookupHitTestOverlayView: UIView {
+    private enum PressedSegmentStyle {
+        static let pressedStrokeAlpha: CGFloat = 0.8
+        static let strokeWidth: CGFloat = 1
+        static let cornerRadius: CGFloat = 5
+        static let inset: CGFloat = 0.5
+        static let lookupAttachmentTopExpansion: CGFloat = 0
+    }
+
     weak var store: WebViewNativeLookupHitTestStore?
+    private var lastPassThroughLogAt: TimeInterval = 0
+    private let pressedSegmentLayer = CAShapeLayer()
+    private var clearPressedSegmentWorkItem: DispatchWorkItem?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = .clear
         isOpaque = false
-        isUserInteractionEnabled = true
-        isAccessibilityElement = false
+        backgroundColor = .clear
+        pressedSegmentLayer.fillColor = UIColor.clear.cgColor
+        pressedSegmentLayer.lineWidth = PressedSegmentStyle.strokeWidth
+        pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
+        pressedSegmentLayer.contentsScale = UIScreen.main.scale
+        layer.addSublayer(pressedSegmentLayer)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        pressedSegmentLayer.frame = bounds
+    }
+
+    override func tintColorDidChange() {
+        super.tintColorDidChange()
+        pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
+    }
+
+    func showPressedTarget(_ target: WebViewNativeLookupHitTarget) {
+        clearPressedSegmentWorkItem?.cancel()
+        clearPressedSegmentWorkItem = nil
+        let path = CGMutablePath()
+        var visualRects: [CGRect] = []
+        var strokeRects: [CGRect] = []
+        for rect in target.rects where !rect.isNull && !rect.isEmpty {
+            let visualRect = Self.pressVisualRect(for: rect)
+            let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
+            visualRects.append(visualRect)
+            strokeRects.append(strokeRect)
+            let radius = min(PressedSegmentStyle.cornerRadius, strokeRect.width / 2, strokeRect.height / 2)
+            path.addRoundedRect(in: strokeRect, cornerWidth: radius, cornerHeight: radius)
+        }
+        let windowFrame = convert(bounds, to: nil)
+        let visualWindowRects = visualRects.map { convert($0, to: nil) }
+        let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
+        debugPrint(
+            "# MAY15 nativeHitTargets.pressVisual",
+            [
+                "elementID": target.elementID,
+                "rawRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
+                "visualRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualRects.prefix(4)),
+                "strokeRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeRects.prefix(4)),
+                "visualWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualWindowRects.prefix(4)),
+                "strokeWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeWindowRects.prefix(4)),
+                "overlayBounds": WebViewNativeLookupHitTestStore.debugRectStrings([bounds]).first as Any,
+                "overlayWindowFrame": WebViewNativeLookupHitTestStore.debugRectStrings([windowFrame]).first as Any,
+                "pathBounds": WebViewNativeLookupHitTestStore.debugRectStrings([path.boundingBoxOfPath]).first as Any,
+                "topExpansion": PressedSegmentStyle.lookupAttachmentTopExpansion,
+                "strokeInset": PressedSegmentStyle.inset,
+                "strokeWidth": PressedSegmentStyle.strokeWidth,
+                "strokeAlpha": PressedSegmentStyle.pressedStrokeAlpha,
+            ] as [String : Any]
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
+        pressedSegmentLayer.path = path
+        pressedSegmentLayer.opacity = 1
+        CATransaction.commit()
+    }
+
+    private static func pressVisualRect(for rect: CGRect) -> CGRect {
+        var visualRect = rect
+        visualRect.origin.y -= PressedSegmentStyle.lookupAttachmentTopExpansion
+        visualRect.size.height += PressedSegmentStyle.lookupAttachmentTopExpansion
+        return visualRect
+    }
+
+    func clearPressedTarget() {
+        clearPressedSegmentWorkItem?.cancel()
+        clearPressedSegmentWorkItem = nil
+        clearPressedTargetImmediately()
+    }
+
+    func clearPressedTarget(after delay: TimeInterval) {
+        clearPressedSegmentWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.clearPressedTargetImmediately()
+        }
+        clearPressedSegmentWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func clearPressedTargetImmediately() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pressedSegmentLayer.path = nil
+        pressedSegmentLayer.opacity = 0
+        CATransaction.commit()
+    }
+
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        store?.containsTarget(at: point, in: bounds.size) == true
+        let target = store?.hitTarget(at: point, in: bounds.size)
+        if let target {
+            debugPrint(
+                "# MAY15 nativeHitTargets.overlay",
+                [
+                    "stage": "ios.hitTest.observedPassThrough",
+                    "point": "{\(point.x), \(point.y)}",
+                    "containerSize": "{\(bounds.width), \(bounds.height)}",
+                    "elementID": target.elementID,
+                    "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
+                    "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
+                    "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
+                    "distance": target.debugDistance as Any,
+                    "centerDistance": target.debugCenterDistance as Any,
+                ] as [String : Any]
+            )
+        } else {
+            let now = Date().timeIntervalSinceReferenceDate
+            if now - lastPassThroughLogAt > 0.25 {
+                lastPassThroughLogAt = now
+                debugPrint(
+                    "# MAY15 nativeHitTargets.overlay",
+                    [
+                        "stage": "ios.hitTest.passThrough",
+                        "point": "{\(point.x), \(point.y)}",
+                        "containerSize": "{\(bounds.width), \(bounds.height)}",
+                        "nearest": store?.diagnostics(at: point, limit: 3) as Any,
+                    ] as [String : Any]
+                )
+            }
+        }
+        return false
     }
 }
 
 private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer {
-    private static let segmentTapMovementTolerance: CGFloat = 12
-    private static let segmentTapMaximumDuration: TimeInterval = 0.32
+    private static let segmentTapMovementTolerance: CGFloat = 14
+    private static let segmentLongPressDriftTolerance: CGFloat = 24
+    private static let segmentSwipeMovementTolerance: CGFloat = 10
+    private static let segmentTapMaximumDuration: TimeInterval = 0.42
+    private static let segmentTapPressedHandoffDuration: TimeInterval = 0.16
 
     weak var store: WebViewNativeLookupHitTestStore?
+    weak var coordinateView: NativeLookupHitTestOverlayView?
     private var touchStartPoint: CGPoint?
     private var touchStartTime: TimeInterval?
+    private var touchStartTarget: WebViewNativeLookupHitTarget?
+    private var touchStartWasActiveTarget = false
+    private var touchStartDispatchedLookup = false
+    private var touchStartOpenedDifferentLookup = false
+    private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
     private var tapExpirationWorkItem: DispatchWorkItem?
 
     override init(target: Any?, action: Selector?) {
@@ -5572,21 +5884,111 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
               touches.count == 1,
               event.allTouches?.count == 1,
               let touch = touches.first,
-              let view else {
+              let coordinateView else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                [
+                    "stage": "touchesBegan.invalidTouchSet",
+                    "touchCount": touches.count,
+                    "allTouchCount": event.allTouches?.count as Any,
+                ] as [String : Any]
+            )
+            logTouchDeliveryVerdict(
+                stage: "touchesBegan.invalidTouchSet",
+                verdict: "passThrough.allowed",
+                reason: "invalidTouchSet",
+                extra: [
+                    "touchCount": touches.count,
+                    "allTouchCount": event.allTouches?.count as Any,
+                ]
+            )
             state = .failed
             return
         }
-        let point = touch.location(in: view)
-        guard store?.containsTarget(at: point, in: view.bounds.size) == true else {
+        let point = touch.location(in: coordinateView)
+        guard let target = store?.hitTarget(at: point, in: coordinateView.bounds.size) else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                [
+                    "stage": "touchesBegan.noSegmentTarget",
+                    "point": Self.debugPointString(point),
+                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
+                    "nearest": store?.diagnostics(at: point, limit: 5) as Any,
+                ] as [String : Any]
+            )
+            logTouchDeliveryVerdict(
+                stage: "touchesBegan.noSegmentTarget",
+                verdict: "passThrough.allowed",
+                reason: "noSegmentTarget",
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "nearest": store?.diagnostics(at: point, limit: 3) as Any,
+                ]
+            )
             state = .failed
             return
         }
+        debugPrint(
+            "# MAY15 nativeHitTargets.passThrough",
+            [
+                "stage": "touchesBegan.nativeCandidate",
+                "point": Self.debugPointString(point),
+                "containerSize": Self.debugSizeString(coordinateView.bounds.size),
+                "elementID": target.elementID,
+                "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
+                "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
+                "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
+                "distance": target.debugDistance as Any,
+                "centerDistance": target.debugCenterDistance as Any,
+            ] as [String : Any]
+        )
+        logTouchDeliveryVerdict(
+            stage: "touchesBegan.nativeCandidate",
+            verdict: "pending.nativeRecognizerHoldingWebKitTouches",
+            reason: "segmentTarget",
+            target: target,
+            point: point,
+            coordinateView: coordinateView
+        )
         touchStartPoint = point
         touchStartTime = event.timestamp
+        touchStartTarget = target
+        let activeLookupElementID = store?.activeLookupElementID?()
+        let activeHighlightElementID = store?.activeElementID
+        let hadActiveLookup = activeLookupElementID != nil
+        touchStartWasActiveTarget =
+            activeLookupElementID == target.elementID
+            || activeHighlightElementID == target.elementID
+        touchStartOverlay = coordinateView
+        store?.onActiveTargetTouchDown?(target)
+        touchStartOverlay?.showPressedTarget(target)
+        if hadActiveLookup {
+            if touchStartWasActiveTarget {
+                touchStartDispatchedLookup = true
+            } else {
+                touchStartDispatchedLookup = store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true
+                touchStartOpenedDifferentLookup = touchStartDispatchedLookup
+            }
+            logTouchDeliveryVerdict(
+                stage: "touchesBegan.activeLookupImmediateDispatch",
+                verdict: touchStartWasActiveTarget
+                    ? "popover.dismissedOnTouchDown"
+                    : (touchStartDispatchedLookup ? "popover.updatedOnTouchDown" : "popover.updateFailedOnTouchDown"),
+                reason: touchStartWasActiveTarget ? "sameActiveTargetDismiss" : "activeLookupMove",
+                target: target,
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "activeLookupElementID": activeLookupElementID as Any,
+                    "activeHighlightElementID": activeHighlightElementID as Any,
+                ]
+            )
+        }
         tapExpirationWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, self.state == .possible else { return }
-            self.failGesture()
+            self.failGesture(reason: "timeout")
         }
         tapExpirationWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
@@ -5595,36 +5997,189 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let start = touchStartPoint,
               let touch = touches.first,
-              let view else { return }
-        let point = touch.location(in: view)
-        if hypot(point.x - start.x, point.y - start.y) > Self.segmentTapMovementTolerance {
-            failGesture()
+              let coordinateView else { return }
+        let point = touch.location(in: coordinateView)
+        let dx = point.x - start.x
+        let dy = point.y - start.y
+        let movement = hypot(dx, dy)
+        let horizontalMovement = abs(dx)
+        let verticalMovement = abs(dy)
+        let isSwipeLikeMovement =
+            horizontalMovement > Self.segmentSwipeMovementTolerance
+            && horizontalMovement > verticalMovement * 1.2
+        let exceededLongPressDrift = movement > Self.segmentLongPressDriftTolerance
+        if isSwipeLikeMovement || exceededLongPressDrift {
+            failGesture(reason: "movement", payload: [
+                "start": Self.debugPointString(start),
+                "point": Self.debugPointString(point),
+                "movement": movement,
+                "dx": dx,
+                "dy": dy,
+                "tapTolerance": Self.segmentTapMovementTolerance,
+                "longPressDriftTolerance": Self.segmentLongPressDriftTolerance,
+                "swipeMovementTolerance": Self.segmentSwipeMovementTolerance,
+                "isSwipeLikeMovement": isSwipeLikeMovement,
+                "exceededLongPressDrift": exceededLongPressDrift,
+            ])
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        defer { resetTrackingState() }
         guard let start = touchStartPoint,
               let startedAt = touchStartTime,
+              let target = touchStartTarget,
               let touch = touches.first,
-              let view else {
+              let coordinateView else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                ["stage": "touchesEnded.missingTrackingState"] as [String : Any]
+            )
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.missingTrackingState",
+                verdict: "passThrough.allowed",
+                reason: "missingTrackingState"
+            )
+            resetTrackingState()
             state = .failed
             return
         }
-        guard event.timestamp - startedAt <= Self.segmentTapMaximumDuration else {
+        let duration = event.timestamp - startedAt
+        guard duration <= Self.segmentTapMaximumDuration else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                [
+                    "stage": "touchesEnded.durationExceeded",
+                    "duration": duration,
+                    "maximumDuration": Self.segmentTapMaximumDuration,
+                ] as [String : Any]
+            )
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.durationExceeded",
+                verdict: "passThrough.allowedAfterRecognizerFailure",
+                reason: "durationExceeded",
+                target: target,
+                coordinateView: coordinateView,
+                extra: [
+                    "duration": duration,
+                    "maximumDuration": Self.segmentTapMaximumDuration,
+                ]
+            )
+            cancelTouchDownLookupIfNeeded(reason: "durationExceeded")
+            resetTrackingState()
             state = .failed
             return
         }
-        let point = touch.location(in: view)
-        guard hypot(point.x - start.x, point.y - start.y) <= Self.segmentTapMovementTolerance,
-              store?.handleTap(at: point, in: view.bounds.size) == true else {
+        let point = touch.location(in: coordinateView)
+        let movement = hypot(point.x - start.x, point.y - start.y)
+        guard movement <= Self.segmentTapMovementTolerance else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                [
+                    "stage": "touchesEnded.nativeLookupFailed",
+                    "start": Self.debugPointString(start),
+                    "point": Self.debugPointString(point),
+                    "movement": movement,
+                    "duration": duration,
+                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
+                ] as [String : Any]
+            )
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.nativeLookupFailed",
+                verdict: "passThrough.allowedAfterRecognizerFailure",
+                reason: "nativeLookupFailed",
+                target: target,
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "movement": movement,
+                    "duration": duration,
+                ]
+            )
+            cancelTouchDownLookupIfNeeded(reason: "movement")
+            resetTrackingState()
             state = .failed
             return
         }
+        if !touchStartDispatchedLookup {
+            guard store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true else {
+                debugPrint(
+                    "# MAY15 nativeHitTargets.passThrough",
+                    [
+                        "stage": "touchesEnded.nativeLookupFailed",
+                        "start": Self.debugPointString(start),
+                        "point": Self.debugPointString(point),
+                        "movement": movement,
+                        "duration": duration,
+                        "containerSize": Self.debugSizeString(coordinateView.bounds.size),
+                    ] as [String : Any]
+                )
+                logTouchDeliveryVerdict(
+                    stage: "touchesEnded.nativeLookupFailed",
+                    verdict: "passThrough.allowedAfterRecognizerFailure",
+                    reason: "nativeLookupFailed",
+                    target: target,
+                    point: point,
+                    coordinateView: coordinateView,
+                    extra: [
+                        "movement": movement,
+                        "duration": duration,
+                    ]
+                )
+                resetTrackingState()
+                state = .failed
+                return
+            }
+        }
+        debugPrint(
+            "# MAY15 nativeHitTargets.passThrough",
+            [
+                "stage": "touchesEnded.nativeRecognized",
+                "start": Self.debugPointString(start),
+                "point": Self.debugPointString(point),
+                "movement": movement,
+                "duration": duration,
+                "containerSize": Self.debugSizeString(coordinateView.bounds.size),
+            ] as [String : Any]
+        )
+        logTouchDeliveryVerdict(
+            stage: "touchesEnded.nativeRecognized",
+            verdict: "passThrough.blockedForTapLookup",
+            reason: touchStartWasActiveTarget ? "sameActiveTargetDismiss" : "nativeLookupTap",
+            target: target,
+            point: point,
+            coordinateView: coordinateView,
+            extra: [
+                "movement": movement,
+                "duration": duration,
+                "lookupDispatchedOnTouchDown": touchStartDispatchedLookup,
+            ]
+        )
+        if touchStartWasActiveTarget {
+            touchStartOverlay?.clearPressedTarget()
+        } else {
+            touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
+        }
+        resetTrackingState(clearPressedTarget: false)
         state = .recognized
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        debugPrint(
+            "# MAY15 nativeHitTargets.passThrough",
+            [
+                "stage": "touchesCancelled",
+                "touchCount": touches.count,
+            ] as [String : Any]
+        )
+        logTouchDeliveryVerdict(
+            stage: "touchesCancelled",
+            verdict: "passThrough.allowedAfterCancellation",
+            reason: "touchesCancelled",
+            extra: [
+                "touchCount": touches.count,
+            ]
+        )
+        cancelTouchDownLookupIfNeeded(reason: "touchesCancelled")
         resetTrackingState()
         state = .failed
     }
@@ -5633,23 +6188,98 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         resetTrackingState()
     }
 
-    private func resetTrackingState() {
+    private func resetTrackingState(clearPressedTarget: Bool = true) {
         tapExpirationWorkItem?.cancel()
         tapExpirationWorkItem = nil
         touchStartPoint = nil
         touchStartTime = nil
+        touchStartTarget = nil
+        touchStartWasActiveTarget = false
+        touchStartDispatchedLookup = false
+        touchStartOpenedDifferentLookup = false
+        if clearPressedTarget {
+            touchStartOverlay?.clearPressedTarget()
+        }
+        touchStartOverlay = nil
     }
 
-    private func failGesture() {
+    private func cancelTouchDownLookupIfNeeded(reason: String) {
+        guard touchStartOpenedDifferentLookup,
+              let target = touchStartTarget else { return }
+        logTouchDeliveryVerdict(
+            stage: "touchDownLookup.cancel",
+            verdict: "popover.closedAfterTouchDownCancel",
+            reason: reason,
+            target: target,
+            coordinateView: coordinateView
+        )
+        store?.onTouchDownHitCancelled?(target)
+    }
+
+    private func failGesture(reason: String, payload: [String: Any] = [:]) {
+        var mergedPayload = payload
+        mergedPayload["stage"] = "failGesture.\(reason)"
+        debugPrint("# MAY15 nativeHitTargets.passThrough", mergedPayload)
+        logTouchDeliveryVerdict(
+            stage: "failGesture.\(reason)",
+            verdict: "passThrough.allowedAfterRecognizerFailure",
+            reason: reason,
+            target: touchStartTarget,
+            coordinateView: coordinateView,
+            extra: payload
+        )
+        cancelTouchDownLookupIfNeeded(reason: reason)
         resetTrackingState()
         state = .failed
+    }
+
+    private func logTouchDeliveryVerdict(
+        stage: String,
+        verdict: String,
+        reason: String,
+        target: WebViewNativeLookupHitTarget? = nil,
+        point: CGPoint? = nil,
+        coordinateView: NativeLookupHitTestOverlayView? = nil,
+        extra: [String: Any] = [:]
+    ) {
+        var payload = extra
+        payload["stage"] = stage
+        payload["verdict"] = verdict
+        payload["reason"] = reason
+        payload["recognizerState"] = "\(state.rawValue)"
+        payload["recognizerViewType"] = view.map { String(describing: type(of: $0)) } ?? "nil"
+        payload["coordinateViewType"] = coordinateView.map { String(describing: type(of: $0)) } ?? "nil"
+        payload["recognizerAttachedToCoordinateView"] = (view === coordinateView)
+        payload["delaysTouchesBegan"] = delaysTouchesBegan
+        payload["delaysTouchesEnded"] = delaysTouchesEnded
+        payload["cancelsTouchesInView"] = cancelsTouchesInView
+        if let point {
+            payload["point"] = Self.debugPointString(point)
+        }
+        if let coordinateView {
+            payload["containerSize"] = Self.debugSizeString(coordinateView.bounds.size)
+        }
+        if let target {
+            payload["elementID"] = target.elementID
+            payload["rects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4))
+            payload["hitRects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4))
+        }
+        debugPrint("# MAY15 nativeHitTargets.touchDelivery", payload)
+    }
+
+    private static func debugPointString(_ point: CGPoint) -> String {
+        "{\(point.x), \(point.y)}"
+    }
+
+    private static func debugSizeString(_ size: CGSize) -> String {
+        "{\(size.width), \(size.height)}"
     }
 }
 
 public class WebViewController: UIViewController {
     var webView: EnhancedWKWebView
     private var webViewConstraints: [NSLayoutConstraint] = []
-    private var nativeLookupOverlayConstraints: [NSLayoutConstraint] = []
+    private var nativeLookupHitTestOverlayConstraints: [NSLayoutConstraint] = []
     private var snapshotImageView: UIImageView?
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
@@ -5764,14 +6394,15 @@ public class WebViewController: UIViewController {
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
+        nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
     }
 
     @MainActor
     func detachWebView() {
         NSLayoutConstraint.deactivate(webViewConstraints)
         webViewConstraints.removeAll()
-        NSLayoutConstraint.deactivate(nativeLookupOverlayConstraints)
-        nativeLookupOverlayConstraints.removeAll()
+        NSLayoutConstraint.deactivate(nativeLookupHitTestOverlayConstraints)
+        nativeLookupHitTestOverlayConstraints.removeAll()
         nativeLookupHitTestOverlayView.removeFromSuperview()
         webView.removeFromSuperview()
     }
@@ -5848,26 +6479,45 @@ public class WebViewController: UIViewController {
             view.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(webViewConstraints)
-        installNativeLookupHitTestOverlay(over: webView)
+        attachNativeLookupHitTestOverlay()
     }
 
     @MainActor
-    private func installNativeLookupHitTestOverlay(over webView: EnhancedWKWebView) {
+    private func attachNativeLookupHitTestOverlay() {
+        nativeLookupHitTestOverlayConstraints.removeAll()
+        nativeLookupHitTestOverlayView.removeFromSuperview()
         nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
-        nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-        nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+        if nativeLookupHitTestGestureRecognizer.view !== webView {
+            nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            debugPrint(
+                "# MAY15 nativeHitTargets.touchDelivery",
+                [
+                    "stage": "recognizer.attach",
+                    "verdict": "configuredToDelayWebKitTouches",
+                    "recognizerViewType": String(describing: type(of: webView)),
+                    "overlayViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
+                    "attachedToWebView": true,
+                    "overlayPassThrough": true,
+                    "delaysTouchesBegan": nativeLookupHitTestGestureRecognizer.delaysTouchesBegan,
+                    "delaysTouchesEnded": nativeLookupHitTestGestureRecognizer.delaysTouchesEnded,
+                    "cancelsTouchesInView": nativeLookupHitTestGestureRecognizer.cancelsTouchesInView,
+                ] as [String : Any]
+            )
+        }
         if let snapshotImageView {
             view.insertSubview(nativeLookupHitTestOverlayView, belowSubview: snapshotImageView)
         } else {
             view.addSubview(nativeLookupHitTestOverlayView)
         }
-        nativeLookupOverlayConstraints = [
-            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: webView.topAnchor),
-            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: webView.leftAnchor),
-            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
-            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
+        let hitTestLayoutGuide = view.safeAreaLayoutGuide
+        nativeLookupHitTestOverlayConstraints = [
+            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: hitTestLayoutGuide.topAnchor),
+            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: hitTestLayoutGuide.leftAnchor),
+            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: hitTestLayoutGuide.bottomAnchor),
+            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: hitTestLayoutGuide.rightAnchor)
         ]
-        NSLayoutConstraint.activate(nativeLookupOverlayConstraints)
+        NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
     }
 
 }
@@ -6643,8 +7293,154 @@ extension WebView: UIViewControllerRepresentable {
 #endif
 
 #if os(macOS)
-private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRecognizer {
+private final class NativeLookupHitTestOverlayNSView: NSView {
+    private enum PressedSegmentStyle {
+        static let pressedStrokeAlpha: CGFloat = 0.8
+        static let strokeWidth: CGFloat = 1
+        static let cornerRadius: CGFloat = 5
+        static let inset: CGFloat = 0.5
+        static let lookupAttachmentTopExpansion: CGFloat = 0
+    }
+
     weak var store: WebViewNativeLookupHitTestStore?
+    private var lastPassThroughLogAt: TimeInterval = 0
+    private let pressedSegmentLayer = CAShapeLayer()
+    private var clearPressedSegmentWorkItem: DispatchWorkItem?
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        pressedSegmentLayer.fillColor = NSColor.clear.cgColor
+        pressedSegmentLayer.lineWidth = PressedSegmentStyle.strokeWidth
+        pressedSegmentLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
+        pressedSegmentLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        layer?.addSublayer(pressedSegmentLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        pressedSegmentLayer.frame = bounds
+    }
+
+    func showPressedTarget(_ target: WebViewNativeLookupHitTarget) {
+        clearPressedSegmentWorkItem?.cancel()
+        clearPressedSegmentWorkItem = nil
+        let path = CGMutablePath()
+        var visualRects: [CGRect] = []
+        var strokeRects: [CGRect] = []
+        for rect in target.rects where !rect.isNull && !rect.isEmpty {
+            let visualRect = Self.pressVisualRect(for: rect)
+            let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
+            visualRects.append(visualRect)
+            strokeRects.append(strokeRect)
+            let radius = min(PressedSegmentStyle.cornerRadius, strokeRect.width / 2, strokeRect.height / 2)
+            path.addRoundedRect(in: strokeRect, cornerWidth: radius, cornerHeight: radius)
+        }
+        let windowFrame = convert(bounds, to: nil)
+        let visualWindowRects = visualRects.map { convert($0, to: nil) }
+        let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
+        debugPrint(
+            "# MAY15 nativeHitTargets.pressVisual",
+            [
+                "elementID": target.elementID,
+                "rawRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
+                "visualRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualRects.prefix(4)),
+                "strokeRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeRects.prefix(4)),
+                "visualWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualWindowRects.prefix(4)),
+                "strokeWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeWindowRects.prefix(4)),
+                "overlayBounds": WebViewNativeLookupHitTestStore.debugRectStrings([bounds]).first as Any,
+                "overlayWindowFrame": WebViewNativeLookupHitTestStore.debugRectStrings([windowFrame]).first as Any,
+                "pathBounds": WebViewNativeLookupHitTestStore.debugRectStrings([path.boundingBoxOfPath]).first as Any,
+                "topExpansion": PressedSegmentStyle.lookupAttachmentTopExpansion,
+                "strokeInset": PressedSegmentStyle.inset,
+                "strokeWidth": PressedSegmentStyle.strokeWidth,
+                "strokeAlpha": PressedSegmentStyle.pressedStrokeAlpha,
+            ] as [String : Any]
+        )
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pressedSegmentLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
+        pressedSegmentLayer.path = path
+        pressedSegmentLayer.opacity = 1
+        CATransaction.commit()
+    }
+
+    private static func pressVisualRect(for rect: CGRect) -> CGRect {
+        var visualRect = rect
+        visualRect.origin.y -= PressedSegmentStyle.lookupAttachmentTopExpansion
+        visualRect.size.height += PressedSegmentStyle.lookupAttachmentTopExpansion
+        return visualRect
+    }
+
+    func clearPressedTarget() {
+        clearPressedSegmentWorkItem?.cancel()
+        clearPressedSegmentWorkItem = nil
+        clearPressedTargetImmediately()
+    }
+
+    func clearPressedTarget(after delay: TimeInterval) {
+        clearPressedSegmentWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.clearPressedTargetImmediately()
+        }
+        clearPressedSegmentWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func clearPressedTargetImmediately() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pressedSegmentLayer.path = nil
+        pressedSegmentLayer.opacity = 0
+        CATransaction.commit()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let containsTarget = !isHidden
+            && alphaValue > 0
+            && store?.containsClaimableTarget(at: point, in: bounds.size) == true
+        if containsTarget {
+            debugPrint(
+                "# MAY15 nativeHitTargets.overlay",
+                [
+                    "stage": "mac.hitTest.claimed",
+                    "point": "{\(point.x), \(point.y)}",
+                    "containerSize": "{\(bounds.width), \(bounds.height)}",
+                ] as [String : Any]
+            )
+        } else {
+            let now = Date().timeIntervalSinceReferenceDate
+            if now - lastPassThroughLogAt > 0.25 {
+                lastPassThroughLogAt = now
+                debugPrint(
+                    "# MAY15 nativeHitTargets.overlay",
+                    [
+                        "stage": "mac.hitTest.passThrough",
+                        "point": "{\(point.x), \(point.y)}",
+                        "containerSize": "{\(bounds.width), \(bounds.height)}",
+                    ] as [String : Any]
+                )
+            }
+        }
+        guard containsTarget else {
+            return nil
+        }
+        return self
+    }
+}
+
+private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRecognizer {
+    private static let segmentClickPressedHandoffDuration: TimeInterval = 0.16
+
+    weak var store: WebViewNativeLookupHitTestStore?
+    private weak var pressedOverlay: NativeLookupHitTestOverlayNSView?
+    private var mouseDownWasActiveTarget = false
 
     override func mouseDown(with event: NSEvent) {
         guard let view else {
@@ -6652,16 +7448,51 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
             return
         }
         let point = view.convert(event.locationInWindow, from: nil)
-        guard store?.containsTarget(at: point, in: view.bounds.size) == true else {
+        guard let target = store?.hitTarget(at: point, in: view.bounds.size) else {
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                [
+                    "stage": "mac.mouseDown.noSegmentTarget",
+                    "point": "{\(point.x), \(point.y)}",
+                    "containerSize": "{\(view.bounds.width), \(view.bounds.height)}",
+                ] as [String : Any]
+            )
             state = .failed
             return
         }
+        debugPrint(
+            "# MAY15 nativeHitTargets.passThrough",
+            [
+                "stage": "mac.mouseDown.nativeCandidate",
+                "point": "{\(point.x), \(point.y)}",
+                "containerSize": "{\(view.bounds.width), \(view.bounds.height)}",
+            ] as [String : Any]
+        )
+        pressedOverlay = view as? NativeLookupHitTestOverlayNSView
+        mouseDownWasActiveTarget = store?.activeElementID == target.elementID
+        store?.onActiveTargetTouchDown?(target)
+        pressedOverlay?.showPressedTarget(target)
         super.mouseDown(with: event)
+        if mouseDownWasActiveTarget {
+            pressedOverlay?.clearPressedTarget()
+        } else {
+            pressedOverlay?.clearPressedTarget(after: Self.segmentClickPressedHandoffDuration)
+        }
+        mouseDownWasActiveTarget = false
+        pressedOverlay = nil
+    }
+
+    override func reset() {
+        super.reset()
+        pressedOverlay?.clearPressedTarget()
+        mouseDownWasActiveTarget = false
+        pressedOverlay = nil
     }
 }
 
 public final class WebViewHostNSView: NSView {
     let webView: EnhancedWKWebView
+    private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayNSView()
     private lazy var nativeLookupHitTestGestureRecognizer = NativeLookupHitTestClickGestureRecognizer(
         target: self,
         action: #selector(handleNativeLookupHitTestClick(_:))
@@ -6682,6 +7513,7 @@ public final class WebViewHostNSView: NSView {
 
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
+        nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
     }
 
@@ -6694,17 +7526,25 @@ public final class WebViewHostNSView: NSView {
             bottomAnchor.constraint(equalTo: webView.bottomAnchor),
             rightAnchor.constraint(equalTo: webView.rightAnchor)
         ])
+        nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(nativeLookupHitTestOverlayView)
+        NSLayoutConstraint.activate([
+            topAnchor.constraint(equalTo: nativeLookupHitTestOverlayView.topAnchor),
+            leftAnchor.constraint(equalTo: nativeLookupHitTestOverlayView.leftAnchor),
+            bottomAnchor.constraint(equalTo: nativeLookupHitTestOverlayView.bottomAnchor),
+            rightAnchor.constraint(equalTo: nativeLookupHitTestOverlayView.rightAnchor)
+        ])
     }
 
     private func installNativeLookupHitTestGestureRecognizer() {
         nativeLookupHitTestGestureRecognizer.numberOfClicksRequired = 1
         nativeLookupHitTestGestureRecognizer.delaysPrimaryMouseButtonEvents = true
-        webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+        nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
     }
 
     @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
         guard recognizer.state == .ended else { return }
-        _ = recognizer.store?.handleTap(at: recognizer.location(in: webView), in: webView.bounds.size)
+        _ = recognizer.store?.handleTap(at: recognizer.location(in: nativeLookupHitTestOverlayView), in: nativeLookupHitTestOverlayView.bounds.size)
     }
 }
 
