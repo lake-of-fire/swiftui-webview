@@ -5499,7 +5499,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
             debugPrint(
                 "# MAY15 nativeHitTargets.overlay",
                 [
-                    "stage": "ios.hitTest.observedPassThrough",
+                    "stage": "ios.hitTest.claimedSegmentTarget",
                     "point": "{\(point.x), \(point.y)}",
                     "containerSize": "{\(bounds.width), \(bounds.height)}",
                     "elementID": target.elementID,
@@ -5508,8 +5508,10 @@ private final class NativeLookupHitTestOverlayView: UIView {
                     "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
                     "distance": target.debugDistance as Any,
                     "centerDistance": target.debugCenterDistance as Any,
+                    "verdict": "nativeOverlayWillOwnTouch",
                 ] as [String : Any]
             )
+            return true
         } else {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
@@ -5620,11 +5622,14 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         )
         logTouchDeliveryVerdict(
             stage: "touchesBegan.nativeCandidate",
-            verdict: "pending.nativeRecognizerHoldingWebKitTouches",
+            verdict: "nativeOverlay.ownedTouch.noWebKitPassThrough",
             reason: "segmentTarget",
             target: target,
             point: point,
-            coordinateView: coordinateView
+            coordinateView: coordinateView,
+            extra: [
+                "segmentTargetTouchesReachWebKit": false,
+            ]
         )
         touchStartPoint = point
         touchStartTime = event.timestamp
@@ -5818,7 +5823,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         )
         logTouchDeliveryVerdict(
             stage: "touchesEnded.nativeRecognized",
-            verdict: "passThrough.blockedForTapLookup",
+            verdict: "nativeOverlay.handledTap.noWebKitPassThrough",
             reason: touchStartWasActiveTarget ? "sameActiveTargetDismiss" : "nativeLookupTap",
             target: target,
             point: point,
@@ -5827,6 +5832,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "movement": movement,
                 "duration": duration,
                 "lookupDispatchedOnTouchDown": touchStartDispatchedLookup,
+                "segmentTargetTouchesReachWebKit": false,
             ]
         )
         if touchStartWasActiveTarget {
@@ -6274,18 +6280,20 @@ public class WebViewController: UIViewController {
         nativeLookupHitTestOverlayConstraints.removeAll()
         nativeLookupHitTestOverlayView.removeFromSuperview()
         nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
-        if nativeLookupHitTestGestureRecognizer.view !== webView {
+        if nativeLookupHitTestGestureRecognizer.view !== nativeLookupHitTestOverlayView {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-            webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             debugPrint(
                 "# MAY15 nativeHitTargets.touchDelivery",
                 [
                     "stage": "recognizer.attach",
-                    "verdict": "configuredToDelayWebKitTouches",
-                    "recognizerViewType": String(describing: type(of: webView)),
+                    "verdict": "configuredToClaimSegmentTouches",
+                    "recognizerViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
                     "overlayViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
-                    "attachedToWebView": true,
-                    "overlayPassThrough": true,
+                    "attachedToWebView": false,
+                    "attachedToOverlay": true,
+                    "overlayPassThrough": "noSegmentTargetsOnly",
+                    "segmentTargetTouchesReachWebKit": false,
                     "delaysTouchesBegan": nativeLookupHitTestGestureRecognizer.delaysTouchesBegan,
                     "delaysTouchesEnded": nativeLookupHitTestGestureRecognizer.delaysTouchesEnded,
                     "cancelsTouchesInView": nativeLookupHitTestGestureRecognizer.cancelsTouchesInView,
