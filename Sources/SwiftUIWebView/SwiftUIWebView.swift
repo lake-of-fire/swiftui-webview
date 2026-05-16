@@ -5499,7 +5499,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
             debugPrint(
                 "# MAY15 nativeHitTargets.overlay",
                 [
-                    "stage": "ios.hitTest.claimedSegmentTarget",
+                    "stage": "ios.hitTest.observedPassThrough",
                     "point": "{\(point.x), \(point.y)}",
                     "containerSize": "{\(bounds.width), \(bounds.height)}",
                     "elementID": target.elementID,
@@ -5508,10 +5508,9 @@ private final class NativeLookupHitTestOverlayView: UIView {
                     "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
                     "distance": target.debugDistance as Any,
                     "centerDistance": target.debugCenterDistance as Any,
-                    "verdict": "nativeOverlayWillOwnTouch",
+                    "verdict": "nativeOverlayVisualOnly",
                 ] as [String : Any]
             )
-            return true
         } else {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
@@ -5577,6 +5576,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 extra: [
                     "touchCount": touches.count,
                     "allTouchCount": event.allTouches?.count as Any,
+                    "segmentTargetTouchesReachWebKit": true,
                 ]
             )
             state = .failed
@@ -5601,6 +5601,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 coordinateView: coordinateView,
                 extra: [
                     "nearest": store?.diagnostics(at: point, limit: 3) as Any,
+                    "segmentTargetTouchesReachWebKit": true,
                 ]
             )
             state = .failed
@@ -5622,13 +5623,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         )
         logTouchDeliveryVerdict(
             stage: "touchesBegan.nativeCandidate",
-            verdict: "nativeOverlay.ownedTouch.noWebKitPassThrough",
+            verdict: "pending.nativeRecognizerHoldingWebKitTouches",
             reason: "segmentTarget",
             target: target,
             point: point,
             coordinateView: coordinateView,
             extra: [
-                "segmentTargetTouchesReachWebKit": false,
+                "segmentTargetTouchesReachWebKit": "pendingTapDecision",
             ]
         )
         touchStartPoint = point
@@ -5717,7 +5718,10 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.missingTrackingState",
                 verdict: "passThrough.allowed",
-                reason: "missingTrackingState"
+                reason: "missingTrackingState",
+                extra: [
+                    "segmentTargetTouchesReachWebKit": true,
+                ]
             )
             resetTrackingState()
             state = .failed
@@ -5742,6 +5746,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 extra: [
                     "duration": duration,
                     "maximumDuration": Self.segmentTapMaximumDuration,
+                    "segmentTargetTouchesReachWebKit": true,
                 ]
             )
             cancelTouchDownLookupIfNeeded(reason: "durationExceeded")
@@ -5773,6 +5778,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 extra: [
                     "movement": movement,
                     "duration": duration,
+                    "segmentTargetTouchesReachWebKit": true,
                 ]
             )
             cancelTouchDownLookupIfNeeded(reason: "movement")
@@ -5803,6 +5809,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     extra: [
                         "movement": movement,
                         "duration": duration,
+                        "segmentTargetTouchesReachWebKit": true,
                     ]
                 )
                 resetTrackingState()
@@ -5823,7 +5830,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         )
         logTouchDeliveryVerdict(
             stage: "touchesEnded.nativeRecognized",
-            verdict: "nativeOverlay.handledTap.noWebKitPassThrough",
+            verdict: "passThrough.blockedForTapLookup",
             reason: touchStartWasActiveTarget ? "sameActiveTargetDismiss" : "nativeLookupTap",
             target: target,
             point: point,
@@ -5832,7 +5839,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "movement": movement,
                 "duration": duration,
                 "lookupDispatchedOnTouchDown": touchStartDispatchedLookup,
-                "segmentTargetTouchesReachWebKit": false,
+                "segmentTargetTouchesReachWebKit": "touchStreamMayArrive_clickRecognizerBlocked",
+                "webkitTapRecognizersRequireNativeLookupFailure": true,
             ]
         )
         if touchStartWasActiveTarget {
@@ -5858,6 +5866,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             reason: "touchesCancelled",
             extra: [
                 "touchCount": touches.count,
+                "segmentTargetTouchesReachWebKit": true,
             ]
         )
         cancelTouchDownLookupIfNeeded(reason: "touchesCancelled")
@@ -5907,7 +5916,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             reason: reason,
             target: touchStartTarget,
             coordinateView: coordinateView,
-            extra: payload
+            extra: payload.merging(["segmentTargetTouchesReachWebKit": true]) { current, _ in current }
         )
         cancelTouchDownLookupIfNeeded(reason: reason)
         resetTrackingState()
@@ -5964,6 +5973,7 @@ public class WebViewController: UIViewController {
     private var snapshotImageView: UIImageView?
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
+    private var nativeLookupTapFailureRequirementRecognizerIDs: Set<ObjectIdentifier> = []
     private var lastKnownWebViewSize: CGSize = .zero
     private var lastAppliedAdditionalSafeAreaInsets = UIEdgeInsets.zero
     private var lastAppliedObscuredInsets = UIEdgeInsets.zero
@@ -5992,6 +6002,7 @@ public class WebViewController: UIViewController {
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateObscuredInsets(reason: "viewDidLayoutSubviews")
+        configureNativeLookupTapFailureRequirements(reason: "viewDidLayoutSubviews")
         let size = webView.bounds.size
         if size.width > 1, size.height > 1 {
             lastKnownWebViewSize = size
@@ -6280,25 +6291,29 @@ public class WebViewController: UIViewController {
         nativeLookupHitTestOverlayConstraints.removeAll()
         nativeLookupHitTestOverlayView.removeFromSuperview()
         nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
-        if nativeLookupHitTestGestureRecognizer.view !== nativeLookupHitTestOverlayView {
+        if nativeLookupHitTestGestureRecognizer.view !== webView {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-            nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             debugPrint(
                 "# MAY15 nativeHitTargets.touchDelivery",
                 [
                     "stage": "recognizer.attach",
-                    "verdict": "configuredToClaimSegmentTouches",
-                    "recognizerViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
+                    "verdict": "configuredToDelayWebKitTouchesAndGateWebKitTapRecognizers",
+                    "recognizerViewType": String(describing: type(of: webView)),
                     "overlayViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
-                    "attachedToWebView": false,
-                    "attachedToOverlay": true,
-                    "overlayPassThrough": "noSegmentTargetsOnly",
-                    "segmentTargetTouchesReachWebKit": false,
+                    "attachedToWebView": true,
+                    "attachedToOverlay": false,
+                    "overlayPassThrough": true,
+                    "segmentTargetTouchesReachWebKit": "webkitTapRecognizersRequireNativeLookupFailure",
                     "delaysTouchesBegan": nativeLookupHitTestGestureRecognizer.delaysTouchesBegan,
                     "delaysTouchesEnded": nativeLookupHitTestGestureRecognizer.delaysTouchesEnded,
                     "cancelsTouchesInView": nativeLookupHitTestGestureRecognizer.cancelsTouchesInView,
                 ] as [String : Any]
             )
+        }
+        configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
+        DispatchQueue.main.async { [weak self] in
+            self?.configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay.async")
         }
         if let snapshotImageView {
             view.insertSubview(nativeLookupHitTestOverlayView, belowSubview: snapshotImageView)
@@ -6313,6 +6328,46 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: hitTestLayoutGuide.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
+    }
+
+    @MainActor
+    private func configureNativeLookupTapFailureRequirements(reason: String) {
+        var tapRecognizers: [UIGestureRecognizer] = []
+        func collectTapRecognizers(in candidate: UIView) {
+            if let recognizers = candidate.gestureRecognizers {
+                for recognizer in recognizers
+                where recognizer !== nativeLookupHitTestGestureRecognizer
+                    && recognizer is UITapGestureRecognizer {
+                    tapRecognizers.append(recognizer)
+                }
+            }
+            for subview in candidate.subviews {
+                collectTapRecognizers(in: subview)
+            }
+        }
+        collectTapRecognizers(in: webView)
+
+        var newlyConfigured: [String] = []
+        for recognizer in tapRecognizers {
+            let identifier = ObjectIdentifier(recognizer)
+            guard !nativeLookupTapFailureRequirementRecognizerIDs.contains(identifier) else { continue }
+            recognizer.require(toFail: nativeLookupHitTestGestureRecognizer)
+            nativeLookupTapFailureRequirementRecognizerIDs.insert(identifier)
+            newlyConfigured.append(String(describing: type(of: recognizer)))
+        }
+        guard !newlyConfigured.isEmpty else { return }
+        debugPrint(
+            "# MAY15 nativeHitTargets.touchDelivery",
+            [
+                "stage": "recognizer.failureRequirements",
+                "verdict": "webkitTapRecognizersRequireNativeLookupFailure",
+                "reason": reason,
+                "tapRecognizerCount": tapRecognizers.count,
+                "newlyConfiguredCount": newlyConfigured.count,
+                "newlyConfiguredTypes": Array(newlyConfigured.prefix(8)),
+                "nativeRecognizerViewType": nativeLookupHitTestGestureRecognizer.view.map { String(describing: type(of: $0)) } ?? "nil",
+            ] as [String : Any]
+        )
     }
 
 }
