@@ -1126,6 +1126,7 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
 public struct WebViewNativeLookupHitTarget {
     public let elementID: String
     public let rects: [CGRect]
+    public let lookupPayload: [String: Any]?
     public let frameInfo: WKFrameInfo?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
@@ -1135,6 +1136,7 @@ public struct WebViewNativeLookupHitTarget {
     public init(
         elementID: String,
         rects: [CGRect],
+        lookupPayload: [String: Any]? = nil,
         frameInfo: WKFrameInfo? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
@@ -1143,6 +1145,7 @@ public struct WebViewNativeLookupHitTarget {
     ) {
         self.elementID = elementID
         self.rects = rects
+        self.lookupPayload = lookupPayload
         self.frameInfo = frameInfo
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
@@ -1155,6 +1158,7 @@ public struct WebViewNativeLookupHit {
     public let elementID: String
     public let point: CGPoint
     public let rects: [CGRect]
+    public let lookupPayload: [String: Any]?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
     public let debugDistance: CGFloat?
@@ -1165,6 +1169,7 @@ public struct WebViewNativeLookupHit {
         elementID: String,
         point: CGPoint,
         rects: [CGRect] = [],
+        lookupPayload: [String: Any]? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
         debugDistance: CGFloat? = nil,
@@ -1174,6 +1179,7 @@ public struct WebViewNativeLookupHit {
         self.elementID = elementID
         self.point = point
         self.rects = rects
+        self.lookupPayload = lookupPayload
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
         self.debugDistance = debugDistance
@@ -1318,6 +1324,7 @@ public final class WebViewNativeLookupHitTestStore {
         WebViewNativeLookupHitTarget(
             elementID: candidate.target.elementID,
             rects: candidate.target.rects,
+            lookupPayload: candidate.target.lookupPayload,
             frameInfo: candidate.target.frameInfo,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
@@ -1444,6 +1451,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
             debugDistance: target.debugDistance,
@@ -1473,6 +1481,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
             debugDistance: target.debugDistance,
