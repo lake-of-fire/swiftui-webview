@@ -10,6 +10,10 @@ import UIKit
 import AppKit
 #endif
 
+private let may15LastNativeLookupTapDefaultsKey = "MAY15LastNativeLookupTapAtMs"
+private let may15LastNativeSegmentTouchDefaultsKey = "MAY15LastNativeSegmentTouchAtMs"
+private let may15LastWebUnhandledTapRevealDefaultsKey = "MAY15LastWebUnhandledTapRevealAtMs"
+
 @inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
     guard let start else { return "nil" }
@@ -717,6 +721,8 @@ public final class WebViewNativeLookupHitTestStore {
     public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onOverlaySegmentHitObserved: ((WebViewNativeLookupHitTarget, CGPoint, CGSize) -> Void)?
     public var onNativeTouchStreamFinished: ((String) -> Void)?
+    public var onActiveLookupBlankTap: (() -> Void)?
+    public var onExternalTouchInteractionCancelled: ((String) -> Void)?
     public var activeLookupElementID: (() -> String?)?
     public var activeElementID: String?
     public var targetCount: Int { entries.count }
@@ -755,6 +761,14 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func removeAllTargets() {
         entries.removeAll()
+    }
+
+    public func closeActiveLookupFromBlankTap() {
+        onActiveLookupBlankTap?()
+    }
+
+    public func cancelActiveTouchInteraction(reason: String) {
+        onExternalTouchInteractionCancelled?(reason)
     }
 
     public func hitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
@@ -2054,6 +2068,45 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
+            let nowMs = Date().timeIntervalSince1970 * 1000
+            let lastNativeLookupTapAtMs = UserDefaults.standard.double(forKey: may15LastNativeLookupTapDefaultsKey)
+            let nativeLookupTapAgeMs = lastNativeLookupTapAtMs > 0
+                ? nowMs - lastNativeLookupTapAtMs
+                : nil
+            let lastNativeSegmentTouchAtMs = UserDefaults.standard.double(forKey: may15LastNativeSegmentTouchDefaultsKey)
+            let nativeSegmentTouchAgeMs = lastNativeSegmentTouchAtMs > 0
+                ? nowMs - lastNativeSegmentTouchAtMs
+                : nil
+            let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
+            let isRecentNativeSegmentTouch = nativeSegmentTouchAgeMs.map { $0 >= 0 && $0 < 750 } == true
+            if isRecentNativeSegmentTouch {
+                debugPrint(
+                    "# MAY15 nativeHitTargets.blankTap",
+                    [
+                        "stage": "swiftUIWebViewUnhandledTap.recentNativeSegment",
+                        "verdict": "suppressSyntheticUnhandledTap",
+                        "hasActiveLookup": hasActiveLookup,
+                        "nativeLookupTapAgeMs": nativeLookupTapAgeMs.map { Int($0.rounded()) } as Any,
+                        "nativeSegmentTouchAgeMs": nativeSegmentTouchAgeMs.map { Int($0.rounded()) } as Any,
+                    ] as [String : Any]
+                )
+                return
+            }
+            if hasActiveLookup {
+                debugPrint(
+                    "# MAY15 nativeHitTargets.blankTap",
+                    [
+                        "stage": "swiftUIWebViewUnhandledTap.activeLookup",
+                        "verdict": "closeLookupAndSuppressHideNavigationToggle",
+                        "hasActiveLookup": hasActiveLookup,
+                        "nativeLookupTapAgeMs": nativeLookupTapAgeMs.map { Int($0.rounded()) } as Any,
+                        "nativeSegmentTouchAgeMs": nativeSegmentTouchAgeMs.map { Int($0.rounded()) } as Any,
+                    ] as [String : Any]
+                )
+                UserDefaults.standard.set(nowMs, forKey: may15LastNativeLookupTapDefaultsKey)
+                navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
+                return
+            }
 #if DEBUG
             debugPrint(
                 "# TABBAR webUnhandledTapHideNav",
@@ -2061,6 +2114,9 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 "next=\(!hideNavigationDueToScroll.wrappedValue)"
             )
 #endif
+            if hideNavigationDueToScroll.wrappedValue {
+                UserDefaults.standard.set(nowMs, forKey: may15LastWebUnhandledTapRevealDefaultsKey)
+            }
             withAnimation(.easeOut(duration: 0.18)) {
                 hideNavigationDueToScroll.wrappedValue.toggle()
             }
@@ -5556,9 +5612,9 @@ private final class NativeLookupHitTestOverlayView: UIView {
 }
 
 private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer {
-    private static let segmentTapMovementTolerance: CGFloat = 14
+    private static let segmentTapMovementTolerance: CGFloat = 10
     private static let segmentLongPressDriftTolerance: CGFloat = 24
-    private static let segmentSwipeMovementTolerance: CGFloat = 10
+    private static let segmentSwipeMovementTolerance: CGFloat = 4
     private static let segmentTapMaximumDuration: TimeInterval = 0.42
     private static let segmentTapPressedHandoffDuration: TimeInterval = 0.16
 
@@ -5659,6 +5715,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "segmentTargetTouchesReachWebKit": "pendingTapDecision",
             ]
         )
+        let nativeSegmentTouchAtMs = Date().timeIntervalSince1970 * 1000
+        UserDefaults.standard.set(nativeSegmentTouchAtMs, forKey: may15LastNativeLookupTapDefaultsKey)
+        UserDefaults.standard.set(nativeSegmentTouchAtMs, forKey: may15LastNativeSegmentTouchDefaultsKey)
         suppressCompetingWebKitTapRecognizers(
             reason: "segmentTarget",
             target: target,
@@ -5691,6 +5750,26 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "activeHighlightElementID": activeHighlightElementID as Any,
                 ]
             )
+            if !touchStartWasActiveTarget {
+                let dispatched = store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true
+                touchStartDispatchedLookup = dispatched
+                touchStartOpenedDifferentLookup = dispatched
+                logTouchDeliveryVerdict(
+                    stage: "touchesBegan.activeLookupDispatch",
+                    verdict: dispatched
+                        ? "popover.updateDispatchedOnTouchDown"
+                        : "popover.updateDispatchFailed",
+                    reason: "activeLookupMoveCandidate",
+                    target: target,
+                    point: point,
+                    coordinateView: coordinateView,
+                    extra: [
+                        "activeLookupElementID": activeLookupElementID as Any,
+                        "activeHighlightElementID": activeHighlightElementID as Any,
+                        "lookupDispatchedOnTouchDown": dispatched,
+                    ]
+                )
+            }
         }
         tapExpirationWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
@@ -5916,7 +5995,56 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     }
 
     override func reset() {
+        if state == .possible,
+           let target = touchStartTarget,
+           let point = touchStartPoint,
+           let coordinateView,
+           !touchStartDispatchedLookup,
+           !touchStartWasActiveTarget {
+            let dispatched = store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true
+            debugPrint(
+                "# MAY15 nativeHitTargets.passThrough",
+                [
+                    "stage": "reset.recoverPendingNativeLookup",
+                    "verdict": dispatched ? "nativeLookupRecoveredBeforeReset" : "nativeLookupRecoveryFailed",
+                    "elementID": target.elementID,
+                    "point": Self.debugPointString(point),
+                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
+                    "lookupDispatchedOnReset": dispatched,
+                    "segmentTargetTouchesReachWebKit": "tapRecognizersAlreadySuppressed",
+                ] as [String : Any]
+            )
+            logTouchDeliveryVerdict(
+                stage: "reset.recoverPendingNativeLookup",
+                verdict: dispatched ? "nativeLookupRecoveredBeforeReset" : "nativeLookupRecoveryFailed",
+                reason: "unexpectedRecognizerReset",
+                target: target,
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "lookupDispatchedOnReset": dispatched,
+                    "segmentTargetTouchesReachWebKit": "tapRecognizersAlreadySuppressed",
+                ]
+            )
+            if dispatched {
+                touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
+                resetTrackingState(clearPressedTarget: false)
+                return
+            }
+        }
         resetTrackingState()
+    }
+
+    func cancelForExternalPageMotion(reason: String) {
+        guard touchStartTarget != nil || touchStartOverlay != nil else { return }
+        clearPressedVisualForMovementIfNeeded(payload: [
+            "reason": reason,
+            "movement": "externalPageMotion",
+        ])
+        failGesture(reason: reason, payload: [
+            "reason": reason,
+            "movement": "externalPageMotion",
+        ])
     }
 
     private func resetTrackingState(clearPressedTarget: Bool = true) {
@@ -6010,6 +6138,20 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private func cancelTouchDownLookupIfNeeded(reason: String) {
         guard touchStartOpenedDifferentLookup,
               let target = touchStartTarget else { return }
+        if touchStartDispatchedLookup && reason == "movement" {
+            logTouchDeliveryVerdict(
+                stage: "touchDownLookup.keepAfterMovement",
+                verdict: "popover.keepRetargetedLookupAfterTouchDownDispatch",
+                reason: reason,
+                target: target,
+                coordinateView: coordinateView,
+                extra: [
+                    "lookupDispatchedOnTouchDown": true,
+                    "segmentTargetTouchesReachWebKit": true,
+                ]
+            )
+            return
+        }
         logTouchDeliveryVerdict(
             stage: "touchDownLookup.cancel",
             verdict: "popover.closedAfterTouchDownCancel",
@@ -6316,6 +6458,11 @@ public class WebViewController: UIViewController {
         }
         store.onNativeTouchStreamFinished = { [weak self] reason in
             self?.restoreEarlySuppressedNativeLookupTapRecognizers(reason: reason)
+        }
+        store.onExternalTouchInteractionCancelled = { [weak self] reason in
+            guard let self else { return }
+            self.nativeLookupHitTestOverlayView.clearPressedTarget()
+            self.nativeLookupHitTestGestureRecognizer.cancelForExternalPageMotion(reason: reason)
         }
     }
 
