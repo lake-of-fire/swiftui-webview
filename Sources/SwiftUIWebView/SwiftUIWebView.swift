@@ -629,6 +629,7 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
 public struct WebViewNativeLookupHitTarget {
     public let elementID: String
     public let rects: [CGRect]
+    public let lookupPayload: [String: Any]?
     public let frameInfo: WKFrameInfo?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
@@ -638,6 +639,7 @@ public struct WebViewNativeLookupHitTarget {
     public init(
         elementID: String,
         rects: [CGRect],
+        lookupPayload: [String: Any]? = nil,
         frameInfo: WKFrameInfo? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
@@ -646,6 +648,7 @@ public struct WebViewNativeLookupHitTarget {
     ) {
         self.elementID = elementID
         self.rects = rects
+        self.lookupPayload = lookupPayload
         self.frameInfo = frameInfo
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
@@ -658,6 +661,7 @@ public struct WebViewNativeLookupHit {
     public let elementID: String
     public let point: CGPoint
     public let rects: [CGRect]
+    public let lookupPayload: [String: Any]?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
     public let debugDistance: CGFloat?
@@ -668,6 +672,7 @@ public struct WebViewNativeLookupHit {
         elementID: String,
         point: CGPoint,
         rects: [CGRect] = [],
+        lookupPayload: [String: Any]? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
         debugDistance: CGFloat? = nil,
@@ -677,6 +682,7 @@ public struct WebViewNativeLookupHit {
         self.elementID = elementID
         self.point = point
         self.rects = rects
+        self.lookupPayload = lookupPayload
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
         self.debugDistance = debugDistance
@@ -686,6 +692,8 @@ public struct WebViewNativeLookupHit {
 }
 
 public final class WebViewNativeLookupHitTestStore {
+    private static let strictOverlayCaptureDefaultsKey = "MAY15NativeLookupStrictOverlayCapture"
+
     private struct Entry {
         let target: WebViewNativeLookupHitTarget
         let rects: [CGRect]
@@ -707,9 +715,14 @@ public final class WebViewNativeLookupHitTestStore {
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
+    public var onOverlaySegmentHitObserved: ((WebViewNativeLookupHitTarget, CGPoint, CGSize) -> Void)?
+    public var onNativeTouchStreamFinished: ((String) -> Void)?
     public var activeLookupElementID: (() -> String?)?
     public var activeElementID: String?
     public var targetCount: Int { entries.count }
+    public var capturesSegmentTouchesInOverlay: Bool {
+        UserDefaults.standard.bool(forKey: Self.strictOverlayCaptureDefaultsKey)
+    }
 
     public init(hitSlop: CGFloat = 8) {
         self.hitSlop = hitSlop
@@ -821,6 +834,7 @@ public final class WebViewNativeLookupHitTestStore {
         WebViewNativeLookupHitTarget(
             elementID: candidate.target.elementID,
             rects: candidate.target.rects,
+            lookupPayload: candidate.target.lookupPayload,
             frameInfo: candidate.target.frameInfo,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
@@ -947,6 +961,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
             debugDistance: target.debugDistance,
@@ -976,6 +991,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
             debugDistance: target.debugDistance,
@@ -5496,10 +5512,14 @@ private final class NativeLookupHitTestOverlayView: UIView {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         let target = store?.hitTarget(at: point, in: bounds.size)
         if let target {
+            let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
+            store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
             debugPrint(
                 "# MAY15 nativeHitTargets.overlay",
                 [
-                    "stage": "ios.hitTest.observedPassThrough",
+                    "stage": capturesSegmentTouches
+                        ? "ios.hitTest.captureSegment"
+                        : "ios.hitTest.observedPassThrough",
                     "point": "{\(point.x), \(point.y)}",
                     "containerSize": "{\(bounds.width), \(bounds.height)}",
                     "elementID": target.elementID,
@@ -5508,9 +5528,14 @@ private final class NativeLookupHitTestOverlayView: UIView {
                     "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
                     "distance": target.debugDistance as Any,
                     "centerDistance": target.debugCenterDistance as Any,
-                    "verdict": "nativeOverlayVisualOnly",
+                    "verdict": capturesSegmentTouches
+                        ? "nativeOverlayCapturesSegmentTouch"
+                        : "nativeOverlayVisualOnly",
                 ] as [String : Any]
             )
+            if capturesSegmentTouches {
+                return true
+            }
         } else {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
@@ -5545,8 +5570,10 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchStartWasActiveTarget = false
     private var touchStartDispatchedLookup = false
     private var touchStartOpenedDifferentLookup = false
+    private var touchStartPressedVisualCleared = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
     private var tapExpirationWorkItem: DispatchWorkItem?
+    private var suppressedCompetingTapRecognizers: [(recognizer: UIGestureRecognizer, wasEnabled: Bool)] = []
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
@@ -5632,6 +5659,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "segmentTargetTouchesReachWebKit": "pendingTapDecision",
             ]
         )
+        suppressCompetingWebKitTapRecognizers(
+            reason: "segmentTarget",
+            target: target,
+            point: point,
+            coordinateView: coordinateView
+        )
         touchStartPoint = point
         touchStartTime = event.timestamp
         touchStartTarget = target
@@ -5642,21 +5675,14 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             activeLookupElementID == target.elementID
             || activeHighlightElementID == target.elementID
         touchStartOverlay = coordinateView
-        store?.onActiveTargetTouchDown?(target)
         touchStartOverlay?.showPressedTarget(target)
         if hadActiveLookup {
-            if touchStartWasActiveTarget {
-                touchStartDispatchedLookup = true
-            } else {
-                touchStartDispatchedLookup = store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true
-                touchStartOpenedDifferentLookup = touchStartDispatchedLookup
-            }
             logTouchDeliveryVerdict(
-                stage: "touchesBegan.activeLookupImmediateDispatch",
+                stage: "touchesBegan.activeLookupPendingTapDecision",
                 verdict: touchStartWasActiveTarget
-                    ? "popover.dismissedOnTouchDown"
-                    : (touchStartDispatchedLookup ? "popover.updatedOnTouchDown" : "popover.updateFailedOnTouchDown"),
-                reason: touchStartWasActiveTarget ? "sameActiveTargetDismiss" : "activeLookupMove",
+                    ? "popover.dismissPendingTouchEnd"
+                    : "popover.updatePendingTouchEnd",
+                reason: touchStartWasActiveTarget ? "sameActiveTargetCandidate" : "activeLookupMoveCandidate",
                 target: target,
                 point: point,
                 coordinateView: coordinateView,
@@ -5688,8 +5714,22 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let isSwipeLikeMovement =
             horizontalMovement > Self.segmentSwipeMovementTolerance
             && horizontalMovement > verticalMovement * 1.2
+        let exceededTapMovement = movement > Self.segmentTapMovementTolerance
         let exceededLongPressDrift = movement > Self.segmentLongPressDriftTolerance
-        if isSwipeLikeMovement || exceededLongPressDrift {
+        if exceededTapMovement || isSwipeLikeMovement {
+            clearPressedVisualForMovementIfNeeded(payload: [
+                "start": Self.debugPointString(start),
+                "point": Self.debugPointString(point),
+                "movement": movement,
+                "dx": dx,
+                "dy": dy,
+                "tapTolerance": Self.segmentTapMovementTolerance,
+                "swipeMovementTolerance": Self.segmentSwipeMovementTolerance,
+                "isSwipeLikeMovement": isSwipeLikeMovement,
+                "exceededTapMovement": exceededTapMovement,
+            ])
+        }
+        if exceededTapMovement || isSwipeLikeMovement {
             failGesture(reason: "movement", payload: [
                 "start": Self.debugPointString(start),
                 "point": Self.debugPointString(point),
@@ -5700,6 +5740,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "longPressDriftTolerance": Self.segmentLongPressDriftTolerance,
                 "swipeMovementTolerance": Self.segmentSwipeMovementTolerance,
                 "isSwipeLikeMovement": isSwipeLikeMovement,
+                "exceededTapMovement": exceededTapMovement,
                 "exceededLongPressDrift": exceededLongPressDrift,
             ])
         }
@@ -5887,10 +5928,83 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartWasActiveTarget = false
         touchStartDispatchedLookup = false
         touchStartOpenedDifferentLookup = false
+        touchStartPressedVisualCleared = false
+        restoreSuppressedCompetingTapRecognizers(reason: "resetTrackingState")
+        store?.onNativeTouchStreamFinished?("resetTrackingState")
         if clearPressedTarget {
             touchStartOverlay?.clearPressedTarget()
         }
         touchStartOverlay = nil
+    }
+
+    private func suppressCompetingWebKitTapRecognizers(
+        reason: String,
+        target: WebViewNativeLookupHitTarget,
+        point: CGPoint,
+        coordinateView: NativeLookupHitTestOverlayView
+    ) {
+        guard suppressedCompetingTapRecognizers.isEmpty,
+              let rootView = view else { return }
+        var recognizers: [UIGestureRecognizer] = []
+        var seen = Set<ObjectIdentifier>()
+        func collect(in candidate: UIView) {
+            if let candidateRecognizers = candidate.gestureRecognizers {
+                for recognizer in candidateRecognizers where recognizer !== self {
+                    let typeName = String(describing: type(of: recognizer))
+                    guard recognizer is UITapGestureRecognizer || typeName.contains("Tap") else { continue }
+                    let identifier = ObjectIdentifier(recognizer)
+                    guard seen.insert(identifier).inserted else { continue }
+                    recognizers.append(recognizer)
+                }
+            }
+            for subview in candidate.subviews {
+                collect(in: subview)
+            }
+        }
+        collect(in: rootView)
+        recognizers = recognizers.filter(\.isEnabled)
+        guard !recognizers.isEmpty else { return }
+        suppressedCompetingTapRecognizers = recognizers.map { ($0, $0.isEnabled) }
+        for recognizer in recognizers {
+            recognizer.isEnabled = false
+        }
+        logTouchDeliveryVerdict(
+            stage: "recognizer.suppressCompetingTaps",
+            verdict: "webkitTapRecognizersDisabledForNativeCandidate",
+            reason: reason,
+            target: target,
+            point: point,
+            coordinateView: coordinateView,
+            extra: [
+                "suppressedCount": recognizers.count,
+                "suppressedTypes": recognizers.prefix(12).map { String(describing: type(of: $0)) },
+                "segmentTargetTouchesReachWebKit": "tapRecognizersDisabledDuringNativeDecision"
+            ]
+        )
+    }
+
+    private func restoreSuppressedCompetingTapRecognizers(reason: String) {
+        guard !suppressedCompetingTapRecognizers.isEmpty else { return }
+        let restored = suppressedCompetingTapRecognizers
+        suppressedCompetingTapRecognizers.removeAll()
+        for (recognizer, wasEnabled) in restored {
+            recognizer.isEnabled = wasEnabled
+        }
+        debugPrint("# MAY15 nativeHitTargets.touchDelivery", [
+            "stage": "recognizer.restoreCompetingTaps",
+            "reason": reason,
+            "restoredCount": restored.count,
+            "restoredTypes": restored.prefix(12).map { String(describing: type(of: $0.recognizer)) }
+        ] as [String: Any])
+    }
+
+    private func clearPressedVisualForMovementIfNeeded(payload: [String: Any]) {
+        guard !touchStartPressedVisualCleared else { return }
+        touchStartPressedVisualCleared = true
+        touchStartOverlay?.clearPressedTarget()
+        var mergedPayload = payload
+        mergedPayload["stage"] = "pressVisual.clear.movement"
+        debugPrint("# MAY15 nativeHitTargets.passThrough", mergedPayload)
     }
 
     private func cancelTouchDownLookupIfNeeded(reason: String) {
@@ -5974,6 +6088,8 @@ public class WebViewController: UIViewController {
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
     private var nativeLookupTapFailureRequirementRecognizerIDs: Set<ObjectIdentifier> = []
+    private var earlySuppressedNativeLookupTapRecognizers: [(recognizer: UIGestureRecognizer, wasEnabled: Bool)] = []
+    private var capturesNativeLookupSegmentTouchesInOverlay = false
     private var lastKnownWebViewSize: CGSize = .zero
     private var lastAppliedAdditionalSafeAreaInsets = UIEdgeInsets.zero
     private var lastAppliedObscuredInsets = UIEdgeInsets.zero
@@ -6187,9 +6303,79 @@ public class WebViewController: UIViewController {
 
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
+        capturesNativeLookupSegmentTouchesInOverlay = store.capturesSegmentTouchesInOverlay
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
+        store.onOverlaySegmentHitObserved = { [weak self] target, point, containerSize in
+            self?.suppressCompetingTapRecognizersFromOverlayHitTest(
+                target: target,
+                point: point,
+                containerSize: containerSize
+            )
+        }
+        store.onNativeTouchStreamFinished = { [weak self] reason in
+            self?.restoreEarlySuppressedNativeLookupTapRecognizers(reason: reason)
+        }
+    }
+
+    private func suppressCompetingTapRecognizersFromOverlayHitTest(
+        target: WebViewNativeLookupHitTarget,
+        point: CGPoint,
+        containerSize: CGSize
+    ) {
+        guard earlySuppressedNativeLookupTapRecognizers.isEmpty else { return }
+        var recognizers: [UIGestureRecognizer] = []
+        var seen = Set<ObjectIdentifier>()
+        func collect(in candidate: UIView) {
+            if let candidateRecognizers = candidate.gestureRecognizers {
+                for recognizer in candidateRecognizers where recognizer !== nativeLookupHitTestGestureRecognizer {
+                    let typeName = String(describing: type(of: recognizer))
+                    guard recognizer.isEnabled,
+                          (recognizer is UITapGestureRecognizer || typeName.contains("Tap")) else { continue }
+                    let identifier = ObjectIdentifier(recognizer)
+                    guard seen.insert(identifier).inserted else { continue }
+                    recognizers.append(recognizer)
+                }
+            }
+            for subview in candidate.subviews {
+                collect(in: subview)
+            }
+        }
+        collect(in: webView)
+        guard !recognizers.isEmpty else { return }
+        earlySuppressedNativeLookupTapRecognizers = recognizers.map { ($0, $0.isEnabled) }
+        for recognizer in recognizers {
+            recognizer.isEnabled = false
+        }
+        debugPrint("# MAY15 nativeHitTargets.touchDelivery", [
+            "stage": "overlay.suppressCompetingTaps",
+            "verdict": "webkitTapRecognizersDisabledBeforeWebViewTouchDelivery",
+            "reason": "overlayHitTestSegmentTarget",
+            "elementID": target.elementID,
+            "point": "{\(point.x), \(point.y)}",
+            "containerSize": "{\(containerSize.width), \(containerSize.height)}",
+            "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
+            "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
+            "suppressedCount": recognizers.count,
+            "suppressedTypes": recognizers.prefix(12).map { String(describing: type(of: $0)) },
+            "segmentTargetTouchesReachWebKit": "tapRecognizersDisabledBeforeTouchDelivery"
+        ] as [String: Any])
+    }
+
+    private func restoreEarlySuppressedNativeLookupTapRecognizers(reason: String) {
+        guard !earlySuppressedNativeLookupTapRecognizers.isEmpty else { return }
+        let restored = earlySuppressedNativeLookupTapRecognizers
+        earlySuppressedNativeLookupTapRecognizers.removeAll()
+        for (recognizer, wasEnabled) in restored {
+            recognizer.isEnabled = wasEnabled
+        }
+        debugPrint("# MAY15 nativeHitTargets.touchDelivery", [
+            "stage": "overlay.restoreCompetingTaps",
+            "reason": reason,
+            "restoredCount": restored.count,
+            "restoredTypes": restored.prefix(12).map { String(describing: type(of: $0.recognizer)) }
+        ] as [String: Any])
     }
 
     @MainActor
@@ -6291,29 +6477,50 @@ public class WebViewController: UIViewController {
         nativeLookupHitTestOverlayConstraints.removeAll()
         nativeLookupHitTestOverlayView.removeFromSuperview()
         nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
-        if nativeLookupHitTestGestureRecognizer.view !== webView {
+        let capturesSegmentTouchesInOverlay = capturesNativeLookupSegmentTouchesInOverlay
+        let recognizerHostView: UIView = capturesSegmentTouchesInOverlay
+            ? nativeLookupHitTestOverlayView
+            : webView
+        if nativeLookupHitTestGestureRecognizer.view !== recognizerHostView {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-            webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            recognizerHostView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             debugPrint(
                 "# MAY15 nativeHitTargets.touchDelivery",
                 [
                     "stage": "recognizer.attach",
-                    "verdict": "configuredToDelayWebKitTouchesAndGateWebKitTapRecognizers",
-                    "recognizerViewType": String(describing: type(of: webView)),
+                    "verdict": capturesSegmentTouchesInOverlay
+                        ? "configuredStrictOverlayCapture"
+                        : "configuredToDelayWebKitTouchesAndGateWebKitTapRecognizers",
+                    "recognizerViewType": String(describing: type(of: recognizerHostView)),
                     "overlayViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
-                    "attachedToWebView": true,
-                    "attachedToOverlay": false,
-                    "overlayPassThrough": true,
-                    "segmentTargetTouchesReachWebKit": "webkitTapRecognizersRequireNativeLookupFailure",
+                    "attachedToWebView": recognizerHostView === webView,
+                    "attachedToOverlay": recognizerHostView === nativeLookupHitTestOverlayView,
+                    "overlayPassThrough": !capturesSegmentTouchesInOverlay,
+                    "strictOverlayCapture": capturesSegmentTouchesInOverlay,
+                    "segmentTargetTouchesReachWebKit": capturesSegmentTouchesInOverlay
+                        ? "blockedByOverlayHitTestForSegmentTargets"
+                        : "webkitTapRecognizersRequireNativeLookupFailure",
                     "delaysTouchesBegan": nativeLookupHitTestGestureRecognizer.delaysTouchesBegan,
                     "delaysTouchesEnded": nativeLookupHitTestGestureRecognizer.delaysTouchesEnded,
                     "cancelsTouchesInView": nativeLookupHitTestGestureRecognizer.cancelsTouchesInView,
                 ] as [String : Any]
             )
         }
-        configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
-        DispatchQueue.main.async { [weak self] in
-            self?.configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay.async")
+        if capturesSegmentTouchesInOverlay {
+            debugPrint(
+                "# MAY15 nativeHitTargets.touchDelivery",
+                [
+                    "stage": "recognizer.failureRequirements",
+                    "verdict": "skippedForStrictOverlayCapture",
+                    "reason": "attachNativeLookupHitTestOverlay",
+                    "segmentTargetTouchesReachWebKit": "blockedByOverlayHitTestForSegmentTargets"
+                ] as [String : Any]
+            )
+        } else {
+            configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
+            DispatchQueue.main.async { [weak self] in
+                self?.configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay.async")
+            }
         }
         if let snapshotImageView {
             view.insertSubview(nativeLookupHitTestOverlayView, belowSubview: snapshotImageView)
@@ -7659,6 +7866,15 @@ extension WebView: NSViewRepresentable {
             let currentURL = webView.url?.absoluteString ?? "nil"
             let resolvedWorld = world ?? .page
             let startedAt = Date()
+            let evalTraceID = "eval-\(Int((startedAt.timeIntervalSince1970 * 1000).rounded()))-\(UUID().uuidString.prefix(6))"
+            print("# MAY15 webView.eval.start",
+                  "id=\(evalTraceID)",
+                  "url=\(currentURL)",
+                  "frameURL=\(frameURL)",
+                  "isMainFrame=\(isMainFrame)",
+                  "world=\(String(describing: resolvedWorld.name))",
+                  "args=\(args?.count ?? 0)",
+                  "jsPrefix=\(jsPrefix)")
             print("# EPUB  scriptCaller.call.start",
                   "url=\(currentURL)",
                   "frameURL=\(frameURL)",
@@ -7678,6 +7894,16 @@ extension WebView: NSViewRepresentable {
                 let elapsed = Date().timeIntervalSince(startedAt)
                 let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
                 let stringLength = (value as? String)?.count
+                print("# MAY15 webView.eval.finish",
+                      "id=\(evalTraceID)",
+                      "url=\(currentURL)",
+                      "frameURL=\(frameURL)",
+                      "isMainFrame=\(isMainFrame)",
+                      "world=\(String(describing: resolvedWorld.name))",
+                      "jsPrefix=\(jsPrefix)",
+                      "type=\(typeDescription)",
+                      "stringLength=\(stringLength.map(String.init) ?? "nil")",
+                      String(format: "elapsed=%.3fs", elapsed))
                 print("# EPUB  scriptCaller.call.finish",
                       "url=\(currentURL)",
                       "frameURL=\(frameURL)",
@@ -7692,6 +7918,15 @@ extension WebView: NSViewRepresentable {
             } catch {
 #if DEBUG
                 let elapsed = Date().timeIntervalSince(startedAt)
+                print("# MAY15 webView.eval.error",
+                      "id=\(evalTraceID)",
+                      "url=\(currentURL)",
+                      "frameURL=\(frameURL)",
+                      "isMainFrame=\(isMainFrame)",
+                      "world=\(String(describing: resolvedWorld.name))",
+                      "jsPrefix=\(jsPrefix)",
+                      "error=\(error)",
+                      String(format: "elapsed=%.3fs", elapsed))
                 print("# EPUB  scriptCaller.call.error",
                       "url=\(currentURL)",
                       "frameURL=\(frameURL)",
@@ -7707,6 +7942,14 @@ extension WebView: NSViewRepresentable {
         context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
             guard let webView else { return }
             let resolvedWorld = world ?? .page
+#if DEBUG
+            print("# MAY15 webView.eval.unsafe",
+                  "url=\(webView.url?.absoluteString ?? "nil")",
+                  "frameURL=\(frame?.request.url?.absoluteString ?? "nil")",
+                  "isMainFrame=\(frame?.isMainFrame ?? true)",
+                  "world=\(String(describing: resolvedWorld.name))",
+                  "jsPrefix=\(js.prefix(120))")
+#endif
             webView.evaluateJavaScript(js, in: frame, in: resolvedWorld, completionHandler: nil)
         }
         
