@@ -13,7 +13,7 @@ import AppKit
 private let may15LastNativeLookupTapDefaultsKey = "MAY15LastNativeLookupTapAtMs"
 private let may15LastNativeSegmentTouchDefaultsKey = "MAY15LastNativeSegmentTouchAtMs"
 private let may15LastWebUnhandledTapRevealDefaultsKey = "MAY15LastWebUnhandledTapRevealAtMs"
-private let may16LastToolbarBlankNativeToggleDefaultsKey = "MAY16LastToolbarBlankNativeToggleAtMs"
+private let lastToolbarBlankNativeToggleDefaultsKey = "ManabiLastToolbarBlankNativeToggleAtMs"
 
 @inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
@@ -2009,15 +2009,10 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             if isRecentNativeSegmentTouch {
                 return
             }
-            let lastToolbarBlankNativeToggleAtMs = UserDefaults.standard.double(forKey: may16LastToolbarBlankNativeToggleDefaultsKey)
+            let lastToolbarBlankNativeToggleAtMs = UserDefaults.standard.double(forKey: lastToolbarBlankNativeToggleDefaultsKey)
             let toolbarBlankNativeToggleAgeMs = lastToolbarBlankNativeToggleAtMs > 0 ? nowMs - lastToolbarBlankNativeToggleAtMs : nil
             let isRecentToolbarBlankNativeToggle = toolbarBlankNativeToggleAgeMs.map { $0 >= 0 && $0 < 2_000 } == true
             if isRecentToolbarBlankNativeToggle {
-                debugPrint(
-                    "# MAY16 toolbarBlank.suppressUnhandledTap",
-                    "ageMs=\(toolbarBlankNativeToggleAgeMs.map { String(Int($0.rounded())) } ?? "nil")",
-                    "current=\(hideNavigationDueToScroll.wrappedValue)"
-                )
                 return
             }
             if hasActiveLookup {
