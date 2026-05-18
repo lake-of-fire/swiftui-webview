@@ -13,6 +13,7 @@ import AppKit
 private let may15LastNativeLookupTapDefaultsKey = "MAY15LastNativeLookupTapAtMs"
 private let may15LastNativeSegmentTouchDefaultsKey = "MAY15LastNativeSegmentTouchAtMs"
 private let may15LastWebUnhandledTapRevealDefaultsKey = "MAY15LastWebUnhandledTapRevealAtMs"
+private let may16LastToolbarBlankNativeToggleDefaultsKey = "MAY16LastToolbarBlankNativeToggleAtMs"
 
 @inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
@@ -22,17 +23,6 @@ private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> 
 
 @inline(__always)
 private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) {
-#if DEBUG
-    let payload = metadata
-        .sorted { $0.key < $1.key }
-        .map { "\($0.key)=\($0.value)" }
-        .joined(separator: " ")
-    if payload.isEmpty {
-        Swift.debugPrint("# READERLOAD stage=\(stage)")
-    } else {
-        Swift.debugPrint("# READERLOAD stage=\(stage) \(payload)")
-    }
-#endif
 }
 
 @inline(__always)
@@ -746,17 +736,6 @@ public final class WebViewNativeLookupHitTestStore {
             guard !hitRects.isEmpty else { return nil }
             return Entry(target: target, rects: rects, hitRects: hitRects)
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.update",
-            [
-                "targetCount": targets.count,
-                "entryCount": entries.count,
-                "firstElementID": entries.first?.target.elementID as Any,
-                "firstRects": entries.first.map { Self.debugRectStrings($0.rects.prefix(3)) } as Any,
-                "lastElementID": entries.last?.target.elementID as Any,
-                "lastRects": entries.last.map { Self.debugRectStrings($0.rects.suffix(3)) } as Any,
-            ] as [String : Any]
-        )
     }
 
     public func removeAllTargets() {
@@ -947,29 +926,8 @@ public final class WebViewNativeLookupHitTestStore {
         let exactCandidate = bestCandidate(at: point, usingInflatedRects: false)
         let inflatedCandidate = exactCandidate == nil ? bestCandidate(at: point, usingInflatedRects: true) : nil
         guard let candidate = exactCandidate ?? inflatedCandidate else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.tapMiss",
-                [
-                    "point": Self.debugPointString(point),
-                    "containerSize": containerSize.map(Self.debugSizeString) as Any,
-                    "entryCount": entries.count,
-                ] as [String : Any]
-            )
             return false
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.tapHit",
-            [
-                "point": Self.debugPointString(point),
-                "containerSize": containerSize.map(Self.debugSizeString) as Any,
-                "elementID": candidate.target.elementID,
-                "usedInflatedRects": exactCandidate == nil,
-                "distance": candidate.distance,
-                "centerDistance": candidate.centerDistance,
-                "rects": Self.debugRectStrings([candidate.rect]),
-                "hitRects": Self.debugRectStrings([candidate.hitRect]),
-            ] as [String : Any]
-        )
         let target = target(for: candidate, usedInflatedHitRect: exactCandidate == nil)
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
@@ -986,21 +944,6 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func handleTap(on target: WebViewNativeLookupHitTarget, at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
-        debugPrint(
-            "# MAY15 nativeHitTargets.tapHit",
-            [
-                "point": Self.debugPointString(point),
-                "containerSize": containerSize.map(Self.debugSizeString) as Any,
-                "elementID": target.elementID,
-                "usedInflatedRects": false,
-                "source": "capturedStartTarget",
-                "rects": Self.debugRectStrings(target.rects.prefix(4)),
-                "hitRects": Self.debugRectStrings(target.debugHitRects.prefix(4)),
-                "targetUsedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
-                "targetDistance": target.debugDistance as Any,
-                "targetCenterDistance": target.debugCenterDistance as Any,
-            ] as [String : Any]
-        )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
             point: point,
@@ -1810,22 +1753,6 @@ public class WebViewCoordinator: NSObject {
         let backList = webView.backForwardList.backList
         let forwardList = webView.backForwardList.forwardList
         let navigationType = lastMainFrameNavigationType.map(navigationTypeDescription) ?? "nil"
-        debugPrint(
-            "# EPUB  webView.nav.epubTransition.\(stage)",
-            "sourceURL=\(sourceURL.absoluteString)",
-            "requestURL=\(targetURL?.absoluteString ?? "nil")",
-            "currentURL=\(currentURL?.absoluteString ?? "nil")",
-            "mainDocumentURL=\(lastMainFrameNavigationMainDocumentURL?.absoluteString ?? "nil")",
-            "navigationType=\(navigationType)",
-            "canGoBack=\(webView.canGoBack)",
-            "canGoForward=\(webView.canGoForward)",
-            "backDepth=\(backList.count)",
-            "forwardDepth=\(forwardList.count)",
-            "backItemURL=\(backList.last?.url.absoluteString ?? "nil")",
-            "forwardItemURL=\(forwardList.first?.url.absoluteString ?? "nil")",
-            "statePageURL=\(self.webView.state.pageURL.absoluteString)",
-            "isLoading=\(webView.isLoading)"
-        )
 #endif
     }
     
@@ -2080,29 +2007,20 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
             let isRecentNativeSegmentTouch = nativeSegmentTouchAgeMs.map { $0 >= 0 && $0 < 750 } == true
             if isRecentNativeSegmentTouch {
+                return
+            }
+            let lastToolbarBlankNativeToggleAtMs = UserDefaults.standard.double(forKey: may16LastToolbarBlankNativeToggleDefaultsKey)
+            let toolbarBlankNativeToggleAgeMs = lastToolbarBlankNativeToggleAtMs > 0 ? nowMs - lastToolbarBlankNativeToggleAtMs : nil
+            let isRecentToolbarBlankNativeToggle = toolbarBlankNativeToggleAgeMs.map { $0 >= 0 && $0 < 2_000 } == true
+            if isRecentToolbarBlankNativeToggle {
                 debugPrint(
-                    "# MAY15 nativeHitTargets.blankTap",
-                    [
-                        "stage": "swiftUIWebViewUnhandledTap.recentNativeSegment",
-                        "verdict": "suppressSyntheticUnhandledTap",
-                        "hasActiveLookup": hasActiveLookup,
-                        "nativeLookupTapAgeMs": nativeLookupTapAgeMs.map { Int($0.rounded()) } as Any,
-                        "nativeSegmentTouchAgeMs": nativeSegmentTouchAgeMs.map { Int($0.rounded()) } as Any,
-                    ] as [String : Any]
+                    "# MAY16 toolbarBlank.suppressUnhandledTap",
+                    "ageMs=\(toolbarBlankNativeToggleAgeMs.map { String(Int($0.rounded())) } ?? "nil")",
+                    "current=\(hideNavigationDueToScroll.wrappedValue)"
                 )
                 return
             }
             if hasActiveLookup {
-                debugPrint(
-                    "# MAY15 nativeHitTargets.blankTap",
-                    [
-                        "stage": "swiftUIWebViewUnhandledTap.activeLookup",
-                        "verdict": "closeLookupAndSuppressHideNavigationToggle",
-                        "hasActiveLookup": hasActiveLookup,
-                        "nativeLookupTapAgeMs": nativeLookupTapAgeMs.map { Int($0.rounded()) } as Any,
-                        "nativeSegmentTouchAgeMs": nativeSegmentTouchAgeMs.map { Int($0.rounded()) } as Any,
-                    ] as [String : Any]
-                )
                 UserDefaults.standard.set(nowMs, forKey: may15LastNativeLookupTapDefaultsKey)
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
@@ -2152,29 +2070,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let foliateViewRectDescription = (body["foliateViewRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             let centerElementDescription = (body["elementAtCenter"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             let centerClosestReaderContentDescription = (body["centerClosestReaderContent"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
-            debugPrint(
-                "# READERLOAD stage=readerDocState.message",
-                "pageURL=\(webView.state.pageURL.absoluteString)",
-                "href=\(href)",
-                "reason=\(reason)",
-                "readyState=\(readyState)",
-                "elapsedMs=\(elapsedMs)",
-                "hasReaderContent=\(hasReaderContent)",
-                "hasReaderRenderReady=\(String(describing: hasReaderRenderReady))",
-                "manabiFontPending=\(manabiFontPending)",
-                "manabiFontReady=\(manabiFontReady)",
-                "bodyLoading=\(bodyLoading)",
-                "hasCustomFontStyle=\(hasCustomFontStyle)",
-                "hasCustomFontGate=\(hasCustomFontGate)",
-                "fontsStatus=\(fontsStatus)",
-                "bodyDisplay=\(bodyDisplay)",
-                "bodyVisibility=\(bodyVisibility)",
-                "bodyOpacity=\(bodyOpacity)",
-                "visibleMarkAsReadButtonCount=\(visibleMarkAsReadButtonCount)",
-                "readerContentTextLength=\(readerContentTextLength)",
-                "readerContentRect=\(readerContentRectDescription)",
-                "elementAtCenter=\(centerElementDescription)"
-            )
             let isEBookDocState = webView.state.pageURL.absoluteString.hasPrefix("ebook://") || href.hasPrefix("ebook://")
             if isEBookDocState {
                 let epubSignature = [
@@ -2199,31 +2094,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 ].joined(separator: "|")
                 if lastEpubReaderDocStateSignature != epubSignature {
                     lastEpubReaderDocStateSignature = epubSignature
-                    debugPrint(
-                        "# EPUB  readerDocState.probe",
-                        "pageURL=\(webView.state.pageURL.absoluteString)",
-                        "href=\(href)",
-                        "reason=\(reason)",
-                        "readyState=\(readyState)",
-                        "elapsedMs=\(elapsedMs)",
-                        "hasReaderContent=\(hasReaderContentBool)",
-                        "hasReaderRenderReady=\(String(describing: hasReaderRenderReady))",
-                        "hasVisibleFoliateView=\(hasVisibleFoliateView)",
-                        "visibleMarkAsReadButtonCount=\(visibleMarkAsReadButtonCount)",
-                        "readerContentTextLength=\(readerContentTextLength)",
-                        "readerContentRect=\(readerContentRectDescription)",
-                        "readerStageRect=\(readerStageRectDescription)",
-                        "foliateViewRect=\(foliateViewRectDescription)",
-                        "centerElement=\(centerElementDescription)",
-                        "centerClosestReaderContent=\(centerClosestReaderContentDescription)",
-                        "bodyDisplay=\(bodyDisplay)",
-                        "bodyVisibility=\(bodyVisibility)",
-                        "bodyOpacity=\(bodyOpacity)",
-                        "bodyLoading=\(bodyLoading)",
-                        "manabiFontPending=\(manabiFontPending)",
-                        "manabiFontReady=\(manabiFontReady)",
-                        "fontsStatus=\(fontsStatus)"
-                    )
                 }
             }
             if let hasReaderRenderReady,
@@ -2306,9 +2176,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         reapplyHostObscuredInsetsForNavigation("navigationFinish")
 #endif
 #if DEBUG
-        debugPrint("# EPUB  webView.nav.finish",
-                   "url=\(webView.url?.absoluteString ?? "<nil>")",
-                   "isLoading=\(webView.isLoading)")
 #endif
         logEpubNavigationTransition("finish", webView: webView)
         let finishNow = Date()
@@ -2610,9 +2477,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             scriptCaller?.removeAllMultiTargetFrames()
         }
 #if DEBUG
-        debugPrint("# EPUB  webView.nav.commit",
-                   "url=\(webView.url?.absoluteString ?? "<nil>")",
-                   "isLoading=\(webView.isLoading)")
 #endif
         logEpubNavigationTransition("commit", webView: webView)
         let commitNow = Date()
@@ -2675,9 +2539,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         reapplyHostObscuredInsetsForNavigation("navigationStart")
 #endif
 #if DEBUG
-        debugPrint("# EPUB  webView.nav.start",
-                   "url=\(webView.url?.absoluteString ?? "<nil>")",
-                   "isLoading=\(webView.isLoading)")
 #endif
         logEpubNavigationTransition("start", webView: webView)
         let provisionalNow = Date()
@@ -2749,14 +2610,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         if navigator.pendingRequest?.url == webView.url {
             if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
-                debugPrint(
-                    "# EPUB  navigator.pendingRequest.clearedOnStart",
-                    [
-                        "navigatorID": navigator.debugIdentifier ?? "nil",
-                        "navigatorObjectID": navigator.debugObjectID,
-                        "url": webView.url?.absoluteString ?? "nil"
-                    ] as [String : Any]
-                )
             }
             navigator.pendingRequest = nil
             navigator.cancelPendingRequestLoadTask()
@@ -2785,9 +2638,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         let startedAt = Date()
 #if DEBUG
-        debugPrint("# EPUB  webView.nav.decide",
-                   "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
-                   "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
 #endif
         let requestURL = navigationAction.request.url
         if navigationAction.targetFrame?.isMainFrame == true {
@@ -2922,13 +2772,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         if let response = navigationResponse.response as? HTTPURLResponse {
 #if DEBUG
-            debugPrint(
-                "# EPUB  webView.nav.response",
-                "url=\(response.url?.absoluteString ?? "<nil>")",
-                "mimeType=\(response.mimeType ?? "<nil>")",
-                "status=\(response.statusCode)",
-                "expectedLength=\(response.expectedContentLength)"
-            )
 #endif
             if navigationResponse.isForMainFrame {
                 var newState = self.webView.state
@@ -3544,28 +3387,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 guard !Task.isCancelled else { return }
                 guard self.pendingRequestLoadGeneration == generation else { return }
                 if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                    debugPrint(
-                        "# EPUB  navigator.flushPendingRequest.retry.begin",
-                        [
-                            "navigatorID": self.debugIdentifier ?? "nil",
-                            "navigatorObjectID": self.debugObjectID,
-                            "url": request.url?.absoluteString ?? "nil",
-                            "attempt": currentAttempt
-                        ] as [String : Any]
-                    )
                 }
                 guard self.pendingRequest?.url == request.url else { return }
                 if webView.window != nil && webView.superview != nil {
                     if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                        debugPrint(
-                            "# EPUB  navigator.flushPendingRequest.retry",
-                            [
-                                "navigatorID": self.debugIdentifier ?? "nil",
-                                "navigatorObjectID": self.debugObjectID,
-                                "url": request.url?.absoluteString ?? "nil",
-                                "attempt": currentAttempt
-                            ] as [String : Any]
-                        )
                     }
                     if let url = request.url, url.isFileURL {
                         webView.loadFileURL(url, allowingReadAccessTo: url)
@@ -3579,14 +3404,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 currentAttempt += 1
             }
             if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                debugPrint(
-                    "# EPUB  navigator.flushPendingRequest.retry.exhausted",
-                    [
-                        "navigatorID": self.debugIdentifier ?? "nil",
-                        "navigatorObjectID": self.debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil"
-                    ] as [String : Any]
-                )
             }
             self.pendingRequestLoadTask = nil
         }
@@ -3611,66 +3428,17 @@ public class WebViewNavigator: NSObject, ObservableObject {
             restartIfSameURL: restartIfSameURL
         )
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            debugPrint(
-                "# EPUB  navigator.flushPendingRequest.issue",
-                [
-                    "navigatorID": debugIdentifier ?? "nil",
-                    "navigatorObjectID": debugObjectID,
-                    "url": request.url?.absoluteString ?? "nil",
-                    "webViewURL": webView.url?.absoluteString ?? "nil",
-                    "webViewIsLoading": webView.isLoading,
-                    "webViewEstimatedProgress": webView.estimatedProgress,
-                    "restartIfSameURL": restartIfSameURL,
-                    "disposition": String(describing: disposition),
-                    "reason": diagnosticsReason
-                ] as [String : Any]
-            )
         }
         switch disposition {
         case .deferUntilAttached:
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                debugPrint(
-                    "# EPUB  navigator.flushPendingRequest.deferredUntilFullyAttached",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil",
-                        "reason": diagnosticsReason,
-                        "windowAttached": webView.window != nil,
-                        "superviewAttached": webView.superview != nil
-                ] as [String : Any]
-            )
             }
             return
         case .skipAlreadyLoading:
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                debugPrint(
-                    "# EPUB  navigator.flushPendingRequest.skipAlreadyLoading",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil",
-                        "reason": diagnosticsReason,
-                        "webViewURL": webView.url?.absoluteString ?? "nil",
-                        "webViewIsLoading": webView.isLoading,
-                    "webViewEstimatedProgress": webView.estimatedProgress
-                ] as [String : Any]
-            )
             }
             let nextGeneration = pendingRequestLoadGeneration
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                debugPrint(
-                    "# EPUB  navigator.flushPendingRequest.restart.fire",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil",
-                        "reason": diagnosticsReason,
-                        "webViewURL": webView.url?.absoluteString ?? "nil",
-                        "webViewIsLoading": webView.isLoading,
-                        "webViewEstimatedProgress": webView.estimatedProgress
-                    ] as [String : Any]
-                )
             }
             if webView.url == request.url {
                 markReaderLoadIssued(for: request, reason: "reload:\(diagnosticsReason)")
@@ -3746,39 +3514,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
         logAttachmentEvent("handleWindowAttachmentChanged", webView: webView)
         let isReadyForRequest = webView.window != nil && webView.superview != nil
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            debugPrint(
-                "# EPUB  navigator.windowAttachmentChanged",
-                [
-                    "navigatorID": debugIdentifier ?? "nil",
-                    "navigatorObjectID": debugObjectID,
-                    "isAttached": isAttached,
-                    "isReadyForRequest": isReadyForRequest,
-                    "pendingURL": pendingRequest?.url?.absoluteString ?? "nil",
-                    "webViewURL": webView.url?.absoluteString ?? "nil"
-                ] as [String : Any]
-            )
         }
         guard isAttached, let request = pendingRequest else { return }
         if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            debugPrint(
-                "# EPUB  navigator.flushPendingRequest.attached",
-                [
-                    "navigatorID": debugIdentifier ?? "nil",
-                    "navigatorObjectID": debugObjectID,
-                    "url": request.url?.absoluteString ?? "nil"
-                ] as [String : Any]
-            )
         }
         guard webView.navigationDelegate != nil else {
             if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                debugPrint(
-                    "# EPUB  navigator.flushPendingRequest.deferredUntilDelegate",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil"
-                    ] as [String : Any]
-                )
             }
             return
         }
@@ -3808,17 +3549,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 ]
             )
             if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                debugPrint(
-                    "# EPUB  navigator.attach",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "hasAttachedWebView": webView != nil,
-                        "hasPendingHTML": pendingHTML != nil,
-                        "hasPendingRequest": pendingRequest != nil,
-                        "hasPendingDataLoad": pendingDataLoad != nil
-                    ] as [String : Any]
-                )
             }
             guard let webView else { return }
             if let request = pendingRequest {
@@ -3834,27 +3564,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     ]
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                    debugPrint(
-                        "# EPUB  navigator.flushPendingRequest",
-                        [
-                            "navigatorID": debugIdentifier ?? "nil",
-                            "navigatorObjectID": debugObjectID,
-                            "url": request.url?.absoluteString ?? "nil"
-                        ] as [String : Any]
-                    )
                 }
                 if webView.window == nil || webView.superview == nil {
                     if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                        debugPrint(
-                            "# EPUB  navigator.flushPendingRequest.deferred",
-                            [
-                                "navigatorID": debugIdentifier ?? "nil",
-                                "navigatorObjectID": debugObjectID,
-                                "url": request.url?.absoluteString ?? "nil",
-                                "windowAttached": webView.window != nil,
-                                "superviewAttached": webView.superview != nil
-                            ] as [String : Any]
-                        )
                     }
                     return
                 }
@@ -3876,16 +3588,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     ]
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                    debugPrint(
-                        "# EPUB  navigator.flushPendingDataLoad",
-                        [
-                            "navigatorID": debugIdentifier ?? "nil",
-                            "navigatorObjectID": debugObjectID,
-                            "bytes": pendingDataLoad.data.count,
-                            "mimeType": pendingDataLoad.mimeType,
-                            "baseURL": pendingDataLoad.baseURL.absoluteString
-                        ] as [String : Any]
-                    )
                 }
                 webView.load(
                     pendingDataLoad.data,
@@ -3911,15 +3613,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     ]
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                    debugPrint(
-                        "# EPUB  navigator.flushPendingHTML",
-                        [
-                            "navigatorID": debugIdentifier ?? "nil",
-                            "navigatorObjectID": debugObjectID,
-                            "htmlLength": pendingHTML.html.count,
-                            "baseURL": pendingHTML.baseURL?.absoluteString ?? "nil"
-                        ] as [String : Any]
-                    )
                 }
                 webView.loadHTMLString(pendingHTML.html, baseURL: pendingHTML.baseURL)
                 self.pendingHTML = nil
@@ -4068,12 +3761,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "hasSuperview": "\(webView.superview != nil)",
                 "hasWindow": "\(webView.window != nil)"
             ]
-        )
-        debugPrint(
-            "# EPUB  navigator.load.data",
-            "bytes=\(data.count)",
-            "mimeType=\(mimeType)",
-            "baseURL=\(baseURL.absoluteString)"
         )
         webView.load(
             data,
@@ -4384,11 +4071,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         ).value
                         handled = true
 #if DEBUG
-                        debugPrint(
-                            "# EPUB  scriptCaller.error.resultTypeUnsupported.coerced",
-                            "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
-                            "note=coerced to string for href"
-                        )
 #endif
                     } catch {
                         primaryError = error
@@ -4400,13 +4082,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     result = nil
                     handled = true
 #if DEBUG
-                    debugPrint(
-                        "# EPUB  scriptCaller.error.resultTypeUnsupported",
-                        "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
-                        "jsPrefix=\(js.prefix(80))",
-                        "containsGoToSnapshot=\(js.contains("manabiGetReaderGoToSheetSnapshot"))",
-                        "note=treated as nil"
-                    )
 #endif
                 }
             } else if nsError.domain == WKError.errorDomain,
@@ -4419,12 +4094,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 result = nil
                 handled = true
 #if DEBUG
-                debugPrint(
-                    "# EPUB  scriptCaller.error.invalidFrame",
-                    "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
-                    "jsPrefix=\(js.prefix(80))",
-                    "note=cleared stale frame; returning nil"
-                )
 #endif
             } else if nsError.domain == WKError.errorDomain,
                       nsError.code == WKError.javaScriptExceptionOccurred.rawValue,
@@ -4439,14 +4108,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
             if !handled {
 #if DEBUG
-                debugPrint(
-                    "# EPUB  scriptCaller.error",
-                    "code=\(nsError.code)",
-                    "domain=\(nsError.domain)",
-                    "description=\(nsError.localizedDescription)",
-                    "frameURL=\(frame?.request.url?.absoluteString ?? "<nil>")",
-                    "jsPrefix=\(js.prefix(80))"
-                )
 #endif
                 throw primaryError
             }
@@ -4495,23 +4156,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
         if frame.request.url == nil {
 #if DEBUG
-            debugPrint(
-                "# EPUB  scriptCaller.frame.nilURL",
-                "uuid=\(uuid)",
-                "debug=\(frame.debugDescription)",
-                "isMain=\(frame.isMainFrame)"
-            )
 #endif
         }
 #if DEBUG
-        debugPrint(
-            "# EPUB  scriptCaller.frame.add",
-            "uuid=\(uuid)",
-            "url=\(frame.request.url?.absoluteString ?? "<nil>")",
-            "canonical=\(canonicalFrameKey(for: resolvedCanonicalURL) ?? "<nil>")",
-            "isMain=\(frame.isMainFrame)",
-            "inserted=\(inserted)"
-        )
 #endif
         return inserted
     }
@@ -4520,11 +4167,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public func removeAllMultiTargetFrames() {
         if !multiTargetFrames.isEmpty || !framesByCanonicalURL.isEmpty {
 #if DEBUG
-            debugPrint(
-                "# EPUB  scriptCaller.frame.clear",
-                "byUUID=\(multiTargetFrames.count)",
-                "byCanonical=\(framesByCanonicalURL.count)"
-            )
 #endif
         }
         multiTargetFrames.removeAll()
@@ -5025,7 +4667,7 @@ fileprivate struct UnhandledTapUserScript {
         return;
     }
 
-    const interactiveSelectors = 'a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
     const MOVE_THRESHOLD = 8;
     const LONG_PRESS_THRESHOLD_MS = 450;
     const activePointers = new Map();
@@ -5509,24 +5151,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let windowFrame = convert(bounds, to: nil)
         let visualWindowRects = visualRects.map { convert($0, to: nil) }
         let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
-        debugPrint(
-            "# MAY15 nativeHitTargets.pressVisual",
-            [
-                "elementID": target.elementID,
-                "rawRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                "visualRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualRects.prefix(4)),
-                "strokeRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeRects.prefix(4)),
-                "visualWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualWindowRects.prefix(4)),
-                "strokeWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeWindowRects.prefix(4)),
-                "overlayBounds": WebViewNativeLookupHitTestStore.debugRectStrings([bounds]).first as Any,
-                "overlayWindowFrame": WebViewNativeLookupHitTestStore.debugRectStrings([windowFrame]).first as Any,
-                "pathBounds": WebViewNativeLookupHitTestStore.debugRectStrings([path.boundingBoxOfPath]).first as Any,
-                "topExpansion": PressedSegmentStyle.lookupAttachmentTopExpansion,
-                "strokeInset": PressedSegmentStyle.inset,
-                "strokeWidth": PressedSegmentStyle.strokeWidth,
-                "strokeAlpha": PressedSegmentStyle.pressedStrokeAlpha,
-            ] as [String : Any]
-        )
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
@@ -5570,25 +5194,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
             store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
-            debugPrint(
-                "# MAY15 nativeHitTargets.overlay",
-                [
-                    "stage": capturesSegmentTouches
-                        ? "ios.hitTest.captureSegment"
-                        : "ios.hitTest.observedPassThrough",
-                    "point": "{\(point.x), \(point.y)}",
-                    "containerSize": "{\(bounds.width), \(bounds.height)}",
-                    "elementID": target.elementID,
-                    "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                    "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
-                    "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
-                    "distance": target.debugDistance as Any,
-                    "centerDistance": target.debugCenterDistance as Any,
-                    "verdict": capturesSegmentTouches
-                        ? "nativeOverlayCapturesSegmentTouch"
-                        : "nativeOverlayVisualOnly",
-                ] as [String : Any]
-            )
             if capturesSegmentTouches {
                 return true
             }
@@ -5596,15 +5201,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
                 lastPassThroughLogAt = now
-                debugPrint(
-                    "# MAY15 nativeHitTargets.overlay",
-                    [
-                        "stage": "ios.hitTest.passThrough",
-                        "point": "{\(point.x), \(point.y)}",
-                        "containerSize": "{\(bounds.width), \(bounds.height)}",
-                        "nearest": store?.diagnostics(at: point, limit: 3) as Any,
-                    ] as [String : Any]
-                )
             }
         }
         return false
@@ -5644,14 +5240,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
               event.allTouches?.count == 1,
               let touch = touches.first,
               let coordinateView else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesBegan.invalidTouchSet",
-                    "touchCount": touches.count,
-                    "allTouchCount": event.allTouches?.count as Any,
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.invalidTouchSet",
                 verdict: "passThrough.allowed",
@@ -5667,15 +5255,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         let point = touch.location(in: coordinateView)
         guard let target = store?.hitTarget(at: point, in: coordinateView.bounds.size) else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesBegan.noSegmentTarget",
-                    "point": Self.debugPointString(point),
-                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                    "nearest": store?.diagnostics(at: point, limit: 5) as Any,
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.noSegmentTarget",
                 verdict: "passThrough.allowed",
@@ -5690,20 +5269,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "touchesBegan.nativeCandidate",
-                "point": Self.debugPointString(point),
-                "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                "elementID": target.elementID,
-                "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
-                "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
-                "distance": target.debugDistance as Any,
-                "centerDistance": target.debugCenterDistance as Any,
-            ] as [String : Any]
-        )
         logTouchDeliveryVerdict(
             stage: "touchesBegan.nativeCandidate",
             verdict: "pending.nativeRecognizerHoldingWebKitTouches",
@@ -5831,10 +5396,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
               let target = touchStartTarget,
               let touch = touches.first,
               let coordinateView else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                ["stage": "touchesEnded.missingTrackingState"] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.missingTrackingState",
                 verdict: "passThrough.allowed",
@@ -5849,14 +5410,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         let duration = event.timestamp - startedAt
         guard duration <= Self.segmentTapMaximumDuration else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesEnded.durationExceeded",
-                    "duration": duration,
-                    "maximumDuration": Self.segmentTapMaximumDuration,
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.durationExceeded",
                 verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -5877,17 +5430,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let point = touch.location(in: coordinateView)
         let movement = hypot(point.x - start.x, point.y - start.y)
         guard movement <= Self.segmentTapMovementTolerance else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesEnded.nativeLookupFailed",
-                    "start": Self.debugPointString(start),
-                    "point": Self.debugPointString(point),
-                    "movement": movement,
-                    "duration": duration,
-                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.nativeLookupFailed",
                 verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -5908,17 +5450,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         if !touchStartDispatchedLookup {
             guard store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true else {
-                debugPrint(
-                    "# MAY15 nativeHitTargets.passThrough",
-                    [
-                        "stage": "touchesEnded.nativeLookupFailed",
-                        "start": Self.debugPointString(start),
-                        "point": Self.debugPointString(point),
-                        "movement": movement,
-                        "duration": duration,
-                        "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                    ] as [String : Any]
-                )
                 logTouchDeliveryVerdict(
                     stage: "touchesEnded.nativeLookupFailed",
                     verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -5937,17 +5468,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 return
             }
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "touchesEnded.nativeRecognized",
-                "start": Self.debugPointString(start),
-                "point": Self.debugPointString(point),
-                "movement": movement,
-                "duration": duration,
-                "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-            ] as [String : Any]
-        )
         logTouchDeliveryVerdict(
             stage: "touchesEnded.nativeRecognized",
             verdict: "passThrough.blockedForTapLookup",
@@ -5973,13 +5493,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "touchesCancelled",
-                "touchCount": touches.count,
-            ] as [String : Any]
-        )
         logTouchDeliveryVerdict(
             stage: "touchesCancelled",
             verdict: "passThrough.allowedAfterCancellation",
@@ -6002,18 +5515,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
            !touchStartDispatchedLookup,
            !touchStartWasActiveTarget {
             let dispatched = store?.handleTap(on: target, at: point, in: coordinateView.bounds.size) == true
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "reset.recoverPendingNativeLookup",
-                    "verdict": dispatched ? "nativeLookupRecoveredBeforeReset" : "nativeLookupRecoveryFailed",
-                    "elementID": target.elementID,
-                    "point": Self.debugPointString(point),
-                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                    "lookupDispatchedOnReset": dispatched,
-                    "segmentTargetTouchesReachWebKit": "tapRecognizersAlreadySuppressed",
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "reset.recoverPendingNativeLookup",
                 verdict: dispatched ? "nativeLookupRecoveredBeforeReset" : "nativeLookupRecoveryFailed",
@@ -6118,12 +5619,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         for (recognizer, wasEnabled) in restored {
             recognizer.isEnabled = wasEnabled
         }
-        debugPrint("# MAY15 nativeHitTargets.touchDelivery", [
-            "stage": "recognizer.restoreCompetingTaps",
-            "reason": reason,
-            "restoredCount": restored.count,
-            "restoredTypes": restored.prefix(12).map { String(describing: type(of: $0.recognizer)) }
-        ] as [String: Any])
     }
 
     private func clearPressedVisualForMovementIfNeeded(payload: [String: Any]) {
@@ -6132,7 +5627,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartOverlay?.clearPressedTarget()
         var mergedPayload = payload
         mergedPayload["stage"] = "pressVisual.clear.movement"
-        debugPrint("# MAY15 nativeHitTargets.passThrough", mergedPayload)
     }
 
     private func cancelTouchDownLookupIfNeeded(reason: String) {
@@ -6165,7 +5659,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private func failGesture(reason: String, payload: [String: Any] = [:]) {
         var mergedPayload = payload
         mergedPayload["stage"] = "failGesture.\(reason)"
-        debugPrint("# MAY15 nativeHitTargets.passThrough", mergedPayload)
         logTouchDeliveryVerdict(
             stage: "failGesture.\(reason)",
             verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -6210,7 +5703,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["rects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4))
             payload["hitRects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4))
         }
-        debugPrint("# MAY15 nativeHitTargets.touchDelivery", payload)
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -6495,19 +5987,6 @@ public class WebViewController: UIViewController {
         for recognizer in recognizers {
             recognizer.isEnabled = false
         }
-        debugPrint("# MAY15 nativeHitTargets.touchDelivery", [
-            "stage": "overlay.suppressCompetingTaps",
-            "verdict": "webkitTapRecognizersDisabledBeforeWebViewTouchDelivery",
-            "reason": "overlayHitTestSegmentTarget",
-            "elementID": target.elementID,
-            "point": "{\(point.x), \(point.y)}",
-            "containerSize": "{\(containerSize.width), \(containerSize.height)}",
-            "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-            "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
-            "suppressedCount": recognizers.count,
-            "suppressedTypes": recognizers.prefix(12).map { String(describing: type(of: $0)) },
-            "segmentTargetTouchesReachWebKit": "tapRecognizersDisabledBeforeTouchDelivery"
-        ] as [String: Any])
     }
 
     private func restoreEarlySuppressedNativeLookupTapRecognizers(reason: String) {
@@ -6517,12 +5996,6 @@ public class WebViewController: UIViewController {
         for (recognizer, wasEnabled) in restored {
             recognizer.isEnabled = wasEnabled
         }
-        debugPrint("# MAY15 nativeHitTargets.touchDelivery", [
-            "stage": "overlay.restoreCompetingTaps",
-            "reason": reason,
-            "restoredCount": restored.count,
-            "restoredTypes": restored.prefix(12).map { String(describing: type(of: $0.recognizer)) }
-        ] as [String: Any])
     }
 
     @MainActor
@@ -6631,38 +6104,8 @@ public class WebViewController: UIViewController {
         if nativeLookupHitTestGestureRecognizer.view !== recognizerHostView {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             recognizerHostView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-            debugPrint(
-                "# MAY15 nativeHitTargets.touchDelivery",
-                [
-                    "stage": "recognizer.attach",
-                    "verdict": capturesSegmentTouchesInOverlay
-                        ? "configuredStrictOverlayCapture"
-                        : "configuredToDelayWebKitTouchesAndGateWebKitTapRecognizers",
-                    "recognizerViewType": String(describing: type(of: recognizerHostView)),
-                    "overlayViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
-                    "attachedToWebView": recognizerHostView === webView,
-                    "attachedToOverlay": recognizerHostView === nativeLookupHitTestOverlayView,
-                    "overlayPassThrough": !capturesSegmentTouchesInOverlay,
-                    "strictOverlayCapture": capturesSegmentTouchesInOverlay,
-                    "segmentTargetTouchesReachWebKit": capturesSegmentTouchesInOverlay
-                        ? "blockedByOverlayHitTestForSegmentTargets"
-                        : "webkitTapRecognizersRequireNativeLookupFailure",
-                    "delaysTouchesBegan": nativeLookupHitTestGestureRecognizer.delaysTouchesBegan,
-                    "delaysTouchesEnded": nativeLookupHitTestGestureRecognizer.delaysTouchesEnded,
-                    "cancelsTouchesInView": nativeLookupHitTestGestureRecognizer.cancelsTouchesInView,
-                ] as [String : Any]
-            )
         }
         if capturesSegmentTouchesInOverlay {
-            debugPrint(
-                "# MAY15 nativeHitTargets.touchDelivery",
-                [
-                    "stage": "recognizer.failureRequirements",
-                    "verdict": "skippedForStrictOverlayCapture",
-                    "reason": "attachNativeLookupHitTestOverlay",
-                    "segmentTargetTouchesReachWebKit": "blockedByOverlayHitTestForSegmentTargets"
-                ] as [String : Any]
-            )
         } else {
             configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
             DispatchQueue.main.async { [weak self] in
@@ -6710,18 +6153,6 @@ public class WebViewController: UIViewController {
             newlyConfigured.append(String(describing: type(of: recognizer)))
         }
         guard !newlyConfigured.isEmpty else { return }
-        debugPrint(
-            "# MAY15 nativeHitTargets.touchDelivery",
-            [
-                "stage": "recognizer.failureRequirements",
-                "verdict": "webkitTapRecognizersRequireNativeLookupFailure",
-                "reason": reason,
-                "tapRecognizerCount": tapRecognizers.count,
-                "newlyConfiguredCount": newlyConfigured.count,
-                "newlyConfiguredTypes": Array(newlyConfigured.prefix(8)),
-                "nativeRecognizerViewType": nativeLookupHitTestGestureRecognizer.view.map { String(describing: type(of: $0)) } ?? "nil",
-            ] as [String : Any]
-        )
     }
 
 }
@@ -7756,24 +7187,6 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         let windowFrame = convert(bounds, to: nil)
         let visualWindowRects = visualRects.map { convert($0, to: nil) }
         let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
-        debugPrint(
-            "# MAY15 nativeHitTargets.pressVisual",
-            [
-                "elementID": target.elementID,
-                "rawRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                "visualRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualRects.prefix(4)),
-                "strokeRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeRects.prefix(4)),
-                "visualWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualWindowRects.prefix(4)),
-                "strokeWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeWindowRects.prefix(4)),
-                "overlayBounds": WebViewNativeLookupHitTestStore.debugRectStrings([bounds]).first as Any,
-                "overlayWindowFrame": WebViewNativeLookupHitTestStore.debugRectStrings([windowFrame]).first as Any,
-                "pathBounds": WebViewNativeLookupHitTestStore.debugRectStrings([path.boundingBoxOfPath]).first as Any,
-                "topExpansion": PressedSegmentStyle.lookupAttachmentTopExpansion,
-                "strokeInset": PressedSegmentStyle.inset,
-                "strokeWidth": PressedSegmentStyle.strokeWidth,
-                "strokeAlpha": PressedSegmentStyle.pressedStrokeAlpha,
-            ] as [String : Any]
-        )
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
@@ -7817,26 +7230,10 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
             && alphaValue > 0
             && store?.containsClaimableTarget(at: point, in: bounds.size) == true
         if containsTarget {
-            debugPrint(
-                "# MAY15 nativeHitTargets.overlay",
-                [
-                    "stage": "mac.hitTest.claimed",
-                    "point": "{\(point.x), \(point.y)}",
-                    "containerSize": "{\(bounds.width), \(bounds.height)}",
-                ] as [String : Any]
-            )
         } else {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
                 lastPassThroughLogAt = now
-                debugPrint(
-                    "# MAY15 nativeHitTargets.overlay",
-                    [
-                        "stage": "mac.hitTest.passThrough",
-                        "point": "{\(point.x), \(point.y)}",
-                        "containerSize": "{\(bounds.width), \(bounds.height)}",
-                    ] as [String : Any]
-                )
             }
         }
         guard containsTarget else {
@@ -7860,25 +7257,9 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         }
         let point = view.convert(event.locationInWindow, from: nil)
         guard let target = store?.hitTarget(at: point, in: view.bounds.size) else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "mac.mouseDown.noSegmentTarget",
-                    "point": "{\(point.x), \(point.y)}",
-                    "containerSize": "{\(view.bounds.width), \(view.bounds.height)}",
-                ] as [String : Any]
-            )
             state = .failed
             return
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "mac.mouseDown.nativeCandidate",
-                "point": "{\(point.x), \(point.y)}",
-                "containerSize": "{\(view.bounds.width), \(view.bounds.height)}",
-            ] as [String : Any]
-        )
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
         store?.onActiveTargetTouchDown?(target)
@@ -8014,21 +7395,6 @@ extension WebView: NSViewRepresentable {
             let resolvedWorld = world ?? .page
             let startedAt = Date()
             let evalTraceID = "eval-\(Int((startedAt.timeIntervalSince1970 * 1000).rounded()))-\(UUID().uuidString.prefix(6))"
-            print("# MAY15 webView.eval.start",
-                  "id=\(evalTraceID)",
-                  "url=\(currentURL)",
-                  "frameURL=\(frameURL)",
-                  "isMainFrame=\(isMainFrame)",
-                  "world=\(String(describing: resolvedWorld.name))",
-                  "args=\(args?.count ?? 0)",
-                  "jsPrefix=\(jsPrefix)")
-            print("# EPUB  scriptCaller.call.start",
-                  "url=\(currentURL)",
-                  "frameURL=\(frameURL)",
-                  "isMainFrame=\(isMainFrame)",
-                  "world=\(String(describing: resolvedWorld.name))",
-                  "args=\(args?.count ?? 0)",
-                  "jsPrefix=\(jsPrefix)")
 #endif
             do {
                 let value: Any?
@@ -8041,47 +7407,11 @@ extension WebView: NSViewRepresentable {
                 let elapsed = Date().timeIntervalSince(startedAt)
                 let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
                 let stringLength = (value as? String)?.count
-                print("# MAY15 webView.eval.finish",
-                      "id=\(evalTraceID)",
-                      "url=\(currentURL)",
-                      "frameURL=\(frameURL)",
-                      "isMainFrame=\(isMainFrame)",
-                      "world=\(String(describing: resolvedWorld.name))",
-                      "jsPrefix=\(jsPrefix)",
-                      "type=\(typeDescription)",
-                      "stringLength=\(stringLength.map(String.init) ?? "nil")",
-                      String(format: "elapsed=%.3fs", elapsed))
-                print("# EPUB  scriptCaller.call.finish",
-                      "url=\(currentURL)",
-                      "frameURL=\(frameURL)",
-                      "isMainFrame=\(isMainFrame)",
-                      "world=\(String(describing: resolvedWorld.name))",
-                      "jsPrefix=\(jsPrefix)",
-                      "type=\(typeDescription)",
-                      "stringLength=\(stringLength.map(String.init) ?? "nil")",
-                      String(format: "elapsed=%.3fs", elapsed))
 #endif
                 return WebViewScriptCaller.JavaScriptEvaluationResult(value)
             } catch {
 #if DEBUG
                 let elapsed = Date().timeIntervalSince(startedAt)
-                print("# MAY15 webView.eval.error",
-                      "id=\(evalTraceID)",
-                      "url=\(currentURL)",
-                      "frameURL=\(frameURL)",
-                      "isMainFrame=\(isMainFrame)",
-                      "world=\(String(describing: resolvedWorld.name))",
-                      "jsPrefix=\(jsPrefix)",
-                      "error=\(error)",
-                      String(format: "elapsed=%.3fs", elapsed))
-                print("# EPUB  scriptCaller.call.error",
-                      "url=\(currentURL)",
-                      "frameURL=\(frameURL)",
-                      "isMainFrame=\(isMainFrame)",
-                      "world=\(String(describing: resolvedWorld.name))",
-                      "jsPrefix=\(jsPrefix)",
-                      "error=\(error)",
-                      String(format: "elapsed=%.3fs", elapsed))
 #endif
                 throw error
             }
@@ -8090,12 +7420,6 @@ extension WebView: NSViewRepresentable {
             guard let webView else { return }
             let resolvedWorld = world ?? .page
 #if DEBUG
-            print("# MAY15 webView.eval.unsafe",
-                  "url=\(webView.url?.absoluteString ?? "nil")",
-                  "frameURL=\(frame?.request.url?.absoluteString ?? "nil")",
-                  "isMainFrame=\(frame?.isMainFrame ?? true)",
-                  "world=\(String(describing: resolvedWorld.name))",
-                  "jsPrefix=\(js.prefix(120))")
 #endif
             webView.evaluateJavaScript(js, in: frame, in: resolvedWorld, completionHandler: nil)
         }
@@ -8623,7 +7947,6 @@ extension WebView {
         coordinator.lastUserScriptsContentController = userContentController
         if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
 #if DEBUG
-            debugPrint("# EPUB  userScripts.applied", "count=\(allScripts.count)", "pageURL=\(domain?.absoluteString ?? "<nil>")")
 #endif
             coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         }
