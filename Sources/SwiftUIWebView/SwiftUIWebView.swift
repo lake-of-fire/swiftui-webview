@@ -10,6 +10,8 @@ import UIKit
 import AppKit
 #endif
 
+private let lastToolbarBlankNativeToggleDefaultsKey = "ManabiLastToolbarBlankNativeToggleAtMs"
+
 @inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
     guard let start else { return "nil" }
@@ -1208,9 +1210,9 @@ public final class WebViewNativeLookupHitTestStore {
     private let hitSlop: CGFloat
     private var entries: [Entry] = []
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
-    public var onActiveTargetTouchDown: ((WebViewNativeLookupHitTarget) -> Void)?
-    public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
-    public var activeLookupElementID: (() -> String?)?
+    public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
+    public var onTouchDownHitCancelled: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
+    public var activeLookupElementID: (@MainActor () -> String?)?
     public var activeElementID: String?
     public var targetCount: Int { entries.count }
 
@@ -2526,6 +2528,13 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
+            let nowMs = Date().timeIntervalSince1970 * 1000
+            let lastToolbarBlankNativeToggleAtMs = UserDefaults.standard.double(forKey: lastToolbarBlankNativeToggleDefaultsKey)
+            let toolbarBlankNativeToggleAgeMs = lastToolbarBlankNativeToggleAtMs > 0 ? nowMs - lastToolbarBlankNativeToggleAtMs : nil
+            let isRecentToolbarBlankNativeToggle = toolbarBlankNativeToggleAgeMs.map { $0 >= 0 && $0 < 2_000 } == true
+            if isRecentToolbarBlankNativeToggle {
+                return
+            }
 #if DEBUG
             debugPrint(
                 "# TABBAR webUnhandledTapHideNav",
@@ -5288,7 +5297,7 @@ fileprivate struct UnhandledTapUserScript {
         return;
     }
 
-    const interactiveSelectors = 'a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
     const MOVE_THRESHOLD = 8;
     const LONG_PRESS_THRESHOLD_MS = 450;
     const activePointers = new Map();
@@ -5969,14 +5978,18 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartPoint = point
         touchStartTime = event.timestamp
         touchStartTarget = target
-        let activeLookupElementID = store?.activeLookupElementID?()
+        let activeLookupElementID = MainActor.assumeIsolated {
+            store?.activeLookupElementID?()
+        }
         let activeHighlightElementID = store?.activeElementID
         let hadActiveLookup = activeLookupElementID != nil
         touchStartWasActiveTarget =
             activeLookupElementID == target.elementID
             || activeHighlightElementID == target.elementID
         touchStartOverlay = coordinateView
-        store?.onActiveTargetTouchDown?(target)
+        MainActor.assumeIsolated {
+            store?.onActiveTargetTouchDown?(target)
+        }
         touchStartOverlay?.showPressedTarget(target)
         if hadActiveLookup {
             if touchStartWasActiveTarget {
@@ -6237,7 +6250,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             target: target,
             coordinateView: coordinateView
         )
-        store?.onTouchDownHitCancelled?(target)
+        MainActor.assumeIsolated {
+            store?.onTouchDownHitCancelled?(target)
+        }
     }
 
     private func failGesture(reason: String, payload: [String: Any] = [:]) {
@@ -7542,7 +7557,9 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         )
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
-        store?.onActiveTargetTouchDown?(target)
+        MainActor.assumeIsolated {
+            store?.onActiveTargetTouchDown?(target)
+        }
         pressedOverlay?.showPressedTarget(target)
         super.mouseDown(with: event)
         if mouseDownWasActiveTarget {
