@@ -1630,14 +1630,6 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
         if config.usesSampledPageTopColorForUnderPageBackground,
            manabiCanUseSampledPageTopColorBackground() {
-            debugPrint(
-                "# BG native.sampledPageTopColor.observe.attach",
-                "url=\(webView.url?.absoluteString ?? "nil")",
-                "selectorSupported=\(webView.supportsSampledPageTopColor)",
-                "initialSampledPageTopColor=\(webView.manabiBGColorDescription(webView.sampledPageTopColor))",
-                "underPageBackgroundColor=\(webView.manabiBGColorDescription(webView.underPageBackgroundColor))",
-                "scrollViewBackgroundColor=\(webView.manabiBGColorDescription(webView.scrollView.backgroundColor))"
-            )
             sampledPageTopColorObservation = WebViewStringKeyPathObserver(
                 object: webView,
                 keyPath: "_sampl\("edPageTopC")olor"
@@ -1646,16 +1638,6 @@ public class WebViewCoordinator: NSObject {
                 Task { @MainActor [weak self, weak webView] in
                     guard let self, let webView else { return }
                     let sampledColor = webView.sampledPageTopColor
-                    debugPrint(
-                        "# BG native.sampledPageTopColor.changed",
-                        "url=\(webView.url?.absoluteString ?? "nil")",
-                        "observedColor=\(webView.manabiBGColorDescription(observedColor))",
-                        "directSampledPageTopColor=\(webView.manabiBGColorDescription(sampledColor))",
-                        "selectorSupported=\(webView.supportsSampledPageTopColor)",
-                        "sampledPageTopColor=\(webView.manabiBGColorDescription(sampledColor))",
-                        "underPageBackgroundColorBefore=\(webView.manabiBGColorDescription(webView.underPageBackgroundColor))",
-                        "scrollViewBackgroundColorBefore=\(webView.manabiBGColorDescription(webView.scrollView.backgroundColor))"
-                    )
                     webView.logManabiSampledPageTopDOMProbe(reason: "sampledPageTopColor.changed")
                     if #available(iOS 15.0, *) {
                         self.applySampledPageTopColorChange(
@@ -1694,15 +1676,6 @@ public class WebViewCoordinator: NSObject {
         webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(
             config: config,
             reason: reason
-        )
-        debugPrint(
-            "# BG native.sampledPageTopColor.applied",
-            "url=\(webView.url?.absoluteString ?? "nil")",
-            "reason=\(reason)",
-            "observedColor=\(webView.manabiBGColorDescription(observedColor))",
-            "sampledPageTopColor=\(webView.manabiBGColorDescription(webView.sampledPageTopColor))",
-            "underPageBackgroundColorAfter=\(webView.manabiBGColorDescription(webView.underPageBackgroundColor))",
-            "scrollViewBackgroundColorAfter=\(webView.manabiBGColorDescription(webView.scrollView.backgroundColor))"
         )
     }
 #endif
@@ -2250,14 +2223,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
 #if os(iOS)
         if #available(iOS 15.0, *) {
-            debugPrint(
-                "# BG native.nav.finish.sampledRead",
-                "url=\(webView.url?.absoluteString ?? "nil")",
-                "selectorSupported=\(webView.supportsSampledPageTopColor)",
-                "sampledPageTopColor=\(webView.manabiBGColorDescription(webView.sampledPageTopColor))",
-                "underPageBackgroundColorBefore=\(webView.manabiBGColorDescription(webView.underPageBackgroundColor))",
-                "scrollViewBackgroundColorBefore=\(webView.manabiBGColorDescription(webView.scrollView.backgroundColor))"
-            )
             webView.logManabiSampledPageTopDOMProbe(reason: "navigation.finish")
             webView.applyUnderPageFallbackBackgroundColor(config: config, reason: "navigation.finish")
             webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.finish")
@@ -2506,14 +2471,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #if os(iOS)
         webView.applyUnderPageFallbackBackgroundColor(config: config, reason: "navigation.commit")
         if #available(iOS 15.0, *) {
-            debugPrint(
-                "# BG native.nav.commit.sampledRead",
-                "url=\(webView.url?.absoluteString ?? "nil")",
-                "selectorSupported=\(webView.supportsSampledPageTopColor)",
-                "sampledPageTopColor=\(webView.manabiBGColorDescription(webView.sampledPageTopColor))",
-                "underPageBackgroundColorBefore=\(webView.manabiBGColorDescription(webView.underPageBackgroundColor))",
-                "scrollViewBackgroundColorBefore=\(webView.manabiBGColorDescription(webView.scrollView.backgroundColor))"
-            )
             webView.logManabiSampledPageTopDOMProbe(reason: "navigation.commit")
             webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.commit")
         }
@@ -4108,6 +4065,45 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
         return normalizeJavaScriptResult(result)
+    }
+
+    public func evaluateJavaScriptInMultiTargetFrames(
+        _ js: String,
+        arguments: [String: any Sendable]? = nil,
+        in world: WKContentWorld? = nil
+    ) async throws -> [Any?] {
+        guard let asyncCaller else {
+            print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
+            throw ScriptCallerError.evaluationTimedOut
+        }
+
+        let primitiveArguments: [String: any Sendable]? = arguments?.mapValues {
+            if let set = $0 as? Set<AnyHashable> {
+                return Array(set) as! any Sendable
+            }
+            return $0
+        }
+
+        var results = [Any?]()
+        results.append(try await asyncCaller(js, primitiveArguments, nil, world).value)
+
+        await { @MainActor [weak self] in
+            guard let self else { return }
+            for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                do {
+                    let result = try await asyncCaller(js, primitiveArguments, targetFrame, world).value
+                    results.append(result)
+                } catch {
+                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
+                        multiTargetFrames.removeValue(forKey: uuid)
+                    } else {
+                        print(error)
+                    }
+                }
+            }
+        }()
+
+        return results.map(normalizeJavaScriptResult)
     }
 
     @MainActor
@@ -6239,14 +6235,6 @@ extension WKWebView {
             underPageBackgroundColor = fallbackColor
         }
         scrollView.backgroundColor = fallbackColor
-        debugPrint(
-            "# BG native.underPage.fallback",
-            "url=\(url?.absoluteString ?? "nil")",
-            "reason=\(reason)",
-            "fallbackColor=\(manabiBGColorDescription(fallbackColor))",
-            "sampledPageTopColor=\(manabiBGColorDescription(sampledPageTopColor))",
-            "scrollViewBackgroundColor=\(manabiBGColorDescription(scrollView.backgroundColor))"
-        )
     }
 
     @available(iOS 15.0, *)
@@ -6265,21 +6253,6 @@ extension WKWebView {
         } else {
             resolvedColor = fallbackColor
         }
-        debugPrint(
-            "# BG native.underPage.apply",
-            "url=\(url?.absoluteString ?? "nil")",
-            "usesSampled=\(config.usesSampledPageTopColorForUnderPageBackground)",
-            "allowSampled=\(allowSampledPageTopColor)",
-            "osGateAllowsSampled=\(canUseSampledColor)",
-            "selectorSupported=\(supportsSampledPageTopColor)",
-            "shouldWaitForSampledColor=\(shouldWaitForSampledColor)",
-            "sampledPageTopColor=\(manabiBGColorDescription(sampledColor))",
-            "fallbackColor=\(manabiBGColorDescription(fallbackColor))",
-            "previousUnderPageBackgroundColor=\(manabiBGColorDescription(underPageBackgroundColor))",
-            "resolvedUnderPageBackgroundColor=\(manabiBGColorDescription(resolvedColor))",
-            "scrollViewBackgroundColor=\(manabiBGColorDescription(scrollView.backgroundColor))",
-            "webViewBackgroundColor=\(manabiBGColorDescription(backgroundColor))"
-        )
         guard let resolvedColor else { return }
         underPageBackgroundColor = resolvedColor
     }
@@ -6309,36 +6282,14 @@ extension WKWebView {
         evaluateJavaScript(js) { [weak self] result, error in
             guard let self else { return }
             if let error {
-                debugPrint(
-                    "# BG native.readerTheme.apply",
-                    "url=\(self.url?.absoluteString ?? "nil")",
-                    "reason=\(reason)",
-                    "result=error",
-                    "error=\(error.localizedDescription)"
-                )
                 return
             }
             guard result as? Bool == true else {
-                debugPrint(
-                    "# BG native.readerTheme.apply",
-                    "url=\(self.url?.absoluteString ?? "nil")",
-                    "reason=\(reason)",
-                    "result=notReaderDocument"
-                )
                 return
             }
             let resolvedColor = UIColor(config.backgroundColor)
             self.underPageBackgroundColor = resolvedColor
             self.scrollView.backgroundColor = resolvedColor
-            debugPrint(
-                "# BG native.readerTheme.apply",
-                "url=\(self.url?.absoluteString ?? "nil")",
-                "reason=\(reason)",
-                "result=applied",
-                "themeBackgroundColor=\(self.manabiBGColorDescription(resolvedColor))",
-                "sampledPageTopColor=\(self.manabiBGColorDescription(self.sampledPageTopColor))",
-                "scrollViewBackgroundColor=\(self.manabiBGColorDescription(self.scrollView.backgroundColor))"
-            )
         }
     }
 
@@ -6406,19 +6357,8 @@ extension WKWebView {
         evaluateJavaScript(js) { [weak self] result, error in
             guard let self else { return }
             if let error {
-                debugPrint(
-                    "# BG dom.sampleProbe",
-                    "reason=\(reason)",
-                    "url=\(self.url?.absoluteString ?? "nil")",
-                    "error=\(error.localizedDescription)"
-                )
                 return
             }
-            debugPrint(
-                "# BG dom.sampleProbe",
-                "url=\(self.url?.absoluteString ?? "nil")",
-                "\(result as? String ?? String(describing: result))"
-            )
         }
     }
 }
@@ -6427,20 +6367,9 @@ extension WKWebViewConfiguration {
     func enableManabiPageTopColorSampling() {
         let selector = Selector("_setSa\("mpledPageTopColorMaxDiff")erence:")
         guard responds(to: selector) else {
-            debugPrint(
-                "# BG native.sampling.enable",
-                "result=unsupported",
-                "selector=\(NSStringFromSelector(selector))"
-            )
             return
         }
         perform(selector, with: 5.0 as Double)
-        debugPrint(
-            "# BG native.sampling.enable",
-            "result=enabled",
-            "selector=\(NSStringFromSelector(selector))",
-            "maxDifference=5.0"
-        )
     }
 }
 #endif
@@ -7727,18 +7656,6 @@ extension WebView {
             if let resolvedUnderPageColor {
                 webView.scrollView.backgroundColor = resolvedUnderPageColor
             }
-            debugPrint(
-                "# BG native.visual.apply",
-                "url=\(webView.url?.absoluteString ?? "nil")",
-                "usesSampled=\(config.usesSampledPageTopColorForUnderPageBackground)",
-                "selectorSupported=\(webView.supportsSampledPageTopColor)",
-                "sampledPageTopColor=\(webView.manabiBGColorDescription(webView.sampledPageTopColor))",
-                "resolvedUnderPageBackgroundColor=\(webView.manabiBGColorDescription(resolvedUnderPageColor))",
-                "didApplyScrollViewBackground=\(resolvedUnderPageColor != nil)",
-                "scrollViewBackgroundColor=\(webView.manabiBGColorDescription(webView.scrollView.backgroundColor))",
-                "webViewBackgroundColor=\(webView.manabiBGColorDescription(webView.backgroundColor))",
-                "containerBackgroundColor=\(webView.manabiBGColorDescription(containerView?.backgroundColor))"
-            )
             containerView?.backgroundColor = config.isOpaque ? nil : resolvedColor
             webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "visual.apply")
         } else {
