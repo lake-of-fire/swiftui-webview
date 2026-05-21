@@ -5694,6 +5694,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["rects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4))
             payload["hitRects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4))
         }
+        debugPrint("# LOOKUP nativeGesture.\(stage)", payload)
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
