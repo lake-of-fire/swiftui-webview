@@ -715,6 +715,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var onExternalTouchInteractionCancelled: ((String) -> Void)?
     public var activeLookupElementID: (() -> String?)?
     public var activeElementID: String?
+    public var showsPressedTargetOverlay = false
     public var targetCount: Int { entries.count }
     public var capturesSegmentTouchesInOverlay: Bool {
         UserDefaults.standard.bool(forKey: Self.strictOverlayCaptureDefaultsKey)
@@ -5289,8 +5290,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartWasActiveTarget =
             activeLookupElementID == target.elementID
             || activeHighlightElementID == target.elementID
-        touchStartOverlay = coordinateView
-        touchStartOverlay?.showPressedTarget(target)
+        if store?.showsPressedTargetOverlay == true {
+            touchStartOverlay = coordinateView
+            touchStartOverlay?.showPressedTarget(target)
+        } else {
+            touchStartOverlay = nil
+            coordinateView.clearPressedTarget()
+        }
         if hadActiveLookup {
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.activeLookupPendingTapDecision",
@@ -7188,7 +7194,11 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
         store?.onActiveTargetTouchDown?(target)
-        pressedOverlay?.showPressedTarget(target)
+        if store?.showsPressedTargetOverlay == true {
+            pressedOverlay?.showPressedTarget(target)
+        } else {
+            pressedOverlay?.clearPressedTarget()
+        }
         super.mouseDown(with: event)
         if mouseDownWasActiveTarget {
             pressedOverlay?.clearPressedTarget()
