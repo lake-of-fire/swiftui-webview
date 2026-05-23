@@ -7294,10 +7294,19 @@ extension WebView: NSViewRepresentable {
         }
 
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
+        let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
         applyCommonConfiguration(
             webView: webView,
             context: context,
             resolvedContentRules: resolvedContentRules
+        )
+        updateUserScripts(
+            userContentController: webView.configuration.userContentController,
+            coordinator: context.coordinator,
+            forDomain: resolvedDomain,
+            config: config,
+            resolvedState: resolvedUserScriptsState
         )
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
@@ -7360,6 +7369,13 @@ extension WebView: NSViewRepresentable {
         }
         
         refreshDarkModeSetting(webView: webView)
+        context.coordinator.lastAppliedConfigurationState = webViewConfigurationState(
+            webView: webView,
+            resolvedDomain: resolvedDomain,
+            resolvedUserScriptsState: resolvedUserScriptsState,
+            resolvedContentRules: resolvedContentRules,
+            config: config
+        )
         
         let hostView = WebViewHostNSView(webView: webView)
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
