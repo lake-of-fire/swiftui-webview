@@ -1488,6 +1488,7 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func clearScriptCallerBinding() {
+        print("# READERLOAD scriptCaller.clear coordinator=\(readerLoadObjectIDString(self)) scriptCaller=\(scriptCaller?.id ?? "nil") currentWebView=\(readerLoadObjectIDString(navigator.webView))")
         scriptCaller?.asyncCaller = nil
     }
 
@@ -1512,7 +1513,13 @@ public class WebViewCoordinator: NSObject {
     func tearDownBindingsForDetachedWebView(_ webView: WKWebView?) {
         pendingWebViewBindingTask?.cancel()
         pendingWebViewBindingTask = nil
+        let isCurrentWebView = webView == nil || navigator.webView === webView
+        print("# READERLOAD webView.teardown.begin coordinator=\(readerLoadObjectIDString(self)) detachedWebView=\(readerLoadObjectIDString(webView)) currentWebView=\(readerLoadObjectIDString(navigator.webView)) isCurrent=\(isCurrentWebView)")
         removeMessageHandlers(for: webView)
+        guard isCurrentWebView else {
+            print("# READERLOAD webView.teardown.skipCurrentClear coordinator=\(readerLoadObjectIDString(self)) detachedWebView=\(readerLoadObjectIDString(webView)) currentWebView=\(readerLoadObjectIDString(navigator.webView))")
+            return
+        }
         lastUserScriptsContentController = nil
         lastInstalledScriptsSignature = nil
         lastAppliedConfigurationState = nil
@@ -1520,6 +1527,7 @@ public class WebViewCoordinator: NSObject {
         clearScriptCallerBinding()
         invalidateWebViewObservations()
         schedulePaginationStateUpdate(paginationController.detach())
+        print("# READERLOAD webView.teardown.cleared coordinator=\(readerLoadObjectIDString(self)) detachedWebView=\(readerLoadObjectIDString(webView))")
     }
 
     @MainActor
@@ -7327,6 +7335,7 @@ extension WebView: NSViewRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
+        print("# READERLOAD scriptCaller.bind.mac.make coordinator=\(readerLoadObjectIDString(context.coordinator)) scriptCaller=\(context.coordinator.scriptCaller?.id ?? "nil") webView=\(readerLoadObjectIDString(webView)) url=\(webView.url?.absoluteString ?? "nil")")
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
             guard let webView else {
                 throw ScriptCallerError.evaluationTimedOut
@@ -7413,6 +7422,27 @@ extension WebView: NSViewRepresentable {
         updateCoordinatorBindings(context: context)
         uiView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         let webView = uiView.webView
+        if let scriptCaller {
+            context.coordinator.scriptCaller = scriptCaller
+        }
+        print("# READERLOAD scriptCaller.bind.mac.update coordinator=\(readerLoadObjectIDString(context.coordinator)) scriptCaller=\(context.coordinator.scriptCaller?.id ?? "nil") hasAsync=\(context.coordinator.scriptCaller?.hasAsyncCaller ?? false) webView=\(readerLoadObjectIDString(webView)) url=\(webView.url?.absoluteString ?? "nil")")
+        context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
+            guard let webView else {
+                throw ScriptCallerError.evaluationTimedOut
+            }
+            let resolvedWorld = world ?? .page
+            if let args {
+                let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
+            } else {
+                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
+                return WebViewScriptCaller.JavaScriptEvaluationResult(result)
+            }
+        }
+        context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
+            guard let webView else { return }
+            webView.evaluateJavaScript(js, in: frame, in: world ?? .page, completionHandler: nil)
+        }
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
         let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
