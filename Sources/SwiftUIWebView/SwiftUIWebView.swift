@@ -7340,12 +7340,12 @@ extension WebView: NSViewRepresentable {
             guard let webView else {
                 throw ScriptCallerError.evaluationTimedOut
             }
+            let resolvedWorld = world ?? .page
 #if DEBUG
             let jsPrefix = js.prefix(120)
             let frameURL = frame?.request.url?.absoluteString ?? "nil"
             let isMainFrame = frame?.isMainFrame ?? true
             let currentURL = webView.url?.absoluteString ?? "nil"
-            let resolvedWorld = world ?? .page
             let startedAt = Date()
             let evalTraceID = "eval-\(Int((startedAt.timeIntervalSince1970 * 1000).rounded()))-\(UUID().uuidString.prefix(6))"
 #endif
