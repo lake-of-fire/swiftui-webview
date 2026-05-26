@@ -27,8 +27,20 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
 
 @inline(__always)
 private func safeAreaLog(_ stage: String, _ metadata: [String: String] = [:]) {
+#if DEBUG
+    let details = metadata
+        .sorted { $0.key < $1.key }
+        .map { "\($0.key)=\($0.value)" }
+        .joined(separator: " ")
+    if details.isEmpty {
+        debugPrint("# INSET \(stage)")
+    } else {
+        debugPrint("# INSET \(stage) \(details)")
+    }
+#else
     _ = stage
     _ = metadata
+#endif
 }
 
 @inline(__always)
@@ -716,6 +728,13 @@ public final class WebViewNativeLookupHitTestStore {
     public var activeLookupElementID: (() -> String?)?
     public var activeElementID: String?
     public var showsPressedTargetOverlay = false
+    public var isEnabled = true {
+        didSet {
+            if !isEnabled {
+                removeAllTargets()
+            }
+        }
+    }
     public var targetCount: Int { entries.count }
     public var capturesSegmentTouchesInOverlay: Bool {
         UserDefaults.standard.bool(forKey: Self.strictOverlayCaptureDefaultsKey)
@@ -730,6 +749,10 @@ public final class WebViewNativeLookupHitTestStore {
         viewportSize _: CGSize? = nil,
         viewportOrigin _: CGPoint = .zero
     ) {
+        guard isEnabled else {
+            entries.removeAll()
+            return
+        }
         entries = targets.compactMap { target in
             let rects = target.rects
                 .filter { !$0.isNull && !$0.isEmpty }
@@ -752,6 +775,7 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func hitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
+        guard isEnabled else { return nil }
         let exactCandidate = bestCandidate(at: point, usingInflatedRects: false)
         if let exactCandidate {
             return target(for: exactCandidate, usedInflatedHitRect: false)
@@ -762,7 +786,8 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func exactHitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
-        bestCandidate(at: point, usingInflatedRects: false).map {
+        guard isEnabled else { return nil }
+        return bestCandidate(at: point, usingInflatedRects: false).map {
             target(for: $0, usedInflatedHitRect: false)
         }
     }
@@ -876,6 +901,14 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func diagnostics(at point: CGPoint, limit: Int = 5) -> [[String: Any]] {
+        guard isEnabled else {
+            return [
+                [
+                    "mode": "disabled",
+                    "candidates": []
+                ]
+            ]
+        }
         let exact = diagnosticCandidates(at: point, usingInflatedRects: false, limit: limit)
         let inflated = diagnosticCandidates(at: point, usingInflatedRects: true, limit: limit)
         return [
@@ -2003,10 +2036,16 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 return
             }
 #if DEBUG
+            let body = message.body as? [String: Any]
             debugPrint(
-                "# TABBAR webUnhandledTapHideNav",
+                "# INSET webUnhandledTapHideNav",
                 "current=\(hideNavigationDueToScroll.wrappedValue)",
-                "next=\(!hideNavigationDueToScroll.wrappedValue)"
+                "next=\(!hideNavigationDueToScroll.wrappedValue)",
+                "frame=\(body?["frame"] ?? "nil")",
+                "targetTag=\(body?["targetTag"] ?? "nil")",
+                "targetClosestSegment=\(body?["targetClosestSegment"] ?? "nil")",
+                "clientX=\(body?["clientX"] ?? "nil")",
+                "clientY=\(body?["clientY"] ?? "nil")"
             )
 #endif
             if hideNavigationDueToScroll.wrappedValue {
@@ -4667,7 +4706,7 @@ fileprivate struct UnhandledTapUserScript {
         return;
     }
 
-    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,mnb-seg,mnb-seg *,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
     const MOVE_THRESHOLD = 8;
     const LONG_PRESS_THRESHOLD_MS = 450;
     const activePointers = new Map();
@@ -4753,7 +4792,11 @@ fileprivate struct UnhandledTapUserScript {
             return;
         }
         window.webkit.messageHandlers[handlerName].postMessage({
-            frame: window === window.top ? 'top' : 'child'
+            frame: window === window.top ? 'top' : 'child',
+            targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
+            targetClosestSegment: event.target?.closest?.('mnb-seg')?.getAttribute?.('id') ?? null,
+            clientX: event.clientX ?? null,
+            clientY: event.clientY ?? null
         });
     }
 
@@ -4844,6 +4887,8 @@ public struct WebViewConfig: Sendable {
     public let backgroundColor: Color
     public let usesSampledPageTopColorForUnderPageBackground: Bool
     public let usesConfiguredBackgroundForReaderDocuments: Bool
+    public let adjustsScrollViewContentInsetsForSafeArea: Bool
+    public let nativeLookupHitTestingEnabled: Bool
     public let userScripts: [WebViewUserScript]
     public let darkModeSetting: DarkModeSetting
     public let paginationConfiguration: WebViewPaginationConfiguration
@@ -4861,6 +4906,8 @@ public struct WebViewConfig: Sendable {
         backgroundColor: Color = .clear,
         usesSampledPageTopColorForUnderPageBackground: Bool = false,
         usesConfiguredBackgroundForReaderDocuments: Bool = false,
+        adjustsScrollViewContentInsetsForSafeArea: Bool = true,
+        nativeLookupHitTestingEnabled: Bool = true,
         userScripts: [WebViewUserScript] = [],
         darkModeSetting: DarkModeSetting = .system,
         paginationConfiguration: WebViewPaginationConfiguration = .disabled
@@ -4877,6 +4924,8 @@ public struct WebViewConfig: Sendable {
         self.backgroundColor = backgroundColor
         self.usesSampledPageTopColorForUnderPageBackground = usesSampledPageTopColorForUnderPageBackground
         self.usesConfiguredBackgroundForReaderDocuments = usesConfiguredBackgroundForReaderDocuments
+        self.adjustsScrollViewContentInsetsForSafeArea = adjustsScrollViewContentInsetsForSafeArea
+        self.nativeLookupHitTestingEnabled = nativeLookupHitTestingEnabled
         self.userScripts = userScripts
         self.darkModeSetting = darkModeSetting
         self.paginationConfiguration = paginationConfiguration
@@ -5869,13 +5918,40 @@ public class WebViewController: UIViewController {
             forKey: unobscuredArgument.compactMap({ $0 as? String }).joined()
         )
         if #available(iOS 15.5, *) {
-            webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
+            let viewportBounds = webView.bounds
+            let hasUsableViewportBounds =
+                viewportBounds.width.isFinite
+                && viewportBounds.height.isFinite
+                && viewportBounds.width > 1
+                && viewportBounds.height > 1
+            let insetsFitViewport =
+                hasUsableViewportBounds
+                && insets.left + insets.right < viewportBounds.width
+                && insets.top + insets.bottom < viewportBounds.height
+            if insetsFitViewport {
+                webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
+            } else {
+                safeAreaLog(
+                    "webViewController.setViewportInset.skipped",
+                    [
+                        "top": "\(insets.top)",
+                        "bottom": "\(insets.bottom)",
+                        "left": "\(insets.left)",
+                        "right": "\(insets.right)",
+                        "viewportWidth": "\(viewportBounds.width)",
+                        "viewportHeight": "\(viewportBounds.height)",
+                        "webViewID": readerLoadObjectIDString(webView)
+                    ]
+                )
+            }
         }
         safeAreaLog(
             "webViewController.applyObscuredInsets",
             [
                 "appliedTop": "\(insets.top)",
                 "appliedBottom": "\(insets.bottom)",
+                "appliedLeft": "\(insets.left)",
+                "appliedRight": "\(insets.right)",
                 "controllerObscuredTop": "\(obscuredInsets.top)",
                 "controllerObscuredBottom": "\(obscuredInsets.bottom)",
                 "scrollAdjustedContentInsetTop": "\(webView.scrollView.adjustedContentInset.top)",
@@ -6673,7 +6749,8 @@ extension WebView: UIViewControllerRepresentable {
         webView.uiDelegate = context.coordinator
         webView.scrollView.delegate = context.coordinator
         webView.buildMenu = buildMenu
-        webView.scrollView.contentInsetAdjustmentBehavior = .always
+        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
+        webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
@@ -6799,6 +6876,7 @@ extension WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
+        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         if let resolvedWebViewPool {
             resolvedWebViewPool.attachWarmShelfIfNeeded(to: controller.view.window)
@@ -6894,6 +6972,7 @@ extension WebView: UIViewControllerRepresentable {
             )
             controller.webView.scrollView.bounces = bounces
             controller.webView.scrollView.alwaysBounceVertical = bounces
+            controller.webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
             controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
             applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
             context.coordinator.lastAppliedConfigurationState = currentConfigurationState
@@ -6935,9 +7014,9 @@ extension WebView: UIViewControllerRepresentable {
 
         let resolvedObscuredInsets = UIEdgeInsets(
             top: obscuredInsets.top,
-            left: 0,
+            left: max(0, obscuredInsets.leading),
             bottom: resolvedObscuredBottomInset,
-            right: 0
+            right: max(0, obscuredInsets.trailing)
         )
         safeAreaLog(
             "swiftUIWebView.updateBottom",
@@ -7387,6 +7466,7 @@ extension WebView: NSViewRepresentable {
         )
         
         let hostView = WebViewHostNSView(webView: webView)
+        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         return hostView
     }
@@ -7420,6 +7500,7 @@ extension WebView: NSViewRepresentable {
     @MainActor
     public func updateNSView(_ uiView: WebViewHostNSView, context: Context) {
         updateCoordinatorBindings(context: context)
+        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         uiView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         let webView = uiView.webView
         if let scriptCaller {
@@ -7580,7 +7661,9 @@ extension WebView {
             String(format: "%.4f", Double(config.pageZoom)),
             "\(config.isOpaque)",
             backgroundColorSignature(config.backgroundColor),
-            config.darkModeSetting.rawValue
+            config.darkModeSetting.rawValue,
+            "\(config.adjustsScrollViewContentInsetsForSafeArea)",
+            "\(config.nativeLookupHitTestingEnabled)"
         ].joined(separator: "|")
     }
 
