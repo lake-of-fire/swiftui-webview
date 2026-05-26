@@ -6926,7 +6926,7 @@ extension WebView: UIViewControllerRepresentable {
             ? bottomSafeAreaInset + incomingBottomObscuredInset
             : incomingBottomObscuredInset
         let additionalSafeAreaInsets = UIEdgeInsets(
-            top: max(0, obscuredInsets.top - topSafeAreaInset),
+            top: 0,
             left: 0,
             bottom: resolvedAdditionalBottomSafeAreaInset,
             right: 0
