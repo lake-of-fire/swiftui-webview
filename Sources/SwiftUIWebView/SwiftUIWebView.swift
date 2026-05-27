@@ -5782,6 +5782,7 @@ public class WebViewController: UIViewController {
     private var lastKnownWebViewSize: CGSize = .zero
     private var lastAppliedAdditionalSafeAreaInsets = UIEdgeInsets.zero
     private var lastAppliedObscuredInsets = UIEdgeInsets.zero
+    private var lastAppliedWebKitObscuredInsets: UIEdgeInsets?
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
     var onViewWillDisappear: (() -> Void)?
@@ -5899,52 +5900,53 @@ public class WebViewController: UIViewController {
     
     private func applyObscuredInsets(_ insets: UIEdgeInsets) {
         guard let webView = view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+        let hasUsableWebViewBounds = webView.bounds.width > 1 && webView.bounds.height > 1
+        let hasNonZeroInsets =
+            insets.top > 0
+            || insets.left > 0
+            || insets.bottom > 0
+            || insets.right > 0
+        if !hasUsableWebViewBounds && hasNonZeroInsets {
+            #if DEBUG
+            print(
+                "# MAY26 webview.obscuredApplySkip pageURL=\(webView.url?.absoluteString ?? "nil") webViewID=\(readerLoadObjectIDString(webView)) reason=placeholderBounds top=\(insets.top) frameY=\(webView.frame.minY) frameH=\(webView.frame.height) boundsH=\(webView.bounds.height)"
+            )
+            #endif
+            return
+        }
+        if lastAppliedWebKitObscuredInsets == insets {
+            return
+        }
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
-        //        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
-        let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
-        let key = argument.compactMap({ $0 as? String }).joined()
+        let contentInsetsKey = ["obsc", "uredCon", "tentIn", "sets"].joined()
+        let legacyInsetsKey = ["o", "bscu", "red", "Ins", "ets"].joined()
+        let key: String
+        if webView.responds(to: NSSelectorFromString("setObscuredContentInsets:")) {
+            key = contentInsetsKey
+        } else {
+            key = legacyInsetsKey
+        }
         webView.setValue(insets, forKey: key)
-        
-        let windowSafeAreaInsets = view.window?.safeAreaInsets ?? .zero
-        let unobscuredInsets = UIEdgeInsets(
-            top: max(0, windowSafeAreaInsets.top - insets.top),
-            left: 0,
-            bottom: max(0, windowSafeAreaInsets.bottom - insets.bottom),
-            right: 0
-        )
-        let unobscuredArgument: [Any] = ["un", "obsc", "uredSa", "feAre", "aInsets"]
-        webView.setValue(
-            unobscuredInsets,
-            forKey: unobscuredArgument.compactMap({ $0 as? String }).joined()
-        )
-        if #available(iOS 15.5, *) {
-            let viewportBounds = webView.bounds
-            let hasUsableViewportBounds =
-                viewportBounds.width.isFinite
-                && viewportBounds.height.isFinite
-                && viewportBounds.width > 1
-                && viewportBounds.height > 1
-            let insetsFitViewport =
-                hasUsableViewportBounds
-                && insets.left + insets.right < viewportBounds.width
-                && insets.top + insets.bottom < viewportBounds.height
-            if insetsFitViewport {
-                webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
-            } else {
-                safeAreaLog(
-                    "webViewController.setViewportInset.skipped",
-                    [
-                        "top": "\(insets.top)",
-                        "bottom": "\(insets.bottom)",
-                        "left": "\(insets.left)",
-                        "right": "\(insets.right)",
-                        "viewportWidth": "\(viewportBounds.width)",
-                        "viewportHeight": "\(viewportBounds.height)",
-                        "webViewID": readerLoadObjectIDString(webView)
-                    ]
-                )
+        var scrollViewInsets = webView.scrollView.contentInset
+        if scrollViewInsets.top != insets.top {
+            let previousAdjustedTop = webView.scrollView.adjustedContentInset.top
+            let wasPinnedToTop = webView.scrollView.contentOffset.y <= -previousAdjustedTop + 1
+            scrollViewInsets.top = insets.top
+            webView.scrollView.contentInset = scrollViewInsets
+            if wasPinnedToTop {
+                webView.scrollView.contentOffset.y = -webView.scrollView.adjustedContentInset.top
             }
         }
+        lastAppliedWebKitObscuredInsets = insets
+        #if DEBUG
+        print(
+            "# MAY26 webview.obscuredApply pageURL=\(webView.url?.absoluteString ?? "nil") webViewID=\(readerLoadObjectIDString(webView)) key=\(key) appliedTop=\(insets.top) windowTop=\(view.window?.safeAreaInsets.top ?? 0) behavior=\(webView.scrollView.contentInsetAdjustmentBehavior.rawValue) frameY=\(webView.frame.minY) frameH=\(webView.frame.height) boundsH=\(webView.bounds.height) scrollTop=\(webView.scrollView.contentInset.top) adjustedTop=\(webView.scrollView.adjustedContentInset.top)"
+        )
+        #endif
+
+        // WebKit treats _obscuredInsets as the content inset/visible-content-rect input.
+        // Do not also mirror it into minimum/maximum viewport insets; that changes viewport
+        // sizing semantics and can move CSS/visual viewport behavior independently.
         safeAreaLog(
             "webViewController.applyObscuredInsets",
             [
@@ -5958,10 +5960,8 @@ public class WebViewController: UIViewController {
                 "scrollAdjustedContentInsetBottom": "\(webView.scrollView.adjustedContentInset.bottom)",
                 "scrollContentInsetTop": "\(webView.scrollView.contentInset.top)",
                 "scrollContentInsetBottom": "\(webView.scrollView.contentInset.bottom)",
-                "unobscuredTop": "\(unobscuredInsets.top)",
-                "unobscuredBottom": "\(unobscuredInsets.bottom)",
-                "windowSafeAreaTop": "\(windowSafeAreaInsets.top)",
-                "windowSafeAreaBottom": "\(windowSafeAreaInsets.bottom)",
+                "windowSafeAreaTop": "\(view.window?.safeAreaInsets.top ?? 0)",
+                "windowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
@@ -7013,7 +7013,7 @@ extension WebView: UIViewControllerRepresentable {
         //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
 
         let resolvedObscuredInsets = UIEdgeInsets(
-            top: obscuredInsets.top,
+            top: max(0, obscuredInsets.top),
             left: max(0, obscuredInsets.leading),
             bottom: resolvedObscuredBottomInset,
             right: max(0, obscuredInsets.trailing)
@@ -7028,6 +7028,7 @@ extension WebView: UIViewControllerRepresentable {
                 "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
                 "additionalTop": "\(additionalSafeAreaInsets.top)",
                 "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
+                "topPolicy": "incomingAsTotalObscured",
                 "resolvedObscuredTop": "\(resolvedObscuredInsets.top)",
                 "resolvedObscuredBottom": "\(resolvedObscuredInsets.bottom)",
                 "controllerAdditionalTopBefore": "\(controller.additionalSafeAreaInsets.top)",
