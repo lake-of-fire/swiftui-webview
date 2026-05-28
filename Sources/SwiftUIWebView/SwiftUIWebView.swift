@@ -5312,6 +5312,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 coordinateView: coordinateView,
                 extra: [
                     "nearest": store?.diagnostics(at: point, limit: 3) as Any,
+                    "nativeLookupEnabled": store?.isEnabled as Any,
+                    "targetCount": store?.targetCount as Any,
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
@@ -5326,6 +5328,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             point: point,
             coordinateView: coordinateView,
             extra: [
+                "nativeLookupEnabled": store?.isEnabled as Any,
+                "targetCount": store?.targetCount as Any,
                 "segmentTargetTouchesReachWebKit": "pendingTapDecision",
             ]
         )
@@ -5808,7 +5812,9 @@ public class WebViewController: UIViewController {
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateObscuredInsets(reason: "viewDidLayoutSubviews")
-        configureNativeLookupTapFailureRequirements(reason: "viewDidLayoutSubviews")
+        if nativeLookupHitTestGestureRecognizer.view != nil {
+            configureNativeLookupTapFailureRequirements(reason: "viewDidLayoutSubviews")
+        }
         let size = webView.bounds.size
         if size.width > 1, size.height > 1 {
             lastKnownWebViewSize = size
@@ -5898,7 +5904,7 @@ public class WebViewController: UIViewController {
         return (changedAdditionalSafeAreaInsets, changedObscuredInsets)
     }
     
-    private func applyObscuredInsets(_ insets: UIEdgeInsets) {
+    private func applyObscuredInsets(_ insets: UIEdgeInsets, reason: String) {
         guard let webView = view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
         let hasUsableWebViewBounds = webView.bounds.width > 1 && webView.bounds.height > 1
         let hasNonZeroInsets =
@@ -5907,11 +5913,6 @@ public class WebViewController: UIViewController {
             || insets.bottom > 0
             || insets.right > 0
         if !hasUsableWebViewBounds && hasNonZeroInsets {
-            #if DEBUG
-            print(
-                "# MAY26 webview.obscuredApplySkip pageURL=\(webView.url?.absoluteString ?? "nil") webViewID=\(readerLoadObjectIDString(webView)) reason=placeholderBounds top=\(insets.top) frameY=\(webView.frame.minY) frameH=\(webView.frame.height) boundsH=\(webView.bounds.height)"
-            )
-            #endif
             return
         }
         if lastAppliedWebKitObscuredInsets == insets {
@@ -5937,12 +5938,18 @@ public class WebViewController: UIViewController {
                 webView.scrollView.contentOffset.y = -webView.scrollView.adjustedContentInset.top
             }
         }
+        scrollViewInsets = webView.scrollView.contentInset
+        if scrollViewInsets.left != insets.left || scrollViewInsets.right != insets.right {
+            let previousAdjustedLeft = webView.scrollView.adjustedContentInset.left
+            let wasPinnedToLeading = webView.scrollView.contentOffset.x <= -previousAdjustedLeft + 1
+            scrollViewInsets.left = insets.left
+            scrollViewInsets.right = insets.right
+            webView.scrollView.contentInset = scrollViewInsets
+            if wasPinnedToLeading {
+                webView.scrollView.contentOffset.x = -webView.scrollView.adjustedContentInset.left
+            }
+        }
         lastAppliedWebKitObscuredInsets = insets
-        #if DEBUG
-        print(
-            "# MAY26 webview.obscuredApply pageURL=\(webView.url?.absoluteString ?? "nil") webViewID=\(readerLoadObjectIDString(webView)) key=\(key) appliedTop=\(insets.top) windowTop=\(view.window?.safeAreaInsets.top ?? 0) behavior=\(webView.scrollView.contentInsetAdjustmentBehavior.rawValue) frameY=\(webView.frame.minY) frameH=\(webView.frame.height) boundsH=\(webView.bounds.height) scrollTop=\(webView.scrollView.contentInset.top) adjustedTop=\(webView.scrollView.adjustedContentInset.top)"
-        )
-        #endif
 
         // WebKit treats _obscuredInsets as the content inset/visible-content-rect input.
         // Do not also mirror it into minimum/maximum viewport insets; that changes viewport
@@ -5990,7 +5997,7 @@ public class WebViewController: UIViewController {
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
-        applyObscuredInsets(insets)
+        applyObscuredInsets(insets, reason: reason)
     }
 
     @MainActor
@@ -6162,7 +6169,6 @@ public class WebViewController: UIViewController {
             view.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(webViewConstraints)
-        attachNativeLookupHitTestOverlay()
         readerLoadLog(
             "webViewController.attachWebView",
             [
@@ -6176,6 +6182,7 @@ public class WebViewController: UIViewController {
 
     @MainActor
     private func attachNativeLookupHitTestOverlay() {
+        NSLayoutConstraint.deactivate(nativeLookupHitTestOverlayConstraints)
         nativeLookupHitTestOverlayConstraints.removeAll()
         nativeLookupHitTestOverlayView.removeFromSuperview()
         nativeLookupHitTestOverlayView.translatesAutoresizingMaskIntoConstraints = false
@@ -6207,6 +6214,24 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: hitTestLayoutGuide.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
+    }
+
+    @MainActor
+    func setNativeLookupHitTestingEnabled(_ enabled: Bool, reason: String) {
+        let wasInstalled = nativeLookupHitTestGestureRecognizer.view != nil
+            || nativeLookupHitTestOverlayView.superview != nil
+        if enabled {
+            if !wasInstalled {
+                attachNativeLookupHitTestOverlay()
+            }
+        } else {
+            nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            NSLayoutConstraint.deactivate(nativeLookupHitTestOverlayConstraints)
+            nativeLookupHitTestOverlayConstraints.removeAll()
+            nativeLookupHitTestOverlayView.removeFromSuperview()
+            nativeLookupTapFailureRequirementRecognizerIDs.removeAll()
+            earlySuppressedNativeLookupTapRecognizers.removeAll()
+        }
     }
 
     @MainActor
@@ -6813,6 +6838,10 @@ extension WebView: UIViewControllerRepresentable {
         }
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+        controller.setNativeLookupHitTestingEnabled(
+            config.nativeLookupHitTestingEnabled,
+            reason: "configureWebView"
+        )
         refreshDarkModeSetting(webView: webView)
         applyVisualConfiguration(webView: webView, containerView: controller.view)
     }
@@ -6878,6 +6907,10 @@ extension WebView: UIViewControllerRepresentable {
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+        controller.setNativeLookupHitTestingEnabled(
+            config.nativeLookupHitTestingEnabled,
+            reason: "updateUIViewController"
+        )
         if let resolvedWebViewPool {
             resolvedWebViewPool.attachWarmShelfIfNeeded(to: controller.view.window)
         }
@@ -7006,9 +7039,9 @@ extension WebView: UIViewControllerRepresentable {
             : incomingBottomObscuredInset
         let additionalSafeAreaInsets = UIEdgeInsets(
             top: 0,
-            left: 0,
+            left: max(0, obscuredInsets.leading - (controller.view.window?.safeAreaInsets.left ?? 0)),
             bottom: resolvedAdditionalBottomSafeAreaInset,
-            right: 0
+            right: max(0, obscuredInsets.trailing - (controller.view.window?.safeAreaInsets.right ?? 0))
         )
         //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
 
@@ -7022,23 +7055,39 @@ extension WebView: UIViewControllerRepresentable {
             "swiftUIWebView.updateBottom",
             [
                 "incomingObscuredTop": "\(obscuredInsets.top)",
+                "incomingObscuredLeading": "\(obscuredInsets.leading)",
                 "incomingObscuredBottom": "\(obscuredInsets.bottom)",
+                "incomingObscuredTrailing": "\(obscuredInsets.trailing)",
                 "windowSafeAreaTop": "\(topSafeAreaInset)",
+                "windowSafeAreaLeft": "\(controller.view.window?.safeAreaInsets.left ?? 0)",
                 "windowSafeAreaBottom": "\(bottomSafeAreaInset)",
+                "windowSafeAreaRight": "\(controller.view.window?.safeAreaInsets.right ?? 0)",
                 "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
                 "additionalTop": "\(additionalSafeAreaInsets.top)",
+                "additionalLeft": "\(additionalSafeAreaInsets.left)",
                 "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
+                "additionalRight": "\(additionalSafeAreaInsets.right)",
                 "topPolicy": "incomingAsTotalObscured",
                 "resolvedObscuredTop": "\(resolvedObscuredInsets.top)",
+                "resolvedObscuredLeft": "\(resolvedObscuredInsets.left)",
                 "resolvedObscuredBottom": "\(resolvedObscuredInsets.bottom)",
+                "resolvedObscuredRight": "\(resolvedObscuredInsets.right)",
                 "controllerAdditionalTopBefore": "\(controller.additionalSafeAreaInsets.top)",
+                "controllerAdditionalLeftBefore": "\(controller.additionalSafeAreaInsets.left)",
                 "controllerAdditionalBottomBefore": "\(controller.additionalSafeAreaInsets.bottom)",
+                "controllerAdditionalRightBefore": "\(controller.additionalSafeAreaInsets.right)",
                 "controllerObscuredTopBefore": "\(controller.obscuredInsets.top)",
+                "controllerObscuredLeftBefore": "\(controller.obscuredInsets.left)",
                 "controllerObscuredBottomBefore": "\(controller.obscuredInsets.bottom)",
+                "controllerObscuredRightBefore": "\(controller.obscuredInsets.right)",
                 "scrollAdjustedContentInsetTopBefore": "\(controller.webView.scrollView.adjustedContentInset.top)",
+                "scrollAdjustedContentInsetLeftBefore": "\(controller.webView.scrollView.adjustedContentInset.left)",
                 "scrollAdjustedContentInsetBottomBefore": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
+                "scrollAdjustedContentInsetRightBefore": "\(controller.webView.scrollView.adjustedContentInset.right)",
                 "scrollContentInsetTopBefore": "\(controller.webView.scrollView.contentInset.top)",
+                "scrollContentInsetLeftBefore": "\(controller.webView.scrollView.contentInset.left)",
                 "scrollContentInsetBottomBefore": "\(controller.webView.scrollView.contentInset.bottom)",
+                "scrollContentInsetRightBefore": "\(controller.webView.scrollView.contentInset.right)",
                 "webViewID": readerLoadObjectIDString(controller.webView)
             ]
         )
@@ -7052,13 +7101,21 @@ extension WebView: UIViewControllerRepresentable {
                 "changedAdditional": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
                 "changedObscured": "\(hostLayoutChanges.changedObscuredInsets)",
                 "controllerAdditionalTopAfter": "\(controller.additionalSafeAreaInsets.top)",
+                "controllerAdditionalLeftAfter": "\(controller.additionalSafeAreaInsets.left)",
                 "controllerAdditionalBottomAfter": "\(controller.additionalSafeAreaInsets.bottom)",
+                "controllerAdditionalRightAfter": "\(controller.additionalSafeAreaInsets.right)",
                 "controllerObscuredTopAfter": "\(controller.obscuredInsets.top)",
+                "controllerObscuredLeftAfter": "\(controller.obscuredInsets.left)",
                 "controllerObscuredBottomAfter": "\(controller.obscuredInsets.bottom)",
+                "controllerObscuredRightAfter": "\(controller.obscuredInsets.right)",
                 "scrollAdjustedContentInsetTopAfter": "\(controller.webView.scrollView.adjustedContentInset.top)",
+                "scrollAdjustedContentInsetLeftAfter": "\(controller.webView.scrollView.adjustedContentInset.left)",
                 "scrollAdjustedContentInsetBottomAfter": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
+                "scrollAdjustedContentInsetRightAfter": "\(controller.webView.scrollView.adjustedContentInset.right)",
                 "scrollContentInsetTopAfter": "\(controller.webView.scrollView.contentInset.top)",
+                "scrollContentInsetLeftAfter": "\(controller.webView.scrollView.contentInset.left)",
                 "scrollContentInsetBottomAfter": "\(controller.webView.scrollView.contentInset.bottom)",
+                "scrollContentInsetRightAfter": "\(controller.webView.scrollView.contentInset.right)",
                 "webViewID": readerLoadObjectIDString(controller.webView)
             ]
         )
