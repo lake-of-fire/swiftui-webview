@@ -5939,6 +5939,24 @@ public class WebViewController: UIViewController {
             }
         }
         scrollViewInsets = webView.scrollView.contentInset
+        if scrollViewInsets.bottom != insets.bottom {
+            let scrollView = webView.scrollView
+            let previousMaxOffsetY = max(
+                -scrollView.adjustedContentInset.top,
+                scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+            )
+            let wasPinnedToBottom = scrollView.contentOffset.y >= previousMaxOffsetY - 1
+            scrollViewInsets.bottom = insets.bottom
+            scrollView.contentInset = scrollViewInsets
+            if wasPinnedToBottom {
+                let newMaxOffsetY = max(
+                    -scrollView.adjustedContentInset.top,
+                    scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+                )
+                scrollView.contentOffset.y = newMaxOffsetY
+            }
+        }
+        scrollViewInsets = webView.scrollView.contentInset
         if scrollViewInsets.left != insets.left || scrollViewInsets.right != insets.right {
             let previousAdjustedLeft = webView.scrollView.adjustedContentInset.left
             let wasPinnedToLeading = webView.scrollView.contentOffset.x <= -previousAdjustedLeft + 1
@@ -5971,6 +5989,9 @@ public class WebViewController: UIViewController {
                 "windowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
                 "webViewID": readerLoadObjectIDString(webView)
             ]
+        )
+        debugPrint(
+            "# BOTTOM stage=webViewController.applyObscuredInsets reason=\(reason) appliedBottom=\(insets.bottom) scrollContentInsetBottom=\(webView.scrollView.contentInset.bottom) scrollAdjustedContentInsetBottom=\(webView.scrollView.adjustedContentInset.bottom) scrollIndicatorInsetBottom=\(webView.scrollView.verticalScrollIndicatorInsets.bottom) contentOffsetY=\(webView.scrollView.contentOffset.y) contentSizeHeight=\(webView.scrollView.contentSize.height) boundsHeight=\(webView.scrollView.bounds.height) webViewID=\(readerLoadObjectIDString(webView))"
         )
         
         //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
