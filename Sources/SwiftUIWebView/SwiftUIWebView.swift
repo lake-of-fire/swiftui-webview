@@ -1449,6 +1449,15 @@ public final class WebViewNativeLookupHitTestStore {
         let inflatedCandidate = exactCandidate == nil ? bestCandidate(at: point, usingInflatedRects: true) : nil
         guard let candidate = exactCandidate ?? inflatedCandidate else {
             debugPrint(
+                "# POPOVER nativeHitTargets.tapMiss",
+                [
+                    "point": Self.debugPointString(point),
+                    "containerSize": containerSize.map(Self.debugSizeString) as Any,
+                    "entryCount": entries.count,
+                    "nearest": diagnostics(at: point, limit: 3),
+                ] as [String : Any]
+            )
+            debugPrint(
                 "# MAY15 nativeHitTargets.tapMiss",
                 [
                     "point": Self.debugPointString(point),
@@ -1458,6 +1467,19 @@ public final class WebViewNativeLookupHitTestStore {
             )
             return false
         }
+        debugPrint(
+            "# POPOVER nativeHitTargets.tapHit",
+            [
+                "point": Self.debugPointString(point),
+                "containerSize": containerSize.map(Self.debugSizeString) as Any,
+                "elementID": candidate.target.elementID,
+                "usedInflatedRects": exactCandidate == nil,
+                "distance": candidate.distance,
+                "centerDistance": candidate.centerDistance,
+                "rects": Self.debugRectStrings([candidate.rect]),
+                "hitRects": Self.debugRectStrings([candidate.hitRect]),
+            ] as [String : Any]
+        )
         debugPrint(
             "# MAY15 nativeHitTargets.tapHit",
             [
@@ -1487,6 +1509,21 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func handleTap(on target: WebViewNativeLookupHitTarget, at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        debugPrint(
+            "# POPOVER nativeHitTargets.tapHit",
+            [
+                "point": Self.debugPointString(point),
+                "containerSize": containerSize.map(Self.debugSizeString) as Any,
+                "elementID": target.elementID,
+                "usedInflatedRects": false,
+                "source": "capturedStartTarget",
+                "rects": Self.debugRectStrings(target.rects.prefix(4)),
+                "hitRects": Self.debugRectStrings(target.debugHitRects.prefix(4)),
+                "targetUsedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
+                "targetDistance": target.debugDistance as Any,
+                "targetCenterDistance": target.debugCenterDistance as Any,
+            ] as [String : Any]
+        )
         debugPrint(
             "# MAY15 nativeHitTargets.tapHit",
             [
@@ -2138,6 +2175,7 @@ public class WebViewCoordinator: NSObject {
     private func clearScriptCallerBinding() {
         scriptCaller?.asyncCaller = nil
         scriptCaller?.snapshotCapture = nil
+        scriptCaller?.snapshotCapturer = nil
     }
 
     @MainActor
@@ -4493,6 +4531,20 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
 enum ScriptCallerError: Error {
     case evaluationTimedOut
+    case snapshotCaptureUnavailable
+    case snapshotCaptureFailed
+}
+
+public struct WebViewSnapshot: Sendable {
+    public var cgImage: CGImage
+    public var size: CGSize
+    public var scale: CGFloat
+
+    public init(cgImage: CGImage, size: CGSize, scale: CGFloat) {
+        self.cgImage = cgImage
+        self.size = size
+        self.scale = scale
+    }
 }
 
 public enum WebViewScriptCallerSnapshotError: Error, Equatable, Sendable {
@@ -4658,6 +4710,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
     var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
+    var snapshotCapturer: (@MainActor @Sendable (CGRect?) async throws -> WebViewSnapshot)? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
@@ -4824,6 +4877,13 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
         return normalizeJavaScriptResult(result)
+    }
+
+    public func captureSnapshot(rect: CGRect? = nil) async throws -> WebViewSnapshot {
+        guard let snapshotCapturer else {
+            throw ScriptCallerError.snapshotCaptureUnavailable
+        }
+        return try await snapshotCapturer(rect)
     }
 
     @MainActor
@@ -5659,7 +5719,6 @@ public struct WebViewConfig: Sendable {
         nativeLookupHitTestingEnabled: false,
         paginationConfiguration: .disabled
     )
-
     public let javaScriptEnabled: Bool
     public let contentRules: String?
     public let allowsBackForwardNavigationGestures: Bool
@@ -6507,6 +6566,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["rects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4))
             payload["hitRects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4))
         }
+        debugPrint("# POPOVER nativeGesture.touchDelivery", payload)
         debugPrint("# MAY15 nativeHitTargets.touchDelivery", payload)
     }
 
@@ -7245,6 +7305,22 @@ extension WebView: UIViewControllerRepresentable {
             }
         }
         context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
+        context.coordinator.scriptCaller?.snapshotCapturer = { @MainActor [weak webView] rect in
+            guard let webView else {
+                throw ScriptCallerError.snapshotCaptureUnavailable
+            }
+            let configuration = WKSnapshotConfiguration()
+            configuration.rect = rect ?? webView.bounds
+            let image = await withCheckedContinuation { continuation in
+                webView.takeSnapshot(with: configuration) { image, _ in
+                    continuation.resume(returning: image)
+                }
+            }
+            guard let image, let cgImage = image.cgImage else {
+                throw ScriptCallerError.snapshotCaptureFailed
+            }
+            return WebViewSnapshot(cgImage: cgImage, size: image.size, scale: image.scale)
+        }
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         refreshDarkModeSetting(webView: webView)
@@ -7945,6 +8021,24 @@ extension WebView: NSViewRepresentable {
                       String(format: "elapsed=%.3fs", elapsed))
                 throw error
             }
+        }
+        context.coordinator.scriptCaller?.snapshotCapturer = { @MainActor [weak webView] rect in
+            guard let webView else {
+                throw ScriptCallerError.snapshotCaptureUnavailable
+            }
+            let configuration = WKSnapshotConfiguration()
+            configuration.rect = rect ?? webView.bounds
+            let image = await withCheckedContinuation { continuation in
+                webView.takeSnapshot(with: configuration) { image, _ in
+                    continuation.resume(returning: image)
+                }
+            }
+            var proposedRect = CGRect(origin: .zero, size: image?.size ?? .zero)
+            guard let image,
+                  let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
+                throw ScriptCallerError.snapshotCaptureFailed
+            }
+            return WebViewSnapshot(cgImage: cgImage, size: image.size, scale: 1)
         }
         context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
             guard let webView else { return }
