@@ -4,24 +4,67 @@ import UIKit
 import WebKit
 
 extension WebViewCoordinator: UIScrollViewDelegate {
+    private func shouldLogLayoutScroll(for scrollView: UIScrollView) -> (WKWebView, WebViewPaginationConfiguration)? {
+        guard let webView = navigator.webView, webView.scrollView === scrollView else { return nil }
+        let configuration = paginationController.currentState().appliedConfiguration ?? config.paginationConfiguration
+        guard webViewLayoutShouldLog(webView: webView, configuration: configuration) else { return nil }
+        return (webView, configuration)
+    }
+
+    private func layoutPageSignature(scrollView: UIScrollView, configuration: WebViewPaginationConfiguration) -> String {
+        let fallbackPageLength = scrollView.contentSize.width > scrollView.bounds.width + 1
+            ? scrollView.bounds.width
+            : scrollView.bounds.height
+        let pageLength = max(configuration.effectivePageLength > 0 ? configuration.effectivePageLength : fallbackPageLength, 1)
+        let horizontalPage = Int((scrollView.contentOffset.x / pageLength).rounded())
+        let verticalPage = Int((scrollView.contentOffset.y / pageLength).rounded())
+        return [
+            "\(configuration.mode.rawValue)",
+            "\(horizontalPage)",
+            "\(verticalPage)",
+            "\(Int(scrollView.bounds.width.rounded()))x\(Int(scrollView.bounds.height.rounded()))",
+            "\(Int(scrollView.contentSize.width.rounded()))x\(Int(scrollView.contentSize.height.rounded()))"
+        ].joined(separator: "|")
+    }
+
+    private func logLayoutScroll(_ stage: String, scrollView: UIScrollView, force: Bool = false) {
+        guard let (webView, configuration) = shouldLogLayoutScroll(for: scrollView) else { return }
+        let signature = layoutPageSignature(scrollView: scrollView, configuration: configuration)
+        if !force && signature == lastLayoutScrollPageSignature {
+            return
+        }
+        lastLayoutScrollPageSignature = signature
+
+        var payload = webViewLayoutScrollPayload(webView: webView, configuration: configuration)
+        payload["pageSignature"] = signature
+        payload["pageCount"] = paginationController.currentState().pageCount ?? -1
+        webViewLayoutDebugLog(stage, payload)
+    }
+
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         lastContentOffset = scrollView.contentOffset
         accumulatedScrollOffset = 0
         refreshNavigationScrollSemantics(scrollView)
+        logLayoutScroll("scroll.beginDrag", scrollView: scrollView, force: true)
     }
 
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        logLayoutScroll(decelerate ? "scroll.endDrag.decelerating" : "scroll.endDrag", scrollView: scrollView, force: true)
         guard !decelerate else { return }
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
+        refreshPaginationReadback(reason: "scroll.endDrag")
     }
 
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        logLayoutScroll("scroll.endDecelerating", scrollView: scrollView, force: true)
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
+        refreshPaginationReadback(reason: "scroll.endDecelerating")
     }
 
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        logLayoutScroll("scroll.pageChanged", scrollView: scrollView)
         guard scrollView.isTracking || scrollView.isDragging else { return }
 
         let currentOffset = scrollView.contentOffset
@@ -58,6 +101,11 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         }
 
         lastContentOffset = currentOffset
+    }
+
+    public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        logLayoutScroll("scroll.endAnimation", scrollView: scrollView, force: true)
+        refreshPaginationReadback(reason: "scroll.endAnimation")
     }
 
     private func resolvedScrollDifference(deltaX: CGFloat, deltaY: CGFloat) -> CGFloat {

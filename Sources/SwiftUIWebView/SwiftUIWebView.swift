@@ -595,6 +595,88 @@ private func webViewPaginationDebugLog(_ stage: String, _ metadata: [String: Any
     #endif
 }
 
+@inline(__always)
+func webViewLayoutDebugLog(_ stage: String, _ metadata: [String: Any] = [:]) {
+    #if DEBUG
+    var payload = metadata
+    payload["stage"] = stage
+    Swift.debugPrint("# LAYOUT", payload)
+    #else
+    _ = stage
+    _ = metadata
+    #endif
+}
+
+func webViewLayoutRounded(_ value: CGFloat) -> Double {
+    Double((value * 100).rounded() / 100)
+}
+
+func webViewLayoutSizeString(_ size: CGSize) -> String {
+    "\(webViewLayoutRounded(size.width))x\(webViewLayoutRounded(size.height))"
+}
+
+func webViewLayoutPointString(_ point: CGPoint) -> String {
+    "\(webViewLayoutRounded(point.x)),\(webViewLayoutRounded(point.y))"
+}
+
+func webViewLayoutPaginationPayload(
+    configuration: WebViewPaginationConfiguration,
+    reason: String
+) -> [String: Any] {
+    [
+        "reason": reason,
+        "mode": configuration.mode.rawValue,
+        "storedPageLength": webViewLayoutRounded(configuration.storedPageLength),
+        "effectivePageLength": webViewLayoutRounded(configuration.effectivePageLength),
+        "gapBetweenPages": webViewLayoutRounded(configuration.gapBetweenPages),
+        "behavesLikeColumns": configuration.behavesLikeColumns,
+        "layoutSize": webViewLayoutSizeString(configuration.layoutSize),
+        "usesViewLength": configuration.usesViewLength
+    ]
+}
+
+#if os(iOS)
+@MainActor
+func webViewLayoutInsetsString(_ insets: UIEdgeInsets) -> String {
+    "t:\(webViewLayoutRounded(insets.top)) l:\(webViewLayoutRounded(insets.left)) b:\(webViewLayoutRounded(insets.bottom)) r:\(webViewLayoutRounded(insets.right))"
+}
+
+@MainActor
+func webViewLayoutScrollPayload(webView: WKWebView, configuration: WebViewPaginationConfiguration? = nil) -> [String: Any] {
+    let scrollView = webView.scrollView
+    var payload: [String: Any] = [
+        "host": WebViewPaginationController.hostIdentifier(for: webView),
+        "url": webView.url?.absoluteString ?? "nil",
+        "webBounds": webViewLayoutSizeString(webView.bounds.size),
+        "scrollBounds": webViewLayoutSizeString(scrollView.bounds.size),
+        "contentSize": webViewLayoutSizeString(scrollView.contentSize),
+        "contentOffset": webViewLayoutPointString(scrollView.contentOffset),
+        "contentInset": webViewLayoutInsetsString(scrollView.contentInset),
+        "adjustedInset": webViewLayoutInsetsString(scrollView.adjustedContentInset),
+        "zoomScale": webViewLayoutRounded(scrollView.zoomScale),
+        "isDragging": scrollView.isDragging,
+        "isDecelerating": scrollView.isDecelerating,
+        "isTracking": scrollView.isTracking
+    ]
+    if let configuration {
+        payload.merge(
+            webViewLayoutPaginationPayload(configuration: configuration, reason: "state"),
+            uniquingKeysWith: { lhs, _ in lhs }
+        )
+    }
+    return payload
+}
+
+@MainActor
+func webViewLayoutShouldLog(webView: WKWebView, configuration: WebViewPaginationConfiguration? = nil) -> Bool {
+    if configuration?.mode.isPaginated == true {
+        return true
+    }
+    let urlString = webView.url?.absoluteString ?? ""
+    return urlString.hasPrefix("ebook://") || urlString.contains("ebook/")
+}
+#endif
+
 public struct WebViewState: Equatable, Sendable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -1287,6 +1369,15 @@ public final class WebViewPaginationController {
         let resolved = configuration.resolvingEffectivePageLength(using: webView.bounds.size)
         let identity = resolved.structuralIdentity(using: webView.bounds.size)
         let shouldApply = identity != lastAppliedIdentity || hostIdentifier != lastAppliedHostIdentifier
+        #if os(iOS)
+        if webViewLayoutShouldLog(webView: webView, configuration: resolved) {
+            var layoutPayload = webViewLayoutPaginationPayload(configuration: resolved, reason: reason)
+            layoutPayload["host"] = hostIdentifier
+            layoutPayload["willApply"] = shouldApply
+            layoutPayload.merge(webViewLayoutScrollPayload(webView: webView), uniquingKeysWith: { lhs, _ in lhs })
+            webViewLayoutDebugLog("pagination.apply.begin", layoutPayload)
+        }
+        #endif
         if shouldApply {
             try applySelectors(resolved, to: webView)
             lastAppliedConfiguration = resolved
@@ -1316,6 +1407,16 @@ public final class WebViewPaginationController {
             )
         }
         lastPageCount = try queryPageCount(on: webView)
+        #if os(iOS)
+        if webViewLayoutShouldLog(webView: webView, configuration: resolved) {
+            var layoutPayload = webViewLayoutPaginationPayload(configuration: resolved, reason: reason)
+            layoutPayload["host"] = hostIdentifier
+            layoutPayload["applied"] = shouldApply
+            layoutPayload["pageCount"] = lastPageCount ?? -1
+            layoutPayload.merge(webViewLayoutScrollPayload(webView: webView), uniquingKeysWith: { lhs, _ in lhs })
+            webViewLayoutDebugLog("pagination.apply.end", layoutPayload)
+        }
+        #endif
         return currentState(reason: reason)
     }
 
@@ -1324,6 +1425,16 @@ public final class WebViewPaginationController {
         lastUpdatedAt = Date()
         if let webView {
             lastPageCount = try queryPageCount(on: webView)
+            #if os(iOS)
+            let configuration = lastAppliedConfiguration ?? desiredConfiguration
+            if webViewLayoutShouldLog(webView: webView, configuration: configuration) {
+                var layoutPayload = webViewLayoutPaginationPayload(configuration: configuration, reason: reason)
+                layoutPayload["host"] = Self.hostIdentifier(for: webView)
+                layoutPayload["pageCount"] = lastPageCount ?? -1
+                layoutPayload.merge(webViewLayoutScrollPayload(webView: webView), uniquingKeysWith: { lhs, _ in lhs })
+                webViewLayoutDebugLog("pagination.readback", layoutPayload)
+            }
+            #endif
         } else {
             lastPageCount = nil
         }
@@ -1506,6 +1617,9 @@ public class WebViewCoordinator: NSObject {
     internal var accumulatedScrollOffset: CGFloat = 0
     internal var navigationScrollAxis: NavigationScrollAxis = .vertical
     internal var horizontalForwardSign: CGFloat = 1
+#if os(iOS)
+    internal var lastLayoutScrollPageSignature: String?
+#endif
     internal var lastEnvHandlerNames: OrderedSet<String>? = nil
     public let paginationController = WebViewPaginationController()
     
@@ -1909,6 +2023,17 @@ public class WebViewCoordinator: NSObject {
                     "host": paginationController.currentState().mountedHostIdentifier ?? "nil"
                 ]
             )
+            #if os(iOS)
+            if let webView = navigator.webView {
+                var payload = webViewLayoutScrollPayload(
+                    webView: webView,
+                    configuration: paginationController.currentState().appliedConfiguration ?? config.paginationConfiguration
+                )
+                payload["reason"] = reason
+                payload["error"] = error.localizedDescription
+                webViewLayoutDebugLog("pagination.apply.error", payload)
+            }
+            #endif
         }
     }
 
@@ -1926,6 +2051,17 @@ public class WebViewCoordinator: NSObject {
                     "host": paginationController.currentState().mountedHostIdentifier ?? "nil"
                 ]
             )
+            #if os(iOS)
+            if let webView = navigator.webView {
+                var payload = webViewLayoutScrollPayload(
+                    webView: webView,
+                    configuration: paginationController.currentState().appliedConfiguration ?? config.paginationConfiguration
+                )
+                payload["reason"] = reason
+                payload["error"] = error.localizedDescription
+                webViewLayoutDebugLog("pagination.readback.error", payload)
+            }
+            #endif
         }
     }
 
@@ -5599,8 +5735,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             return
         }
         let point = touch.location(in: coordinateView)
-        let hitTestView = clientCoordinateView ?? coordinateView
-        let hitPoint = touch.location(in: hitTestView)
+        let hitTestView = coordinateView
+        let hitPoint = point
+        let rawClientPoint = clientCoordinateView.map { touch.location(in: $0) }
         let windowPoint = touch.location(in: nil)
         let hitTestViewWindowMinY = hitTestView.convert(.zero, to: nil).y
         guard let target = store?.hitTarget(
@@ -5616,7 +5753,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 coordinateView: coordinateView,
                 extra: [
                     "hitPoint": Self.debugPointString(hitPoint),
-                    "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                    "hitBasis": "overlay",
                     "nearest": store?.diagnostics(at: hitPoint, limit: 3) as Any,
                     "nativeLookupEnabled": store?.isEnabled as Any,
                     "targetCount": store?.targetCount as Any,
@@ -5636,7 +5774,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             coordinateView: coordinateView,
             extra: [
                 "hitPoint": Self.debugPointString(hitPoint),
-                "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                "hitBasis": "overlay",
                 "nativeLookupEnabled": store?.isEnabled as Any,
                 "targetCount": store?.targetCount as Any,
                 "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
@@ -5725,7 +5864,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                         "lookupDispatchedOnTouchDown": dispatched,
                         "completedOnTouchDown": dispatched,
                         "hitPoint": Self.debugPointString(hitPoint),
-                        "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                        "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                        "hitBasis": "overlay",
                         "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
                         "segmentTargetTouchesReachWebKit": dispatched ? "blocked.completedOnTouchDown" : "pendingTouchEnd",
                     ]
@@ -5758,7 +5898,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "lookupDispatchedOnTouchDown": dispatched,
                     "completedOnTouchDown": dispatched,
                     "hitPoint": Self.debugPointString(hitPoint),
-                    "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                    "hitBasis": "overlay",
                     "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
                     "segmentTargetTouchesReachWebKit": dispatched ? "blocked.completedOnTouchDown" : "pendingTouchEnd",
                 ]
@@ -5869,8 +6010,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             return
         }
         let point = touch.location(in: coordinateView)
-        let hitTestView = clientCoordinateView ?? coordinateView
-        let hitPoint = touch.location(in: hitTestView)
+        let hitTestView = coordinateView
+        let hitPoint = point
+        let rawClientPoint = clientCoordinateView.map { touch.location(in: $0) }
         let windowPoint = touch.location(in: nil)
         let hitTestViewWindowMinY = hitTestView.convert(.zero, to: nil).y
         let movement = hypot(windowPoint.x - windowStart.x, windowPoint.y - windowStart.y)
@@ -5915,7 +6057,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                         "movement": movement,
                         "duration": duration,
                         "hitPoint": Self.debugPointString(hitPoint),
-                        "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                        "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                        "hitBasis": "overlay",
                         "segmentTargetTouchesReachWebKit": true,
                     ]
                 )
@@ -5935,7 +6078,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "movement": movement,
                 "duration": duration,
                 "hitPoint": Self.debugPointString(hitPoint),
-                "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                "hitBasis": "overlay",
                 "lookupDispatchedOnTouchDown": touchStartDispatchedLookup,
                 "segmentTargetTouchesReachWebKit": "touchStreamMayArrive_clickRecognizerBlocked",
                 "webkitTapRecognizersRequireNativeLookupFailure": true,
@@ -5973,7 +6117,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
            let coordinateView,
            !touchStartDispatchedLookup,
            !touchStartWasActiveTarget {
-            let hitTestView = clientCoordinateView ?? coordinateView
+            let hitTestView = coordinateView
             let dispatched = store?.handleTap(
                 on: target,
                 at: hitPoint,
@@ -5989,7 +6133,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 coordinateView: coordinateView,
                 extra: [
                     "hitPoint": Self.debugPointString(hitPoint),
-                    "hitBasis": hitTestView === coordinateView ? "overlay" : "webView",
+                    "hitBasis": "overlay",
                     "lookupDispatchedOnReset": dispatched,
                     "segmentTargetTouchesReachWebKit": "tapRecognizersAlreadySuppressed",
                 ]
@@ -6440,6 +6584,14 @@ public class WebViewController: UIViewController {
         debugPrint(
             "# BOTTOM stage=webViewController.applyObscuredInsets reason=\(reason) appliedBottom=\(insets.bottom) scrollContentInsetBottom=\(webView.scrollView.contentInset.bottom) scrollAdjustedContentInsetBottom=\(webView.scrollView.adjustedContentInset.bottom) scrollIndicatorInsetBottom=\(webView.scrollView.verticalScrollIndicatorInsets.bottom) contentOffsetY=\(webView.scrollView.contentOffset.y) contentSizeHeight=\(webView.scrollView.contentSize.height) boundsHeight=\(webView.scrollView.bounds.height) webViewID=\(readerLoadObjectIDString(webView))"
         )
+        if webViewLayoutShouldLog(webView: webView) {
+            var payload = webViewLayoutScrollPayload(webView: webView)
+            payload["reason"] = reason
+            payload["appliedInsets"] = webViewLayoutInsetsString(insets)
+            payload["controllerInsets"] = webViewLayoutInsetsString(obscuredInsets)
+            payload["windowSafeArea"] = webViewLayoutInsetsString(view.window?.safeAreaInsets ?? .zero)
+            webViewLayoutDebugLog("obscuredInsets.apply", payload)
+        }
         
         //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
         //            webView.setValue(insets, forKey: "obscuredInsets")
@@ -7494,7 +7646,9 @@ extension WebView: UIViewControllerRepresentable {
             || controller.webView.url?.scheme == "ebook"
             || controller.webView.url?.scheme == "reader-file"
         let proposedTopObscuredInset = max(0, obscuredInsets.top)
-        let resolvedTopObscuredInset = proposedTopObscuredInset
+        let resolvedTopObscuredInset = isBookWebViewUpdate
+            ? max(proposedTopObscuredInset, topSafeAreaInset)
+            : proposedTopObscuredInset
         let incomingBottomObscuredInset = max(0, obscuredInsets.bottom)
         let effectiveIncomingBottomObscuredInset = isBookWebViewUpdate
             ? max(incomingBottomObscuredInset, bottomSafeAreaInset)
@@ -7539,7 +7693,7 @@ extension WebView: UIViewControllerRepresentable {
                     "windowSafeAreaBottom": "\(bottomSafeAreaInset)",
                     "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
                     "topPolicy": isBookWebViewUpdate
-                        ? "ebookIncomingOnlyNoWindowSafeArea"
+                        ? "ebookMaxIncomingWindowSafeArea"
                         : "incomingAsTotalObscured",
                     "proposedTop": "\(proposedTopObscuredInset)",
                     "proposedBottom": "\(proposedObscuredBottomInset)",
@@ -7571,7 +7725,7 @@ extension WebView: UIViewControllerRepresentable {
                 "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
                 "additionalRight": "\(additionalSafeAreaInsets.right)",
                 "topPolicy": isBookWebViewUpdate
-                    ? "ebookIncomingOnlyNoWindowSafeArea"
+                    ? "ebookMaxIncomingWindowSafeArea"
                     : "incomingAsTotalObscured",
                 "resolvedObscuredTop": "\(resolvedObscuredInsets.top)",
                 "resolvedObscuredLeft": "\(resolvedObscuredInsets.left)",
