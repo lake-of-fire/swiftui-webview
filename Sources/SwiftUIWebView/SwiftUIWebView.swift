@@ -12,8 +12,6 @@ import AppKit
 private typealias WebViewSnapshotPlatformImage = NSImage
 #endif
 
-private let lastToolbarBlankNativeToggleDefaultsKey = "ManabiLastToolbarBlankNativeToggleAtMs"
-
 @inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
     guard let start else { return "nil" }
@@ -1211,9 +1209,12 @@ public final class WebViewNativeLookupHitTestStore {
 
     private let hitSlop: CGFloat
     private var entries: [Entry] = []
+    private var nativeTouchElementID: String?
+    private var suppressUnhandledTapUntil: TimeInterval = 0
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
+    public var onActiveLookupBlankTap: (@MainActor () -> Void)?
     public var activeLookupElementID: (@MainActor () -> String?)?
     public var activeElementID: String?
     public var isEnabled = true {
@@ -1224,6 +1225,10 @@ public final class WebViewNativeLookupHitTestStore {
         }
     }
     public var targetCount: Int { entries.count }
+    public var activeNativeTouchElementID: String? { nativeTouchElementID }
+    public var shouldSuppressUnhandledTapForNativeLookup: Bool {
+        nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
+    }
 
     public init(hitSlop: CGFloat = 8) {
         self.hitSlop = hitSlop
@@ -1260,6 +1265,26 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func removeAllTargets() {
         entries.removeAll()
+        nativeTouchElementID = nil
+        suppressUnhandledTapUntil = 0
+    }
+
+    public func closeActiveLookupFromBlankTap() {
+        MainActor.assumeIsolated {
+            onActiveLookupBlankTap?()
+        }
+    }
+
+    public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
+        nativeTouchElementID = target.elementID
+        suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+    }
+
+    public func finishNativeTouchStream(reason _: String) {
+        if nativeTouchElementID != nil {
+            suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+        }
+        nativeTouchElementID = nil
     }
 
     public func hitTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> WebViewNativeLookupHitTarget? {
@@ -2175,7 +2200,6 @@ public class WebViewCoordinator: NSObject {
     private func clearScriptCallerBinding() {
         scriptCaller?.asyncCaller = nil
         scriptCaller?.snapshotCapture = nil
-        scriptCaller?.snapshotCapturer = nil
     }
 
     @MainActor
@@ -2590,18 +2614,23 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
-            let nowMs = Date().timeIntervalSince1970 * 1000
-            let lastToolbarBlankNativeToggleAtMs = UserDefaults.standard.double(forKey: lastToolbarBlankNativeToggleDefaultsKey)
-            let toolbarBlankNativeToggleAgeMs = lastToolbarBlankNativeToggleAtMs > 0 ? nowMs - lastToolbarBlankNativeToggleAtMs : nil
-            let isRecentToolbarBlankNativeToggle = toolbarBlankNativeToggleAgeMs.map { $0 >= 0 && $0 < 2_000 } == true
-            if isRecentToolbarBlankNativeToggle {
+            if navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup {
+                return
+            }
+            let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
+            if hasActiveLookup {
+                navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
             }
 #if DEBUG
+            let body = message.body as? [String: Any]
             debugPrint(
                 "# TABBAR webUnhandledTapHideNav",
                 "current=\(hideNavigationDueToScroll.wrappedValue)",
-                "next=\(!hideNavigationDueToScroll.wrappedValue)"
+                "next=\(!hideNavigationDueToScroll.wrappedValue)",
+                "frame=\(body?["frame"] ?? "nil")",
+                "targetTag=\(body?["targetTag"] ?? "nil")",
+                "targetClosestSegment=\(body?["targetClosestSegment"] ?? "nil")"
             )
 #endif
             withAnimation(.easeOut(duration: 0.18)) {
@@ -4531,20 +4560,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
 enum ScriptCallerError: Error {
     case evaluationTimedOut
-    case snapshotCaptureUnavailable
-    case snapshotCaptureFailed
-}
-
-public struct WebViewSnapshot: Sendable {
-    public var cgImage: CGImage
-    public var size: CGSize
-    public var scale: CGFloat
-
-    public init(cgImage: CGImage, size: CGSize, scale: CGFloat) {
-        self.cgImage = cgImage
-        self.size = size
-        self.scale = scale
-    }
 }
 
 public enum WebViewScriptCallerSnapshotError: Error, Equatable, Sendable {
@@ -4710,7 +4725,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
     var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
-    var snapshotCapturer: (@MainActor @Sendable (CGRect?) async throws -> WebViewSnapshot)? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
@@ -4877,13 +4891,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
         return normalizeJavaScriptResult(result)
-    }
-
-    public func captureSnapshot(rect: CGRect? = nil) async throws -> WebViewSnapshot {
-        guard let snapshotCapturer else {
-            throw ScriptCallerError.snapshotCaptureUnavailable
-        }
-        return try await snapshotCapturer(rect)
     }
 
     @MainActor
@@ -5544,10 +5551,29 @@ fileprivate struct UnhandledTapUserScript {
         return;
     }
 
-    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,mnb-seg,mnb-seg *,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
     const MOVE_THRESHOLD = 8;
     const LONG_PRESS_THRESHOLD_MS = 450;
     const activePointers = new Map();
+
+    function isEbookPage() {
+        try {
+            if (window.manabi_isEbook === true) {
+                return true;
+            }
+            if (window.location?.origin?.startsWith('ebook://')) {
+                return true;
+            }
+            return window.top?.location?.origin?.startsWith('ebook://') === true;
+        } catch (_error) {
+            return window.manabi_isEbook === true
+                || window.location?.origin?.startsWith('ebook://') === true;
+        }
+    }
+
+    if (isEbookPage()) {
+        return;
+    }
 
     function selectionText() {
         const sel = window.getSelection();
@@ -5591,10 +5617,35 @@ fileprivate struct UnhandledTapUserScript {
             startX: event.clientX ?? 0,
             startY: event.clientY ?? 0,
             moved: false,
+            suppressUnhandledTap: false,
             startTime: performance.now(),
             startSelection: selectionText(),
         });
     }
+
+    window.__manabiSuppressCurrentUnhandledTapHideNavigation = function(clientX, clientY) {
+        const x = Number(clientX);
+        const y = Number(clientY);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            return false;
+        }
+        for (const entry of activePointers.values()) {
+            if (Math.hypot(x - entry.startX, y - entry.startY) <= MOVE_THRESHOLD) {
+                entry.suppressUnhandledTap = true;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    window.__manabiSuppressActiveUnhandledTapHideNavigation = function() {
+        let markedCount = 0;
+        for (const entry of activePointers.values()) {
+            entry.suppressUnhandledTap = true;
+            markedCount += 1;
+        }
+        return markedCount > 0;
+    };
 
     function handlePointerDown(event) {
         if (event.defaultPrevented || event.button > 0) {
@@ -5623,6 +5674,9 @@ fileprivate struct UnhandledTapUserScript {
         const newSelection = selectionText();
         const selectionChanged = newSelection.length > 0 && newSelection !== entry.startSelection;
         if (entry.moved || duration > LONG_PRESS_THRESHOLD_MS || selectionChanged) {
+            return;
+        }
+        if (entry.suppressUnhandledTap === true) {
             return;
         }
         const suppressUntil = Number(window.__manabiSuppressUnhandledTapHideNavigationUntil || 0);
@@ -6241,6 +6295,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartPoint = point
         touchStartTime = event.timestamp
         touchStartTarget = target
+        store?.beginNativeTouchStream(on: target)
         let activeLookupElementID = MainActor.assumeIsolated {
             store?.activeLookupElementID?()
         }
@@ -6497,6 +6552,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartWasActiveTarget = false
         touchStartDispatchedLookup = false
         touchStartOpenedDifferentLookup = false
+        store?.finishNativeTouchStream(reason: "resetTrackingState")
         if clearPressedTarget {
             touchStartOverlay?.clearPressedTarget()
         }
@@ -7305,22 +7361,6 @@ extension WebView: UIViewControllerRepresentable {
             }
         }
         context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
-        context.coordinator.scriptCaller?.snapshotCapturer = { @MainActor [weak webView] rect in
-            guard let webView else {
-                throw ScriptCallerError.snapshotCaptureUnavailable
-            }
-            let configuration = WKSnapshotConfiguration()
-            configuration.rect = rect ?? webView.bounds
-            let image = await withCheckedContinuation { continuation in
-                webView.takeSnapshot(with: configuration) { image, _ in
-                    continuation.resume(returning: image)
-                }
-            }
-            guard let image, let cgImage = image.cgImage else {
-                throw ScriptCallerError.snapshotCaptureFailed
-            }
-            return WebViewSnapshot(cgImage: cgImage, size: image.size, scale: image.scale)
-        }
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         refreshDarkModeSetting(webView: webView)
@@ -8021,24 +8061,6 @@ extension WebView: NSViewRepresentable {
                       String(format: "elapsed=%.3fs", elapsed))
                 throw error
             }
-        }
-        context.coordinator.scriptCaller?.snapshotCapturer = { @MainActor [weak webView] rect in
-            guard let webView else {
-                throw ScriptCallerError.snapshotCaptureUnavailable
-            }
-            let configuration = WKSnapshotConfiguration()
-            configuration.rect = rect ?? webView.bounds
-            let image = await withCheckedContinuation { continuation in
-                webView.takeSnapshot(with: configuration) { image, _ in
-                    continuation.resume(returning: image)
-                }
-            }
-            var proposedRect = CGRect(origin: .zero, size: image?.size ?? .zero)
-            guard let image,
-                  let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) else {
-                throw ScriptCallerError.snapshotCaptureFailed
-            }
-            return WebViewSnapshot(cgImage: cgImage, size: image.size, scale: 1)
         }
         context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
             guard let webView else { return }
