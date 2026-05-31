@@ -5482,7 +5482,18 @@ fileprivate struct TextSelectionUserScript {
 
 public struct WebViewConfig: Sendable {
     public static let `default` = WebViewConfig()
-    
+    public static let transparentNonScrollingOverlay = WebViewConfig(
+        javaScriptEnabled: true,
+        allowsBackForwardNavigationGestures: false,
+        dataDetectorsEnabled: false,
+        isScrollEnabled: false,
+        isOpaque: false,
+        backgroundColor: .clear,
+        adjustsScrollViewContentInsetsForSafeArea: false,
+        nativeLookupHitTestingEnabled: false,
+        paginationConfiguration: .disabled
+    )
+
     public let javaScriptEnabled: Bool
     public let contentRules: String?
     public let allowsBackForwardNavigationGestures: Bool

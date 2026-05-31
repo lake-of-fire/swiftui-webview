@@ -44,6 +44,10 @@ public final class WebViewPool: ObservableObject {
 
     private var targetCount: Int { warmUpCount + keepAliveCount }
 
+    public var retainedCount: Int {
+        warmedUpObjects.count
+    }
+
     public init(warmUpCount: Int = 0, keepAliveCount: Int = 0) {
         self.warmUpCount = warmUpCount
         self.keepAliveCount = keepAliveCount
@@ -145,6 +149,16 @@ public final class WebViewPool: ObservableObject {
                 extra: ["webView": webViewIdentifier(webView)]
             )
         }
+    }
+
+    public func removeAll(resetURL: URL? = nil) {
+        let effectiveResetURL = resetURL ?? defaultResetURL
+        for webView in warmedUpObjects {
+            onDequeue?(webView)
+            webView.resetForReuse(resetURL: effectiveResetURL)
+        }
+        warmedUpObjects.removeAll()
+        log(event: "removeAll")
     }
 
     private func log(event: String, extra: [String: Any] = [:]) {
