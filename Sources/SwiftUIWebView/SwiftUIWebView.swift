@@ -6,8 +6,10 @@ import LRUCache
 import Foundation
 #if os(iOS)
 import UIKit
+private typealias WebViewSnapshotPlatformImage = UIImage
 #elseif os(macOS)
 import AppKit
+private typealias WebViewSnapshotPlatformImage = NSImage
 #endif
 
 private let lastToolbarBlankNativeToggleDefaultsKey = "ManabiLastToolbarBlankNativeToggleAtMs"
@@ -2135,6 +2137,7 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     private func clearScriptCallerBinding() {
         scriptCaller?.asyncCaller = nil
+        scriptCaller?.snapshotCapture = nil
     }
 
     @MainActor
@@ -4492,6 +4495,115 @@ enum ScriptCallerError: Error {
     case evaluationTimedOut
 }
 
+public enum WebViewScriptCallerSnapshotError: Error, Equatable, Sendable {
+    case unavailable
+    case emptyRect
+    case captureFailed(String)
+    case imageConversionFailed
+}
+
+extension WebViewScriptCallerSnapshotError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            return "No mounted WKWebView is available for snapshot capture."
+        case .emptyRect:
+            return "The requested snapshot rect is empty or outside the WKWebView bounds."
+        case .captureFailed(let message):
+            return "WKWebView snapshot capture failed: \(message)"
+        case .imageConversionFailed:
+            return "WKWebView snapshot capture did not produce a CGImage."
+        }
+    }
+}
+
+public struct WebViewSnapshotImage: @unchecked Sendable {
+    /// Captured bitmap.
+    public let cgImage: CGImage
+    /// Captured image bounds in pixels. This matches the CGImage pixel dimensions.
+    public let bounds: CGRect
+    /// Pixel-per-point scale represented by the returned image.
+    public let scale: CGFloat
+    /// Source rect in WKWebView view-coordinate points.
+    public let capturedRect: CGRect
+
+    public init(cgImage: CGImage, bounds: CGRect, scale: CGFloat, capturedRect: CGRect) {
+        self.cgImage = cgImage
+        self.bounds = bounds
+        self.scale = scale
+        self.capturedRect = capturedRect
+    }
+}
+
+@MainActor
+private func makeWebViewSnapshotCapture(
+    for webView: WKWebView
+) -> @MainActor @Sendable (CGRect?) async throws -> WebViewSnapshotImage {
+    return { [weak webView] requestedRect in
+        guard let webView else {
+            throw WebViewScriptCallerSnapshotError.unavailable
+        }
+
+        let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: webView.bounds)
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = capturedRect
+        // WKSnapshotConfiguration.snapshotWidth is in points. Requesting the rect width preserves
+        // the native backing scale while keeping the returned bitmap aligned with view coordinates.
+        configuration.snapshotWidth = NSNumber(value: Double(capturedRect.width))
+
+        let image = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebViewSnapshotPlatformImage, Error>) in
+            webView.takeSnapshot(with: configuration) { image, error in
+                if let error {
+                    continuation.resume(throwing: WebViewScriptCallerSnapshotError.captureFailed(error.localizedDescription))
+                } else if let image {
+                    continuation.resume(returning: image)
+                } else {
+                    continuation.resume(throwing: WebViewScriptCallerSnapshotError.imageConversionFailed)
+                }
+            }
+        }
+
+        guard let cgImage = webViewSnapshotCGImage(from: image) else {
+            throw WebViewScriptCallerSnapshotError.imageConversionFailed
+        }
+
+        let fallbackScale = webViewSnapshotNativeScale(for: webView)
+        let scale = WebViewScriptCaller.resolvedSnapshotScale(
+            cgImage: cgImage,
+            capturedRect: capturedRect,
+            fallbackScale: fallbackScale
+        )
+        let bounds = CGRect(
+            origin: .zero,
+            size: CGSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
+        )
+        return WebViewSnapshotImage(
+            cgImage: cgImage,
+            bounds: bounds,
+            scale: scale,
+            capturedRect: capturedRect
+        )
+    }
+}
+
+private func webViewSnapshotCGImage(from image: WebViewSnapshotPlatformImage) -> CGImage? {
+#if os(iOS)
+    image.cgImage
+#elseif os(macOS)
+    var proposedRect = CGRect(origin: .zero, size: image.size)
+    return image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil)
+#endif
+}
+
+@MainActor
+private func webViewSnapshotNativeScale(for webView: WKWebView) -> CGFloat {
+#if os(iOS)
+    return webView.window?.screen.scale ?? UIScreen.main.scale
+#elseif os(macOS)
+    return webView.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+#endif
+}
+
 @MainActor
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
     struct JavaScriptEvaluationResult: @unchecked Sendable {
@@ -4507,7 +4619,10 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     /// Indicates whether the backing WKWebView has registered an async JavaScript caller.
     @Published public private(set) var hasAsyncCaller = false
+    /// Indicates whether the backing WKWebView has registered a snapshot capture caller.
+    @Published public private(set) var hasSnapshotCapture = false
     private var asyncCallerReadinessGeneration = 0
+    private var snapshotCaptureReadinessGeneration = 0
 
     var asyncCaller: ( @Sendable
                        (
@@ -4525,6 +4640,19 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 guard let self, self.asyncCallerReadinessGeneration == generation else { return }
                 if self.hasAsyncCaller != isReady {
                     self.hasAsyncCaller = isReady
+                }
+            }
+        }
+    }
+    var snapshotCapture: (@MainActor @Sendable (CGRect?) async throws -> WebViewSnapshotImage)? = nil {
+        didSet {
+            snapshotCaptureReadinessGeneration += 1
+            let generation = snapshotCaptureReadinessGeneration
+            let isReady = snapshotCapture != nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.snapshotCaptureReadinessGeneration == generation else { return }
+                if self.hasSnapshotCapture != isReady {
+                    self.hasSnapshotCapture = isReady
                 }
             }
         }
@@ -4696,6 +4824,44 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
         return normalizeJavaScriptResult(result)
+    }
+
+    @MainActor
+    public func captureSnapshot(rect: CGRect? = nil) async throws -> WebViewSnapshotImage {
+        guard let snapshotCapture else {
+            throw WebViewScriptCallerSnapshotError.unavailable
+        }
+        return try await snapshotCapture(rect)
+    }
+
+    nonisolated static func resolvedSnapshotRect(_ requestedRect: CGRect?, in bounds: CGRect) throws -> CGRect {
+        guard bounds.width > 0, bounds.height > 0 else {
+            throw WebViewScriptCallerSnapshotError.emptyRect
+        }
+
+        let resolvedRequest: CGRect
+        if let requestedRect, !requestedRect.isNull {
+            resolvedRequest = requestedRect
+        } else {
+            resolvedRequest = bounds
+        }
+
+        let clamped = resolvedRequest.standardized.intersection(bounds.standardized)
+        guard !clamped.isNull, clamped.width > 0, clamped.height > 0 else {
+            throw WebViewScriptCallerSnapshotError.emptyRect
+        }
+        return clamped
+    }
+
+    nonisolated static func resolvedSnapshotScale(cgImage: CGImage, capturedRect: CGRect, fallbackScale: CGFloat) -> CGFloat {
+        guard capturedRect.width > 0 else {
+            return max(fallbackScale, 1)
+        }
+        let imageScale = CGFloat(cgImage.width) / capturedRect.width
+        guard imageScale.isFinite, imageScale > 0 else {
+            return max(fallbackScale, 1)
+        }
+        return imageScale
     }
 
     @MainActor
@@ -7078,6 +7244,7 @@ extension WebView: UIViewControllerRepresentable {
                 return WebViewScriptCaller.JavaScriptEvaluationResult(result)
             }
         }
+        context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         refreshDarkModeSetting(webView: webView)
@@ -7784,6 +7951,7 @@ extension WebView: NSViewRepresentable {
             let resolvedWorld = world ?? .page
             webView.evaluateJavaScript(js, in: frame, in: resolvedWorld, completionHandler: nil)
         }
+        context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
         
         refreshDarkModeSetting(webView: webView)
         
