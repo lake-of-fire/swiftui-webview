@@ -22,45 +22,16 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
 
 @inline(__always)
 private func safeAreaLog(_ stage: String, _ metadata: [String: String] = [:]) {
-#if DEBUG
-    let details = metadata
-        .sorted { $0.key < $1.key }
-        .map { "\($0.key)=\($0.value)" }
-        .joined(separator: " ")
-    if details.isEmpty {
-        debugPrint("# INSET \(stage)")
-    } else {
-        debugPrint("# INSET \(stage) \(details)")
-    }
-#else
     _ = stage
     _ = metadata
-#endif
 }
 
-private var bookLogSignatures = Set<String>()
 private var popoverWebViewInsetLogSignatures = Set<String>()
 
 @inline(__always)
 private func bookLog(_ stage: String, _ metadata: [String: String] = [:]) {
-#if DEBUG
-    let details = metadata
-        .sorted { $0.key < $1.key }
-        .map { "\($0.key)=\($0.value)" }
-        .joined(separator: " ")
-    if details.isEmpty {
-        let signature = stage
-        guard bookLogSignatures.insert(signature).inserted else { return }
-        debugPrint("# BOOK \(stage)")
-    } else {
-        let signature = "\(stage) \(details)"
-        guard bookLogSignatures.insert(signature).inserted else { return }
-        debugPrint("# BOOK \(signature)")
-    }
-#else
     _ = stage
     _ = metadata
-#endif
 }
 
 @inline(__always)
@@ -2338,19 +2309,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
             }
-#if DEBUG
-            let body = message.body as? [String: Any]
-            debugPrint(
-                "# INSET webUnhandledTapHideNav",
-                "current=\(hideNavigationDueToScroll.wrappedValue)",
-                "next=\(!hideNavigationDueToScroll.wrappedValue)",
-                "frame=\(body?["frame"] ?? "nil")",
-                "targetTag=\(body?["targetTag"] ?? "nil")",
-                "targetClosestSegment=\(body?["targetClosestSegment"] ?? "nil")",
-                "clientX=\(body?["clientX"] ?? "nil")",
-                "clientY=\(body?["clientY"] ?? "nil")"
-            )
-#endif
             if let body = message.body as? [String: Any],
                let requestedHideNavigation = body["hideNavigationDueToScroll"] as? Bool {
                 withAnimation(.easeOut(duration: 0.18)) {
