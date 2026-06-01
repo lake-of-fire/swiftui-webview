@@ -2633,8 +2633,15 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 "targetClosestSegment=\(body?["targetClosestSegment"] ?? "nil")"
             )
 #endif
-            withAnimation(.easeOut(duration: 0.18)) {
-                hideNavigationDueToScroll.wrappedValue.toggle()
+            if let body = message.body as? [String: Any],
+               let requestedHideNavigation = body["hideNavigationDueToScroll"] as? Bool {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    hideNavigationDueToScroll.wrappedValue = requestedHideNavigation
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    hideNavigationDueToScroll.wrappedValue.toggle()
+                }
             }
             return
         } else if message.name == "swiftUIWebViewTextSelection" {
@@ -5596,10 +5603,6 @@ fileprivate struct UnhandledTapUserScript {
         if (element.tabIndex >= 0 && element.getAttribute('tabindex') !== '-1') {
             return true;
         }
-        const style = window.getComputedStyle(element);
-        if (style && style.cursor === 'pointer') {
-            return true;
-        }
         return false;
     }
 
@@ -5692,10 +5695,50 @@ fileprivate struct UnhandledTapUserScript {
         activePointers.delete(event.pointerId);
     }
 
+    let lastScrollPosition = { x: window.scrollX || 0, y: window.scrollY || 0 };
+    let accumulatedScroll = { value: 0 };
+    const SCROLL_THRESHOLD = 24;
+    function postHideNavigationForScroll(hidden, reason) {
+        try {
+            window.webkit.messageHandlers[handlerName].postMessage({
+                frame: window === window.top ? 'top' : 'child',
+                targetTag: null,
+                targetClosestSegment: null,
+                clientX: null,
+                clientY: null,
+                hideNavigationDueToScroll: hidden,
+                reason
+            });
+        } catch (_error) {}
+    }
+
+    function handleDocumentScroll() {
+        const currentX = window.scrollX || 0;
+        const currentY = window.scrollY || 0;
+        const dx = currentX - lastScrollPosition.x;
+        const dy = currentY - lastScrollPosition.y;
+        lastScrollPosition.x = currentX;
+        lastScrollPosition.y = currentY;
+
+        const delta = Math.abs(dy) >= Math.abs(dx) ? dy : dx;
+        if (Math.abs(delta) < 0.5) {
+            return;
+        }
+        accumulatedScroll.value += delta;
+        if (accumulatedScroll.value > SCROLL_THRESHOLD) {
+            postHideNavigationForScroll(true, 'documentScrollDown');
+            accumulatedScroll.value = 0;
+        } else if (accumulatedScroll.value < -SCROLL_THRESHOLD) {
+            postHideNavigationForScroll(false, 'documentScrollUp');
+            accumulatedScroll.value = 0;
+        }
+    }
+
     window.addEventListener('pointerdown', handlePointerDown, { capture: true, passive: true });
     window.addEventListener('pointermove', handlePointerMove, { capture: true, passive: true });
     window.addEventListener('pointerup', handlePointerUp, { capture: true, passive: true });
     window.addEventListener('pointercancel', handlePointerCancel, { capture: true, passive: true });
+    window.addEventListener('scroll', handleDocumentScroll, { capture: true, passive: true });
 })();
 """
         userScript = WebViewUserScript(
