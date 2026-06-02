@@ -4365,11 +4365,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                       nsError.userInfo["WKJavaScriptExceptionMessage"] as? String == "Cannot execute JavaScript in this document" {
                 result = nil
                 handled = true
-#if DEBUG
-                debugPrint(
-                    "# EBOOKBUG {\"event\":\"native-js-eval-stale-document\",\"domain\":\"\(nsError.domain)\",\"code\":\(nsError.code),\"description\":\"\(nsError.localizedDescription)\",\"frameURL\":\"\(frame?.request.url?.absoluteString ?? "<nil>")\",\"jsPrefix\":\"\(String(js.prefix(120)).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\"}"
-                )
-#endif
             }
             if !handled {
 #if DEBUG

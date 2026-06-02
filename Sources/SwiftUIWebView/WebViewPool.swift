@@ -149,25 +149,8 @@ public final class WebViewPool: ObservableObject {
     }
 
     private func log(event: String, extra: [String: Any] = [:]) {
-#if DEBUG
-        guard let debugLabel else { return }
-        var payload: [String: Any] = [
-            "label": debugLabel,
-            "pool": poolIdentifier,
-            "target": targetCount,
-            "warmUpCount": warmUpCount,
-            "keepAliveCount": keepAliveCount,
-            "warmedCount": warmedUpObjects.count
-        ]
-        for (key, value) in extra {
-            payload[key] = value
-        }
-        debugPrint("# LOOKUPPREWARM \(event)", payload)
-#endif
-    }
-
-    private var poolIdentifier: String {
-        String(describing: ObjectIdentifier(self))
+        _ = event
+        _ = extra
     }
 
     private func webViewIdentifier(_ webView: EnhancedWKWebView) -> String {
