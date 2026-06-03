@@ -1474,7 +1474,7 @@ public final class WebViewNativeLookupHitTestStore {
         let inflatedCandidate = exactCandidate == nil ? bestCandidate(at: point, usingInflatedRects: true) : nil
         guard let candidate = exactCandidate ?? inflatedCandidate else {
             debugPrint(
-                "# POPOVER nativeHitTargets.tapMiss",
+                "POPOVER nativeHitTargets.tapMiss",
                 [
                     "point": Self.debugPointString(point),
                     "containerSize": containerSize.map(Self.debugSizeString) as Any,
@@ -1493,7 +1493,7 @@ public final class WebViewNativeLookupHitTestStore {
             return false
         }
         debugPrint(
-            "# POPOVER nativeHitTargets.tapHit",
+            "POPOVER nativeHitTargets.tapHit",
             [
                 "point": Self.debugPointString(point),
                 "containerSize": containerSize.map(Self.debugSizeString) as Any,
@@ -1535,7 +1535,7 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func handleTap(on target: WebViewNativeLookupHitTarget, at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
         debugPrint(
-            "# POPOVER nativeHitTargets.tapHit",
+            "POPOVER nativeHitTargets.tapHit",
             [
                 "point": Self.debugPointString(point),
                 "containerSize": containerSize.map(Self.debugSizeString) as Any,
@@ -6665,7 +6665,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["rects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4))
             payload["hitRects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4))
         }
-        debugPrint("# POPOVER nativeGesture.touchDelivery", payload)
+        debugPrint("POPOVER nativeGesture.touchDelivery", payload)
         debugPrint("# MAY15 nativeHitTargets.touchDelivery", payload)
     }
 
