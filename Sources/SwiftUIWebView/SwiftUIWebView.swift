@@ -47,22 +47,42 @@ private func lookupLog(_ stage: String, _ metadata: [String: String] = [:]) {
 }
 
 #if os(iOS)
-private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, in view: UIView) {
-    if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
-        scrollView.topEdgeEffect.isHidden = isHidden
-    }
-    view.subviews.forEach { applyTopScrollEdgeEffectHidden(isHidden, in: $0) }
+private func hideNavLog(_ stage: String, _ metadata: [String: String] = [:]) {
+    print((["# HIDENAV", "stage=\(stage)"] + metadata.map { "\($0.key)=\($0.value)" }).joined(separator: " "))
 }
 
-private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, to webView: WKWebView) {
-    applyTopScrollEdgeEffectHidden(isHidden, in: webView)
+@discardableResult
+private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, in view: UIView) -> Int {
+    var appliedCount = 0
+    if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
+        scrollView.topEdgeEffect.isHidden = isHidden
+        appliedCount += 1
+    }
+    for subview in view.subviews {
+        appliedCount += applyTopScrollEdgeEffectHidden(isHidden, in: subview)
+    }
+    return appliedCount
+}
+
+private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, to webView: WKWebView, reason: String) {
+    let descendantCount = applyTopScrollEdgeEffectHidden(isHidden, in: webView)
+    var ancestorCount = 0
     var ancestor = webView.superview
     while let view = ancestor {
         if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
             scrollView.topEdgeEffect.isHidden = isHidden
+            ancestorCount += 1
         }
         ancestor = view.superview
     }
+    hideNavLog("webView.topEdgeEffect.apply", [
+        "hidden": "\(isHidden)",
+        "reason": reason,
+        "webViewID": "\(ObjectIdentifier(webView))",
+        "descendantScrollViews": "\(descendantCount)",
+        "ancestorScrollViews": "\(ancestorCount)",
+        "url": webView.url?.absoluteString ?? "nil",
+    ])
 }
 #endif
 
@@ -5544,19 +5564,19 @@ public class EnhancedWKWebView: WKWebView {
 #elseif os(iOS)
     public override func didMoveToWindow() {
         super.didMoveToWindow()
-        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
+        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self, reason: "didMoveToWindow")
         onDidMoveToWindow?(window != nil || superview != nil)
     }
 
     public override func didMoveToSuperview() {
         super.didMoveToSuperview()
-        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
+        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self, reason: "didMoveToSuperview")
         onDidMoveToWindow?(window != nil || superview != nil)
     }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
-        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
+        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self, reason: "layoutSubviews")
     }
 #endif
 
@@ -7356,7 +7376,7 @@ extension WebView: UIViewControllerRepresentable {
         webView.scrollView.isOpaque = config.isOpaque
 #if os(iOS)
         webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
-        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView)
+        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView, reason: "makeUIView")
 #endif
         if #available(iOS 15.0, *) {
             webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: false)
@@ -7417,7 +7437,7 @@ extension WebView: UIViewControllerRepresentable {
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
 #if os(iOS)
         webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
-        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView)
+        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView, reason: "configureWebView")
 #endif
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
@@ -7637,11 +7657,22 @@ extension WebView: UIViewControllerRepresentable {
             controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
 #if os(iOS)
             controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
-            applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView)
+            applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView, reason: "updateUIView.configurationChanged")
 #endif
             applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
             context.coordinator.lastAppliedConfigurationState = currentConfigurationState
         }
+#if os(iOS)
+        if controller.webView.hidesTopScrollEdgeEffect != config.hidesTopScrollEdgeEffect {
+            hideNavLog("webView.topEdgeEffect.propertyChanged", [
+                "old": "\(controller.webView.hidesTopScrollEdgeEffect)",
+                "new": "\(config.hidesTopScrollEdgeEffect)",
+                "webViewID": "\(ObjectIdentifier(controller.webView))",
+            ])
+        }
+        controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
+        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView, reason: "updateUIView.always")
+#endif
         
         //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
