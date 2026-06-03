@@ -36,21 +36,8 @@ private func bookLog(_ stage: String, _ metadata: [String: String] = [:]) {
 
 @inline(__always)
 private func popoverWebViewInsetLog(_ metadata: [String: String], force: Bool = false) {
-#if DEBUG
-    let details = metadata
-        .sorted { $0.key < $1.key }
-        .map { "\($0.key)=\($0.value)" }
-        .joined(separator: " ")
-    if force {
-        popoverWebViewInsetLogSignatures.insert(details)
-    } else {
-        guard popoverWebViewInsetLogSignatures.insert(details).inserted else { return }
-    }
-    debugPrint("# POPOVER webView.insets \(details)")
-#else
     _ = metadata
     _ = force
-#endif
 }
 
 @inline(__always)
@@ -568,14 +555,8 @@ private func webViewPaginationDebugLog(_ stage: String, _ metadata: [String: Any
 
 @inline(__always)
 func webViewLayoutDebugLog(_ stage: String, _ metadata: [String: Any] = [:]) {
-    #if DEBUG
-    var payload = metadata
-    payload["stage"] = stage
-    Swift.debugPrint("# LAYOUT", payload)
-    #else
     _ = stage
     _ = metadata
-    #endif
 }
 
 func webViewLayoutRounded(_ value: CGFloat) -> Double {
@@ -2291,17 +2272,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
             if navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup {
-                #if DEBUG
-                let body = message.body as? [String: Any]
-                debugPrint(
-                    "# POPOVER webUnhandledTap.skip",
-                    "reason=nativeLookupTouch",
-                    "activeNative=\(navigator.nativeLookupHitTesting.activeNativeTouchElementID ?? "nil")",
-                    "targetClosestSegment=\(body?["targetClosestSegment"] ?? "nil")",
-                    "clientX=\(body?["clientX"] ?? "nil")",
-                    "clientY=\(body?["clientY"] ?? "nil")"
-                )
-                #endif
                 return
             }
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
@@ -4972,12 +4942,8 @@ fileprivate struct UnhandledTapUserScript {
     const activePointers = new Map();
 
     function logPopover(stage, payload = {}) {
-        try {
-            window.webkit?.messageHandlers?.print?.postMessage?.({
-                message: `# POPOVER unhandledTap.${stage}`,
-                ...payload,
-            });
-        } catch (_error) {}
+        void stage;
+        void payload;
     }
 
     function isEbookPage() {
@@ -6348,7 +6314,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["payload"] = target.lookupPayload != nil
             payload["frame"] = target.frameInfo != nil
         }
-        debugPrint("# POPOVER nativeGesture.\(stage)", payload)
+        _ = payload
         #else
         _ = stage
         _ = verdict
@@ -6826,19 +6792,6 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: hitTestLayoutGuide.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
-        #if DEBUG
-        debugPrint(
-            "# POPOVER nativeHitTestOverlay.attach",
-            [
-                "webViewID": readerLoadObjectIDString(webView),
-                "safeTop": view.safeAreaInsets.top,
-                "safeBottom": view.safeAreaInsets.bottom,
-                "surface": "safeAreaLayoutGuide",
-                "hitBasis": "webView",
-                "captures": capturesSegmentTouchesInOverlay
-            ] as [String: Any]
-        )
-        #endif
     }
 
     @MainActor
