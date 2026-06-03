@@ -12,6 +12,26 @@ import AppKit
 private typealias WebViewSnapshotPlatformImage = NSImage
 #endif
 
+#if os(iOS)
+private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, in view: UIView) {
+    if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
+        scrollView.topEdgeEffect.isHidden = isHidden
+    }
+    view.subviews.forEach { applyTopScrollEdgeEffectHidden(isHidden, in: $0) }
+}
+
+private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, to webView: WKWebView) {
+    applyTopScrollEdgeEffectHidden(isHidden, in: webView)
+    var ancestor = webView.superview
+    while let view = ancestor {
+        if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
+            scrollView.topEdgeEffect.isHidden = isHidden
+        }
+        ancestor = view.superview
+    }
+}
+#endif
+
 @inline(__always)
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
     guard let start else { return "nil" }
@@ -5829,6 +5849,7 @@ public struct WebViewConfig: Sendable {
     public let usesSampledPageTopColorForUnderPageBackground: Bool
     public let usesConfiguredBackgroundForReaderDocuments: Bool
     public let adjustsScrollViewContentInsetsForSafeArea: Bool
+    public let hidesTopScrollEdgeEffect: Bool
     public let nativeLookupHitTestingEnabled: Bool
     public let userScripts: [WebViewUserScript]
     public let darkModeSetting: DarkModeSetting
@@ -5848,6 +5869,7 @@ public struct WebViewConfig: Sendable {
         usesSampledPageTopColorForUnderPageBackground: Bool = false,
         usesConfiguredBackgroundForReaderDocuments: Bool = false,
         adjustsScrollViewContentInsetsForSafeArea: Bool = true,
+        hidesTopScrollEdgeEffect: Bool = false,
         nativeLookupHitTestingEnabled: Bool = true,
         userScripts: [WebViewUserScript] = [],
         darkModeSetting: DarkModeSetting = .system,
@@ -5866,10 +5888,34 @@ public struct WebViewConfig: Sendable {
         self.usesSampledPageTopColorForUnderPageBackground = usesSampledPageTopColorForUnderPageBackground
         self.usesConfiguredBackgroundForReaderDocuments = usesConfiguredBackgroundForReaderDocuments
         self.adjustsScrollViewContentInsetsForSafeArea = adjustsScrollViewContentInsetsForSafeArea
+        self.hidesTopScrollEdgeEffect = hidesTopScrollEdgeEffect
         self.nativeLookupHitTestingEnabled = nativeLookupHitTestingEnabled
         self.userScripts = userScripts
         self.darkModeSetting = darkModeSetting
         self.paginationConfiguration = paginationConfiguration
+    }
+
+    public func withHidesTopScrollEdgeEffect(_ hidesTopScrollEdgeEffect: Bool) -> WebViewConfig {
+        WebViewConfig(
+            javaScriptEnabled: javaScriptEnabled,
+            contentRules: contentRules,
+            allowsBackForwardNavigationGestures: allowsBackForwardNavigationGestures,
+            allowsInlineMediaPlayback: allowsInlineMediaPlayback,
+            mediaTypesRequiringUserActionForPlayback: mediaTypesRequiringUserActionForPlayback,
+            dataDetectorsEnabled: dataDetectorsEnabled,
+            isScrollEnabled: isScrollEnabled,
+            pageZoom: pageZoom,
+            isOpaque: isOpaque,
+            backgroundColor: backgroundColor,
+            usesSampledPageTopColorForUnderPageBackground: usesSampledPageTopColorForUnderPageBackground,
+            usesConfiguredBackgroundForReaderDocuments: usesConfiguredBackgroundForReaderDocuments,
+            adjustsScrollViewContentInsetsForSafeArea: adjustsScrollViewContentInsetsForSafeArea,
+            hidesTopScrollEdgeEffect: hidesTopScrollEdgeEffect,
+            nativeLookupHitTestingEnabled: nativeLookupHitTestingEnabled,
+            userScripts: userScripts,
+            darkModeSetting: darkModeSetting,
+            paginationConfiguration: paginationConfiguration
+        )
     }
 }
 
@@ -6025,6 +6071,9 @@ enum PendingRequestLoadDisposition: Equatable {
 public class EnhancedWKWebView: WKWebView {
     var persistedUserScriptsSignature: String?
     var persistedAppliedContentRules: String?
+#if os(iOS)
+    var hidesTopScrollEdgeEffect = false
+#endif
     public var onDidMoveToWindow: ((Bool) -> Void)?
 
     public override init(frame: CGRect, configuration: WKWebViewConfiguration) {
@@ -6050,12 +6099,19 @@ public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
     public override func didMoveToWindow() {
         super.didMoveToWindow()
+        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
         onDidMoveToWindow?(window != nil || superview != nil)
     }
 
     public override func didMoveToSuperview() {
         super.didMoveToSuperview()
+        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
         onDidMoveToWindow?(window != nil || superview != nil)
+    }
+
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+        applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
     }
 
     var buildMenu: BuildMenuType?
@@ -7309,6 +7365,10 @@ extension WebView: UIViewControllerRepresentable {
             webView.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
         }
         webView.scrollView.isOpaque = config.isOpaque
+#if os(iOS)
+        webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
+        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView)
+#endif
         if #available(iOS 15.0, *) {
             webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: false)
         }
@@ -7352,6 +7412,10 @@ extension WebView: UIViewControllerRepresentable {
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
+#if os(iOS)
+        webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
+        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView)
+#endif
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
@@ -7652,6 +7716,10 @@ extension WebView: UIViewControllerRepresentable {
         controller.webView.scrollView.alwaysBounceVertical = bounces
         controller.webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
         controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
+#if os(iOS)
+        controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
+        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView)
+#endif
         applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
         
