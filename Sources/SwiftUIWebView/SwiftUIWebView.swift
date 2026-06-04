@@ -52,34 +52,47 @@ private func hideNavLog(_ stage: String, _ metadata: [String: String] = [:]) {
 }
 
 @discardableResult
-private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, in view: UIView) -> Int {
+private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, in view: UIView) -> (applied: Int, changed: Int) {
     var appliedCount = 0
+    var changedCount = 0
     if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
+        if scrollView.topEdgeEffect.isHidden != isHidden {
+            changedCount += 1
+        }
         scrollView.topEdgeEffect.isHidden = isHidden
         appliedCount += 1
     }
     for subview in view.subviews {
-        appliedCount += applyTopScrollEdgeEffectHidden(isHidden, in: subview)
+        let result = applyTopScrollEdgeEffectHidden(isHidden, in: subview)
+        appliedCount += result.applied
+        changedCount += result.changed
     }
-    return appliedCount
+    return (appliedCount, changedCount)
 }
 
 private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, to webView: WKWebView, reason: String) {
-    let descendantCount = applyTopScrollEdgeEffectHidden(isHidden, in: webView)
+    let descendantResult = applyTopScrollEdgeEffectHidden(isHidden, in: webView)
     var ancestorCount = 0
+    var changedAncestorCount = 0
     var ancestor = webView.superview
     while let view = ancestor {
         if #available(iOS 26.0, *), let scrollView = view as? UIScrollView {
+            if scrollView.topEdgeEffect.isHidden != isHidden {
+                changedAncestorCount += 1
+            }
             scrollView.topEdgeEffect.isHidden = isHidden
             ancestorCount += 1
         }
         ancestor = view.superview
     }
+    let changedCount = descendantResult.changed + changedAncestorCount
+    guard changedCount > 0 else { return }
     hideNavLog("webView.topEdgeEffect.apply", [
         "hidden": "\(isHidden)",
         "reason": reason,
         "webViewID": "\(ObjectIdentifier(webView))",
-        "descendantScrollViews": "\(descendantCount)",
+        "changedScrollViews": "\(changedCount)",
+        "descendantScrollViews": "\(descendantResult.applied)",
         "ancestorScrollViews": "\(ancestorCount)",
         "url": webView.url?.absoluteString ?? "nil",
     ])
@@ -2321,10 +2334,23 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
             if let body = message.body as? [String: Any],
                let requestedHideNavigation = body["hideNavigationDueToScroll"] as? Bool {
+                hideNavLog("webView.unhandledTap.set", [
+                    "old": String(hideNavigationDueToScroll.wrappedValue),
+                    "requested": String(requestedHideNavigation),
+                    "reason": String(describing: body["reason"] ?? "nil"),
+                    "frame": String(describing: body["frame"] ?? "nil"),
+                    "targetTag": String(describing: body["targetTag"] ?? "nil"),
+                    "targetClosestSegment": String(describing: body["targetClosestSegment"] ?? "nil"),
+                    "url": webView.state.pageURL.absoluteString
+                ])
                 withAnimation(.easeOut(duration: 0.18)) {
                     hideNavigationDueToScroll.wrappedValue = requestedHideNavigation
                 }
             } else {
+                hideNavLog("webView.unhandledTap.toggle", [
+                    "old": String(hideNavigationDueToScroll.wrappedValue),
+                    "url": webView.state.pageURL.absoluteString
+                ])
                 withAnimation(.easeOut(duration: 0.18)) {
                     hideNavigationDueToScroll.wrappedValue.toggle()
                 }
@@ -5734,13 +5760,10 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     weak var coordinateView: NativeLookupHitTestOverlayView?
     weak var clientCoordinateView: UIView?
     private var touchStartPoint: CGPoint?
-    private var touchStartHitPoint: CGPoint?
     private var touchStartWindowPoint: CGPoint?
     private var touchStartTime: TimeInterval?
     private var touchStartTarget: WebViewNativeLookupHitTarget?
     private var touchStartWasActiveTarget = false
-    private var touchStartDispatchedLookup = false
-    private var touchStartOpenedDifferentLookup = false
     private var touchStartPressedVisualCleared = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
     private var tapExpirationWorkItem: DispatchWorkItem?
@@ -5827,7 +5850,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             coordinateView: coordinateView
         )
         touchStartPoint = point
-        touchStartHitPoint = hitPoint
         touchStartWindowPoint = windowPoint
         touchStartTime = event.timestamp
         touchStartTarget = target
@@ -5860,10 +5882,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 ]
             )
             if touchStartWasActiveTarget {
-                store?.onActiveTargetTouchDown?(target)
                 logTouchDeliveryVerdict(
-                    stage: "touchesBegan.activeLookupDismiss",
-                    verdict: "popover.dismissedOnTouchDown",
+                    stage: "touchesBegan.activeLookupDismissPending",
+                    verdict: "popover.dismissPendingTouchEnd",
                     reason: "sameActiveTargetCandidate",
                     target: target,
                     point: point,
@@ -5871,27 +5892,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     extra: [
                         "activeLookupElementID": activeLookupElementID as Any,
                         "activeHighlightElementID": activeHighlightElementID as Any,
-                        "segmentTargetTouchesReachWebKit": "tapRecognizersAlreadySuppressed",
+                        "segmentTargetTouchesReachWebKit": "pendingTapDecision",
                     ]
                 )
-                touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
-                resetTrackingState(clearPressedTarget: false)
-                state = .recognized
-                return
             } else {
-                let dispatched = store?.handleTap(
-                    on: target,
-                    at: hitPoint,
-                    in: hitTestView.bounds.size,
-                    coordinateViewWindowMinY: hitTestViewWindowMinY
-                ) == true
-                touchStartDispatchedLookup = dispatched
-                touchStartOpenedDifferentLookup = dispatched
                 logTouchDeliveryVerdict(
-                    stage: "touchesBegan.activeLookupDispatch",
-                    verdict: dispatched
-                        ? "popover.updateDispatchedOnTouchDown"
-                        : "popover.updateDispatchFailed",
+                    stage: "touchesBegan.activeLookupDispatchPending",
+                    verdict: "popover.updatePendingTouchEnd",
                     reason: "activeLookupMoveCandidate",
                     target: target,
                     point: point,
@@ -5899,55 +5906,34 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     extra: [
                         "activeLookupElementID": activeLookupElementID as Any,
                         "activeHighlightElementID": activeHighlightElementID as Any,
-                        "lookupDispatchedOnTouchDown": dispatched,
-                        "completedOnTouchDown": dispatched,
+                        "lookupDispatchedOnTouchDown": false,
+                        "completedOnTouchDown": false,
                         "hitPoint": Self.debugPointString(hitPoint),
                         "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
                         "hitBasis": "overlay",
                         "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
-                        "segmentTargetTouchesReachWebKit": dispatched ? "blocked.completedOnTouchDown" : "pendingTouchEnd",
+                        "segmentTargetTouchesReachWebKit": "pendingTapDecision",
                     ]
                 )
-                if dispatched {
-                    touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
-                    resetTrackingState(clearPressedTarget: false)
-                    state = .recognized
-                    return
-                }
             }
         } else {
-            let dispatched = store?.handleTap(
-                on: target,
-                at: hitPoint,
-                in: hitTestView.bounds.size,
-                coordinateViewWindowMinY: hitTestViewWindowMinY
-            ) == true
-            touchStartDispatchedLookup = dispatched
             logTouchDeliveryVerdict(
-                stage: "touchesBegan.nativeLookupDispatch",
-                verdict: dispatched
-                    ? "nativeLookupDispatchedOnTouchDown"
-                    : "nativeLookupDispatchFailed",
+                stage: "touchesBegan.nativeLookupPending",
+                verdict: "nativeLookupPendingTouchEnd",
                 reason: "segmentTarget",
                 target: target,
                 point: point,
                 coordinateView: coordinateView,
                 extra: [
-                    "lookupDispatchedOnTouchDown": dispatched,
-                    "completedOnTouchDown": dispatched,
+                    "lookupDispatchedOnTouchDown": false,
+                    "completedOnTouchDown": false,
                     "hitPoint": Self.debugPointString(hitPoint),
                     "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
                     "hitBasis": "overlay",
                     "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
-                    "segmentTargetTouchesReachWebKit": dispatched ? "blocked.completedOnTouchDown" : "pendingTouchEnd",
+                    "segmentTargetTouchesReachWebKit": "pendingTapDecision",
                 ]
             )
-            if dispatched {
-                touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
-                resetTrackingState(clearPressedTarget: false)
-                state = .recognized
-                return
-            }
         }
         tapExpirationWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
@@ -6042,7 +6028,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
-            cancelTouchDownLookupIfNeeded(reason: "durationExceeded")
             resetTrackingState()
             state = .failed
             return
@@ -6072,12 +6057,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
-            cancelTouchDownLookupIfNeeded(reason: "movement")
             resetTrackingState()
             state = .failed
             return
         }
-        if !touchStartDispatchedLookup {
+        if touchStartWasActiveTarget {
+            store?.onActiveTargetTouchDown?(target)
+        } else {
             guard store?.handleTap(
                 on: target,
                 at: hitPoint,
@@ -6118,7 +6104,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "hitPoint": Self.debugPointString(hitPoint),
                 "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
                 "hitBasis": "overlay",
-                "lookupDispatchedOnTouchDown": touchStartDispatchedLookup,
+                "lookupDispatchedOnTouchDown": false,
                 "segmentTargetTouchesReachWebKit": "touchStreamMayArrive_clickRecognizerBlocked",
                 "webkitTapRecognizersRequireNativeLookupFailure": true,
             ]
@@ -6142,7 +6128,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "segmentTargetTouchesReachWebKit": true,
             ]
         )
-        cancelTouchDownLookupIfNeeded(reason: "touchesCancelled")
         resetTrackingState()
         state = .failed
     }
@@ -6151,36 +6136,19 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         if state == .possible,
            let target = touchStartTarget,
            let point = touchStartPoint,
-           let hitPoint = touchStartHitPoint,
-           let coordinateView,
-           !touchStartDispatchedLookup,
-           !touchStartWasActiveTarget {
-            let hitTestView = coordinateView
-            let dispatched = store?.handleTap(
-                on: target,
-                at: hitPoint,
-                in: hitTestView.bounds.size,
-                coordinateViewWindowMinY: hitTestView.convert(.zero, to: nil).y
-            ) == true
+           let coordinateView {
             logTouchDeliveryVerdict(
-                stage: "reset.recoverPendingNativeLookup",
-                verdict: dispatched ? "nativeLookupRecoveredBeforeReset" : "nativeLookupRecoveryFailed",
+                stage: "reset.dropPendingNativeLookup",
+                verdict: "pendingLookupDroppedBeforeTapEnd",
                 reason: "unexpectedRecognizerReset",
                 target: target,
                 point: point,
                 coordinateView: coordinateView,
                 extra: [
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "hitBasis": "overlay",
-                    "lookupDispatchedOnReset": dispatched,
-                    "segmentTargetTouchesReachWebKit": "tapRecognizersAlreadySuppressed",
+                    "lookupDispatchedOnReset": false,
+                    "segmentTargetTouchesReachWebKit": true,
                 ]
             )
-            if dispatched {
-                touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
-                resetTrackingState(clearPressedTarget: false)
-                return
-            }
         }
         resetTrackingState()
     }
@@ -6201,13 +6169,10 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         tapExpirationWorkItem?.cancel()
         tapExpirationWorkItem = nil
         touchStartPoint = nil
-        touchStartHitPoint = nil
         touchStartWindowPoint = nil
         touchStartTime = nil
         touchStartTarget = nil
         touchStartWasActiveTarget = false
-        touchStartDispatchedLookup = false
-        touchStartOpenedDifferentLookup = false
         touchStartPressedVisualCleared = false
         restoreSuppressedCompetingTapRecognizers(reason: "resetTrackingState")
         store?.finishNativeTouchStream(reason: "resetTrackingState")
@@ -6280,33 +6245,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         mergedPayload["stage"] = "pressVisual.clear.movement"
     }
 
-    private func cancelTouchDownLookupIfNeeded(reason: String) {
-        guard touchStartOpenedDifferentLookup,
-              let target = touchStartTarget else { return }
-        if touchStartDispatchedLookup && reason == "movement" {
-            logTouchDeliveryVerdict(
-                stage: "touchDownLookup.keepAfterMovement",
-                verdict: "popover.keepRetargetedLookupAfterTouchDownDispatch",
-                reason: reason,
-                target: target,
-                coordinateView: coordinateView,
-                extra: [
-                    "lookupDispatchedOnTouchDown": true,
-                    "segmentTargetTouchesReachWebKit": true,
-                ]
-            )
-            return
-        }
-        logTouchDeliveryVerdict(
-            stage: "touchDownLookup.cancel",
-            verdict: "popover.closedAfterTouchDownCancel",
-            reason: reason,
-            target: target,
-            coordinateView: coordinateView
-        )
-        store?.onTouchDownHitCancelled?(target)
-    }
-
     private func failGesture(reason: String, payload: [String: Any] = [:]) {
         var mergedPayload = payload
         mergedPayload["stage"] = "failGesture.\(reason)"
@@ -6318,7 +6256,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             coordinateView: coordinateView,
             extra: payload.merging(["segmentTargetTouchesReachWebKit": true]) { current, _ in current }
         )
-        cancelTouchDownLookupIfNeeded(reason: reason)
         resetTrackingState()
         state = .failed
     }
