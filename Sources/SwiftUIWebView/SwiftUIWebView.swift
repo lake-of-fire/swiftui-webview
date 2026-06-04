@@ -767,6 +767,7 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
 public struct WebViewNativeLookupHitTarget {
     public let elementID: String
     public let rects: [CGRect]
+    public let coordinateOriginInWindow: CGPoint?
     public let lookupPayload: [String: Any]?
     public let frameInfo: WKFrameInfo?
     public let debugUsedInflatedHitRect: Bool?
@@ -774,11 +775,13 @@ public struct WebViewNativeLookupHitTarget {
     public let debugDistance: CGFloat?
     public let debugCenterDistance: CGFloat?
     public let debugHitTestPoint: CGPoint?
+    public let debugHitTestRebaseX: CGFloat?
     public let debugHitTestRebaseY: CGFloat?
 
     public init(
         elementID: String,
         rects: [CGRect],
+        coordinateOriginInWindow: CGPoint? = nil,
         lookupPayload: [String: Any]? = nil,
         frameInfo: WKFrameInfo? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
@@ -786,10 +789,12 @@ public struct WebViewNativeLookupHitTarget {
         debugDistance: CGFloat? = nil,
         debugCenterDistance: CGFloat? = nil,
         debugHitTestPoint: CGPoint? = nil,
+        debugHitTestRebaseX: CGFloat? = nil,
         debugHitTestRebaseY: CGFloat? = nil
     ) {
         self.elementID = elementID
         self.rects = rects
+        self.coordinateOriginInWindow = coordinateOriginInWindow
         self.lookupPayload = lookupPayload
         self.frameInfo = frameInfo
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
@@ -797,7 +802,25 @@ public struct WebViewNativeLookupHitTarget {
         self.debugDistance = debugDistance
         self.debugCenterDistance = debugCenterDistance
         self.debugHitTestPoint = debugHitTestPoint
+        self.debugHitTestRebaseX = debugHitTestRebaseX
         self.debugHitTestRebaseY = debugHitTestRebaseY
+    }
+
+    public var projectedRectsForCurrentHitTestOverlay: [CGRect] {
+        projectedRectsForCurrentHitTestOverlay(topExpansion: 0)
+    }
+
+    public func projectedRectsForCurrentHitTestOverlay(topExpansion: CGFloat) -> [CGRect] {
+        let rebaseX = debugHitTestRebaseX ?? 0
+        let rebaseY = debugHitTestRebaseY ?? 0
+        return rects
+            .filter { !$0.isNull && !$0.isEmpty }
+            .map { rect in
+                var projectedRect = rect.offsetBy(dx: -rebaseX, dy: -rebaseY)
+                projectedRect.origin.y -= topExpansion
+                projectedRect.size.height += topExpansion
+                return projectedRect
+            }
     }
 }
 
@@ -811,6 +834,7 @@ public struct WebViewNativeLookupHit {
     public let debugDistance: CGFloat?
     public let debugCenterDistance: CGFloat?
     public let debugHitTestPoint: CGPoint?
+    public let debugHitTestRebaseX: CGFloat?
     public let debugHitTestRebaseY: CGFloat?
     public let frameInfo: WKFrameInfo?
 
@@ -824,6 +848,7 @@ public struct WebViewNativeLookupHit {
         debugDistance: CGFloat? = nil,
         debugCenterDistance: CGFloat? = nil,
         debugHitTestPoint: CGPoint? = nil,
+        debugHitTestRebaseX: CGFloat? = nil,
         debugHitTestRebaseY: CGFloat? = nil,
         frameInfo: WKFrameInfo? = nil
     ) {
@@ -836,6 +861,7 @@ public struct WebViewNativeLookupHit {
         self.debugDistance = debugDistance
         self.debugCenterDistance = debugCenterDistance
         self.debugHitTestPoint = debugHitTestPoint
+        self.debugHitTestRebaseX = debugHitTestRebaseX
         self.debugHitTestRebaseY = debugHitTestRebaseY
         self.frameInfo = frameInfo
     }
@@ -854,6 +880,9 @@ public final class WebViewNativeLookupHitTestStore {
         let target: WebViewNativeLookupHitTarget
         let rect: CGRect
         let hitRect: CGRect
+        let hitTestPoint: CGPoint
+        let hitTestRebaseX: CGFloat
+        let hitTestRebaseY: CGFloat
         let distance: CGFloat
         let centerDistance: CGFloat
         let area: CGFloat
@@ -942,29 +971,33 @@ public final class WebViewNativeLookupHitTestStore {
     public func hitTarget(
         at point: CGPoint,
         in containerSize: CGSize? = nil,
-        coordinateViewWindowMinY: CGFloat? = nil
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
     ) -> WebViewNativeLookupHitTarget? {
         guard isEnabled else { return nil }
-        let rebased = rebasedHitTestPoint(
-            point,
+        let exactCandidate = bestCandidate(
+            at: point,
+            usingInflatedRects: false,
             containerSize: containerSize,
-            coordinateViewWindowMinY: coordinateViewWindowMinY
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
         )
-        let exactCandidate = bestCandidate(at: rebased.point, usingInflatedRects: false)
         if let exactCandidate {
             return target(
                 for: exactCandidate,
-                usedInflatedHitRect: false,
-                hitTestPoint: rebased.point,
-                hitTestRebaseY: rebased.rebaseY
+                usedInflatedHitRect: false
             )
         }
-        return bestCandidate(at: rebased.point, usingInflatedRects: true).map {
+        return bestCandidate(
+            at: point,
+            usingInflatedRects: true,
+            containerSize: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ).map {
             target(
                 for: $0,
-                usedInflatedHitRect: true,
-                hitTestPoint: rebased.point,
-                hitTestRebaseY: rebased.rebaseY
+                usedInflatedHitRect: true
             )
         }
     }
@@ -972,20 +1005,20 @@ public final class WebViewNativeLookupHitTestStore {
     public func exactHitTarget(
         at point: CGPoint,
         in containerSize: CGSize? = nil,
-        coordinateViewWindowMinY: CGFloat? = nil
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
     ) -> WebViewNativeLookupHitTarget? {
         guard isEnabled else { return nil }
-        let rebased = rebasedHitTestPoint(
-            point,
+        return bestCandidate(
+            at: point,
+            usingInflatedRects: false,
             containerSize: containerSize,
-            coordinateViewWindowMinY: coordinateViewWindowMinY
-        )
-        return bestCandidate(at: rebased.point, usingInflatedRects: false).map {
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ).map {
             target(
                 for: $0,
-                usedInflatedHitRect: false,
-                hitTestPoint: rebased.point,
-                hitTestRebaseY: rebased.rebaseY
+                usedInflatedHitRect: false
             )
         }
     }
@@ -993,23 +1026,67 @@ public final class WebViewNativeLookupHitTestStore {
     private func rebasedHitTestPoint(
         _ point: CGPoint,
         containerSize: CGSize?,
-        coordinateViewWindowMinY _: CGFloat?
-    ) -> (point: CGPoint, rebaseY: CGFloat) {
+        coordinateViewWindowMinY: CGFloat?,
+        coordinateViewWindowOrigin: CGPoint?,
+        targetCoordinateOriginInWindow: CGPoint?
+    ) -> (point: CGPoint, rebaseX: CGFloat, rebaseY: CGFloat) {
         if let containerSize,
            containerSize.width <= 1 || containerSize.height <= 1 {
-            return (point, 0)
+            return (point, 0, 0)
         }
-        return (point, 0)
+        guard let targetCoordinateOriginInWindow else {
+            return (point, 0, 0)
+        }
+        let rebaseX: CGFloat
+        if let coordinateViewWindowOrigin,
+           coordinateViewWindowOrigin.x.isFinite,
+           targetCoordinateOriginInWindow.x.isFinite {
+            rebaseX = coordinateViewWindowOrigin.x - targetCoordinateOriginInWindow.x
+        } else {
+            rebaseX = 0
+        }
+        let rebaseY: CGFloat
+        if let coordinateViewWindowOrigin,
+           coordinateViewWindowOrigin.y.isFinite,
+           targetCoordinateOriginInWindow.y.isFinite {
+            rebaseY = coordinateViewWindowOrigin.y - targetCoordinateOriginInWindow.y
+        } else if let coordinateViewWindowMinY,
+                  coordinateViewWindowMinY.isFinite,
+                  targetCoordinateOriginInWindow.y.isFinite {
+            rebaseY = coordinateViewWindowMinY - targetCoordinateOriginInWindow.y
+        } else {
+            rebaseY = 0
+        }
+        return (
+            CGPoint(x: point.x + rebaseX, y: point.y + rebaseY),
+            rebaseX,
+            rebaseY
+        )
     }
 
-    private func bestCandidate(at point: CGPoint, usingInflatedRects: Bool) -> Candidate? {
+    private func bestCandidate(
+        at point: CGPoint,
+        usingInflatedRects: Bool,
+        containerSize: CGSize? = nil,
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
+    ) -> Candidate? {
         var best: Candidate?
         for (index, entry) in entries.enumerated() {
+            let rebased = rebasedHitTestPoint(
+                point,
+                containerSize: containerSize,
+                coordinateViewWindowMinY: coordinateViewWindowMinY,
+                coordinateViewWindowOrigin: coordinateViewWindowOrigin,
+                targetCoordinateOriginInWindow: entry.target.coordinateOriginInWindow
+            )
             let searchRects = usingInflatedRects ? entry.hitRects : entry.rects
-            guard searchRects.contains(where: { $0.contains(point) }) else { continue }
+            guard searchRects.contains(where: { $0.contains(rebased.point) }) else { continue }
             guard let candidate = bestRectCandidate(
                 for: entry,
-                point: point,
+                point: rebased.point,
+                rebaseX: rebased.rebaseX,
+                rebaseY: rebased.rebaseY,
                 usingInflatedRects: usingInflatedRects,
                 index: index
             ) else { continue }
@@ -1023,6 +1100,8 @@ public final class WebViewNativeLookupHitTestStore {
     private func bestRectCandidate(
         for entry: Entry,
         point: CGPoint,
+        rebaseX: CGFloat,
+        rebaseY: CGFloat,
         usingInflatedRects: Bool,
         index: Int
     ) -> Candidate? {
@@ -1036,6 +1115,9 @@ public final class WebViewNativeLookupHitTestStore {
                     target: entry.target,
                     rect: rect,
                     hitRect: hitRect,
+                    hitTestPoint: point,
+                    hitTestRebaseX: rebaseX,
+                    hitTestRebaseY: rebaseY,
                     distance: distance(from: point, to: rect),
                     centerDistance: hypot(point.x - hitRect.midX, point.y - hitRect.midY),
                     area: hitRect.width * hitRect.height,
@@ -1061,21 +1143,21 @@ public final class WebViewNativeLookupHitTestStore {
 
     private func target(
         for candidate: Candidate,
-        usedInflatedHitRect: Bool,
-        hitTestPoint: CGPoint,
-        hitTestRebaseY: CGFloat
+        usedInflatedHitRect: Bool
     ) -> WebViewNativeLookupHitTarget {
         WebViewNativeLookupHitTarget(
             elementID: candidate.target.elementID,
             rects: candidate.target.rects,
+            coordinateOriginInWindow: candidate.target.coordinateOriginInWindow,
             lookupPayload: candidate.target.lookupPayload,
             frameInfo: candidate.target.frameInfo,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
             debugDistance: candidate.distance,
             debugCenterDistance: candidate.centerDistance,
-            debugHitTestPoint: hitTestPoint,
-            debugHitTestRebaseY: hitTestRebaseY
+            debugHitTestPoint: candidate.hitTestPoint,
+            debugHitTestRebaseX: candidate.hitTestRebaseX,
+            debugHitTestRebaseY: candidate.hitTestRebaseY
         )
     }
 
@@ -1117,7 +1199,13 @@ public final class WebViewNativeLookupHitTestStore {
         hitTarget(at: point, in: containerSize) != nil
     }
 
-    public func diagnostics(at point: CGPoint, limit: Int = 5) -> [[String: Any]] {
+    public func diagnostics(
+        at point: CGPoint,
+        limit: Int = 5,
+        in containerSize: CGSize? = nil,
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
+    ) -> [[String: Any]] {
         guard isEnabled else {
             return [
                 [
@@ -1126,9 +1214,22 @@ public final class WebViewNativeLookupHitTestStore {
                 ]
             ]
         }
-        let rebased = rebasedHitTestPoint(point, containerSize: nil, coordinateViewWindowMinY: nil)
-        let exact = diagnosticCandidates(at: rebased.point, usingInflatedRects: false, limit: limit)
-        let inflated = diagnosticCandidates(at: rebased.point, usingInflatedRects: true, limit: limit)
+        let exact = diagnosticCandidates(
+            at: point,
+            usingInflatedRects: false,
+            limit: limit,
+            containerSize: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        )
+        let inflated = diagnosticCandidates(
+            at: point,
+            usingInflatedRects: true,
+            limit: limit,
+            containerSize: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        )
         return [
             [
                 "mode": "exact",
@@ -1141,9 +1242,23 @@ public final class WebViewNativeLookupHitTestStore {
         ]
     }
 
-    private func diagnosticCandidates(at point: CGPoint, usingInflatedRects: Bool, limit: Int) -> [[String: Any]] {
+    private func diagnosticCandidates(
+        at point: CGPoint,
+        usingInflatedRects: Bool,
+        limit: Int,
+        containerSize: CGSize?,
+        coordinateViewWindowMinY: CGFloat?,
+        coordinateViewWindowOrigin: CGPoint?
+    ) -> [[String: Any]] {
         var candidates: [(candidate: Candidate, hitRect: CGRect)] = []
         for (entryIndex, entry) in entries.enumerated() {
+            let rebased = rebasedHitTestPoint(
+                point,
+                containerSize: containerSize,
+                coordinateViewWindowMinY: coordinateViewWindowMinY,
+                coordinateViewWindowOrigin: coordinateViewWindowOrigin,
+                targetCoordinateOriginInWindow: entry.target.coordinateOriginInWindow
+            )
             let searchRects = usingInflatedRects ? entry.hitRects : entry.rects
             for (rectIndex, hitRect) in searchRects.enumerated() {
                 let rect = entry.rects[rectIndex]
@@ -1151,8 +1266,11 @@ public final class WebViewNativeLookupHitTestStore {
                     target: entry.target,
                     rect: rect,
                     hitRect: hitRect,
-                    distance: distance(from: point, to: rect),
-                    centerDistance: hypot(point.x - hitRect.midX, point.y - hitRect.midY),
+                    hitTestPoint: rebased.point,
+                    hitTestRebaseX: rebased.rebaseX,
+                    hitTestRebaseY: rebased.rebaseY,
+                    distance: distance(from: rebased.point, to: rect),
+                    centerDistance: hypot(rebased.point.x - hitRect.midX, rebased.point.y - hitRect.midY),
                     area: hitRect.width * hitRect.height,
                     index: entryIndex
                 )
@@ -1167,9 +1285,13 @@ public final class WebViewNativeLookupHitTestStore {
                 "elementID": candidate.target.elementID,
                 "surface": candidate.target.lookupPayload?["surface"] as? String ?? "",
                 "kind": usingInflatedRects ? "inflated" : "exact",
-                "contains": hitRect.contains(point),
+                "contains": hitRect.contains(candidate.hitTestPoint),
                 "distance": candidate.distance,
                 "centerDistance": candidate.centerDistance,
+                "hitTestX": candidate.hitTestPoint.x,
+                "hitTestY": candidate.hitTestPoint.y,
+                "hitTestRebaseX": candidate.hitTestRebaseX,
+                "hitTestRebaseY": candidate.hitTestRebaseY,
                 "rectY": candidate.rect.minY,
                 "rectH": candidate.rect.height,
             ] as [String : Any]
@@ -1179,23 +1301,31 @@ public final class WebViewNativeLookupHitTestStore {
     public func handleTap(
         at point: CGPoint,
         in containerSize: CGSize? = nil,
-        coordinateViewWindowMinY: CGFloat? = nil
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
-        let rebased = rebasedHitTestPoint(
-            point,
+        let exactCandidate = bestCandidate(
+            at: point,
+            usingInflatedRects: false,
             containerSize: containerSize,
-            coordinateViewWindowMinY: coordinateViewWindowMinY
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
         )
-        let exactCandidate = bestCandidate(at: rebased.point, usingInflatedRects: false)
-        let inflatedCandidate = exactCandidate == nil ? bestCandidate(at: rebased.point, usingInflatedRects: true) : nil
+        let inflatedCandidate = exactCandidate == nil
+            ? bestCandidate(
+                at: point,
+                usingInflatedRects: true,
+                containerSize: containerSize,
+                coordinateViewWindowMinY: coordinateViewWindowMinY,
+                coordinateViewWindowOrigin: coordinateViewWindowOrigin
+            )
+            : nil
         guard let candidate = exactCandidate ?? inflatedCandidate else {
             return false
         }
         let target = target(
             for: candidate,
-            usedInflatedHitRect: exactCandidate == nil,
-            hitTestPoint: rebased.point,
-            hitTestRebaseY: rebased.rebaseY
+            usedInflatedHitRect: exactCandidate == nil
         )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
@@ -1207,6 +1337,7 @@ public final class WebViewNativeLookupHitTestStore {
             debugDistance: target.debugDistance,
             debugCenterDistance: target.debugCenterDistance,
             debugHitTestPoint: target.debugHitTestPoint,
+            debugHitTestRebaseX: target.debugHitTestRebaseX,
             debugHitTestRebaseY: target.debugHitTestRebaseY,
             frameInfo: target.frameInfo
         ))
@@ -1217,12 +1348,15 @@ public final class WebViewNativeLookupHitTestStore {
         on target: WebViewNativeLookupHitTarget,
         at point: CGPoint,
         in containerSize: CGSize? = nil,
-        coordinateViewWindowMinY: CGFloat? = nil
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
         let rebased = rebasedHitTestPoint(
             point,
             containerSize: containerSize,
-            coordinateViewWindowMinY: coordinateViewWindowMinY
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin,
+            targetCoordinateOriginInWindow: target.coordinateOriginInWindow
         )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
@@ -1234,6 +1368,7 @@ public final class WebViewNativeLookupHitTestStore {
             debugDistance: target.debugDistance,
             debugCenterDistance: target.debugCenterDistance,
             debugHitTestPoint: rebased.point,
+            debugHitTestRebaseX: rebased.rebaseX,
             debugHitTestRebaseY: rebased.rebaseY,
             frameInfo: target.frameInfo
         ))
@@ -5664,8 +5799,9 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let path = CGMutablePath()
         var visualRects: [CGRect] = []
         var strokeRects: [CGRect] = []
-        for rect in target.rects where !rect.isNull && !rect.isEmpty {
-            let visualRect = Self.pressVisualRect(for: rect)
+        for visualRect in target.projectedRectsForCurrentHitTestOverlay(
+            topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion
+        ) {
             let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
             visualRects.append(visualRect)
             strokeRects.append(strokeRect)
@@ -5682,14 +5818,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
         pressedSegmentLayer.opacity = 1
         CATransaction.commit()
     }
-
-    private static func pressVisualRect(for rect: CGRect) -> CGRect {
-        var visualRect = rect
-        visualRect.origin.y -= PressedSegmentStyle.lookupAttachmentTopExpansion
-        visualRect.size.height += PressedSegmentStyle.lookupAttachmentTopExpansion
-        return visualRect
-    }
-
     func clearPressedTarget() {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
@@ -5717,7 +5845,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let target = store?.hitTarget(
             at: point,
             in: bounds.size,
-            coordinateViewWindowMinY: convert(.zero, to: nil).y
+            coordinateViewWindowOrigin: convert(CGPoint.zero, to: nil)
         )
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
@@ -5786,11 +5914,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let hitPoint = point
         let rawClientPoint = clientCoordinateView.map { touch.location(in: $0) }
         let windowPoint = touch.location(in: nil)
-        let hitTestViewWindowMinY = hitTestView.convert(.zero, to: nil).y
+        let hitTestViewWindowOrigin = hitTestView.convert(CGPoint.zero, to: nil)
         guard let target = store?.hitTarget(
             at: hitPoint,
             in: hitTestView.bounds.size,
-            coordinateViewWindowMinY: hitTestViewWindowMinY
+            coordinateViewWindowOrigin: hitTestViewWindowOrigin
         ) else {
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.noSegmentTarget",
@@ -5802,7 +5930,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "hitPoint": Self.debugPointString(hitPoint),
                     "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
                     "hitBasis": "overlay",
-                    "nearest": store?.diagnostics(at: hitPoint, limit: 3) as Any,
+                    "nearest": store?.diagnostics(
+                        at: hitPoint,
+                        limit: 3,
+                        in: hitTestView.bounds.size,
+                        coordinateViewWindowOrigin: hitTestViewWindowOrigin
+                    ) as Any,
                     "nativeLookupEnabled": store?.isEnabled as Any,
                     "targetCount": store?.targetCount as Any,
                     "segmentTargetTouchesReachWebKit": true,
@@ -5825,7 +5958,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "hitBasis": "overlay",
                 "nativeLookupEnabled": store?.isEnabled as Any,
                 "targetCount": store?.targetCount as Any,
-                "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
+                "nearest": store?.diagnostics(
+                    at: hitPoint,
+                    limit: 3,
+                    in: hitTestView.bounds.size,
+                    coordinateViewWindowOrigin: hitTestViewWindowOrigin
+                ) as Any,
                 "segmentTargetTouchesReachWebKit": "pendingTapDecision",
             ]
         )
@@ -5897,7 +6035,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                         "hitPoint": Self.debugPointString(hitPoint),
                         "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
                         "hitBasis": "overlay",
-                        "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
+                        "nearest": store?.diagnostics(
+                            at: hitPoint,
+                            limit: 3,
+                            in: hitTestView.bounds.size,
+                            coordinateViewWindowOrigin: hitTestViewWindowOrigin
+                        ) as Any,
                         "segmentTargetTouchesReachWebKit": "pendingTapDecision",
                     ]
                 )
@@ -5916,7 +6059,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "hitPoint": Self.debugPointString(hitPoint),
                     "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
                     "hitBasis": "overlay",
-                    "nearest": store?.diagnostics(at: target.debugHitTestPoint ?? hitPoint, limit: 3) as Any,
+                    "nearest": store?.diagnostics(
+                        at: hitPoint,
+                        limit: 3,
+                        in: hitTestView.bounds.size,
+                        coordinateViewWindowOrigin: hitTestViewWindowOrigin
+                    ) as Any,
                     "segmentTargetTouchesReachWebKit": "pendingTapDecision",
                 ]
             )
@@ -6023,7 +6171,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let hitPoint = point
         let rawClientPoint = clientCoordinateView.map { touch.location(in: $0) }
         let windowPoint = touch.location(in: nil)
-        let hitTestViewWindowMinY = hitTestView.convert(.zero, to: nil).y
+        let hitTestViewWindowOrigin = hitTestView.convert(CGPoint.zero, to: nil)
         let movement = hypot(windowPoint.x - windowStart.x, windowPoint.y - windowStart.y)
         guard movement <= Self.segmentTapMovementTolerance else {
             logTouchDeliveryVerdict(
@@ -6054,7 +6202,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 on: target,
                 at: hitPoint,
                 in: hitTestView.bounds.size,
-                coordinateViewWindowMinY: hitTestViewWindowMinY
+                coordinateViewWindowOrigin: hitTestViewWindowOrigin
             ) == true else {
                 logTouchDeliveryVerdict(
                     stage: "touchesEnded.nativeLookupFailed",
@@ -6308,6 +6456,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 WebViewNativeLookupHitTestStore.debugRectStrings([$0]).first ?? ""
             } as Any
             payload["selectedPoint"] = target.debugHitTestPoint.map(Self.debugPointString) as Any
+            payload["rebaseX"] = target.debugHitTestRebaseX as Any
             payload["rebaseY"] = target.debugHitTestRebaseY as Any
             payload["inflated"] = target.debugUsedInflatedHitRect as Any
             payload["payload"] = target.lookupPayload != nil
@@ -7902,8 +8051,9 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         let path = CGMutablePath()
         var visualRects: [CGRect] = []
         var strokeRects: [CGRect] = []
-        for rect in target.rects where !rect.isNull && !rect.isEmpty {
-            let visualRect = Self.pressVisualRect(for: rect)
+        for visualRect in target.projectedRectsForCurrentHitTestOverlay(
+            topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion
+        ) {
             let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
             visualRects.append(visualRect)
             strokeRects.append(strokeRect)
@@ -7920,14 +8070,6 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         pressedSegmentLayer.opacity = 1
         CATransaction.commit()
     }
-
-    private static func pressVisualRect(for rect: CGRect) -> CGRect {
-        var visualRect = rect
-        visualRect.origin.y -= PressedSegmentStyle.lookupAttachmentTopExpansion
-        visualRect.size.height += PressedSegmentStyle.lookupAttachmentTopExpansion
-        return visualRect
-    }
-
     func clearPressedTarget() {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
