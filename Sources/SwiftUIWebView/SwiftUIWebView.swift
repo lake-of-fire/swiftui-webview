@@ -862,7 +862,6 @@ public final class WebViewNativeLookupHitTestStore {
 
     private let hitSlop: CGFloat
     private var entries: [Entry] = []
-    private var baselineHitTestWindowMinY: CGFloat?
     private var nativeTouchElementID: String?
     private var suppressUnhandledTapUntil: TimeInterval = 0
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
@@ -884,6 +883,11 @@ public final class WebViewNativeLookupHitTestStore {
     }
     public var targetCount: Int { entries.count }
     public var activeNativeTouchElementID: String? { nativeTouchElementID }
+#if DEBUG
+    public var uiTestTargets: [WebViewNativeLookupHitTarget] {
+        entries.map(\.target)
+    }
+#endif
     public var shouldSuppressUnhandledTapForNativeLookup: Bool {
         nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
     }
@@ -915,7 +919,6 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func removeAllTargets() {
         entries.removeAll()
-        baselineHitTestWindowMinY = nil
         nativeTouchElementID = nil
         suppressUnhandledTapUntil = 0
     }
@@ -997,23 +1000,11 @@ public final class WebViewNativeLookupHitTestStore {
         containerSize: CGSize?,
         coordinateViewWindowMinY: CGFloat?
     ) -> (point: CGPoint, rebaseY: CGFloat) {
-        guard let coordinateViewWindowMinY,
-              coordinateViewWindowMinY.isFinite else {
-            return (point, 0)
-        }
         if let containerSize,
            containerSize.width <= 1 || containerSize.height <= 1 {
             return (point, 0)
         }
-        if let baseline = baselineHitTestWindowMinY {
-            if coordinateViewWindowMinY < baseline {
-                baselineHitTestWindowMinY = coordinateViewWindowMinY
-                return (point, 0)
-            }
-            let rebaseY = max(0, coordinateViewWindowMinY - baseline)
-            return (CGPoint(x: point.x, y: point.y + rebaseY), rebaseY)
-        }
-        baselineHitTestWindowMinY = coordinateViewWindowMinY
+        _ = coordinateViewWindowMinY
         return (point, 0)
     }
 
@@ -5647,10 +5638,51 @@ private final class NativeLookupHitTestOverlayView: UIView {
     private let pressedSegmentLayer = CAShapeLayer()
     private var clearPressedSegmentWorkItem: DispatchWorkItem?
 
+    #if DEBUG
+    private var uiTestAccessibilityElements: [NativeLookupTargetAccessibilityElement] = []
+
+    private static var uiTestLookupProbeEnabled: Bool {
+        ProcessInfo.processInfo.arguments.contains("--ui-test-enable-lookup-probe")
+    }
+
+    override var accessibilityElements: [Any]? {
+        get {
+            guard Self.uiTestLookupProbeEnabled,
+                  let targets = store?.uiTestTargets,
+                  !targets.isEmpty else {
+                uiTestAccessibilityElements = []
+                return super.accessibilityElements
+            }
+            uiTestAccessibilityElements = targets.compactMap { target in
+                guard let rect = Self.accessibilityFrame(for: target) else { return nil }
+                let point = CGPoint(x: rect.midX, y: rect.midY)
+                let element = NativeLookupTargetAccessibilityElement(
+                    accessibilityContainer: self,
+                    target: target,
+                    activationPoint: point
+                )
+                let surface = target.lookupPayload?["surface"] as? String ?? target.elementID
+                element.overlay = self
+                element.accessibilityIdentifier = "NativeLookupTarget.\(surface)"
+                element.accessibilityLabel = surface
+                element.accessibilityValue = target.elementID
+                element.accessibilityFrameInContainerSpace = rect
+                return element
+            }
+            return uiTestAccessibilityElements
+        }
+        set {
+            uiTestAccessibilityElements = (newValue as? [NativeLookupTargetAccessibilityElement]) ?? []
+            super.accessibilityElements = newValue
+        }
+    }
+    #endif
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = false
         backgroundColor = .clear
+        isAccessibilityElement = false
         pressedSegmentLayer.fillColor = UIColor.clear.cgColor
         pressedSegmentLayer.lineWidth = PressedSegmentStyle.strokeWidth
         pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
@@ -5704,6 +5736,37 @@ private final class NativeLookupHitTestOverlayView: UIView {
         return visualRect
     }
 
+    #if DEBUG
+    private static func accessibilityFrame(for target: WebViewNativeLookupHitTarget) -> CGRect? {
+        let rect = target.rects
+            .filter { !$0.isNull && !$0.isEmpty }
+            .reduce(CGRect.null) { partialResult, rect in
+                partialResult.union(pressVisualRect(for: rect))
+            }
+        return rect.isNull || rect.isEmpty ? nil : rect
+    }
+
+    fileprivate func activateUITestLookupTarget(
+        _ target: WebViewNativeLookupHitTarget,
+        at point: CGPoint
+    ) -> Bool {
+        if store?.showsPressedTargetOverlay == true {
+            showPressedTarget(target)
+        }
+        let handled = store?.handleTap(
+            at: point,
+            in: bounds.size,
+            coordinateViewWindowMinY: convert(.zero, to: nil).y
+        ) == true
+        if handled {
+            clearPressedTarget(after: 0.16)
+        } else {
+            clearPressedTarget()
+        }
+        return handled
+    }
+    #endif
+
     func clearPressedTarget() {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
@@ -5748,6 +5811,28 @@ private final class NativeLookupHitTestOverlayView: UIView {
         return false
     }
 }
+
+#if DEBUG
+private final class NativeLookupTargetAccessibilityElement: UIAccessibilityElement {
+    weak var overlay: NativeLookupHitTestOverlayView?
+    private let target: WebViewNativeLookupHitTarget
+    private let activationPoint: CGPoint
+
+    init(
+        accessibilityContainer container: NativeLookupHitTestOverlayView,
+        target: WebViewNativeLookupHitTarget,
+        activationPoint: CGPoint
+    ) {
+        self.target = target
+        self.activationPoint = activationPoint
+        super.init(accessibilityContainer: container)
+    }
+
+    override func accessibilityActivate() -> Bool {
+        overlay?.activateUITestLookupTarget(target, at: activationPoint) == true
+    }
+}
+#endif
 
 private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer {
     private static let segmentTapMovementTolerance: CGFloat = 10
