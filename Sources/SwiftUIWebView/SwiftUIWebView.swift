@@ -898,6 +898,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onOverlaySegmentHitObserved: ((WebViewNativeLookupHitTarget, CGPoint, CGSize) -> Void)?
     public var onNativeTouchStreamFinished: ((String) -> Void)?
+    public var onPressedTargetHandoffCompleted: ((String?) -> Void)?
     public var onActiveLookupBlankTap: (() -> Void)?
     public var onExternalTouchInteractionCancelled: ((String) -> Void)?
     public var activeLookupElementID: (() -> String?)?
@@ -1373,6 +1374,10 @@ public final class WebViewNativeLookupHitTestStore {
             frameInfo: target.frameInfo
         ))
         return true
+    }
+
+    public func completePressedTargetHandoff(elementID: String?) {
+        onPressedTargetHandoffCompleted?(elementID)
     }
 
     static func debugPointString(_ point: CGPoint) -> String {
@@ -5766,6 +5771,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
     private var lastPassThroughLogAt: TimeInterval = 0
     private let pressedSegmentLayer = CAShapeLayer()
     private var clearPressedSegmentWorkItem: DispatchWorkItem?
+    private var pressedSegmentElementID: String?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -5796,6 +5802,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
     func showPressedTarget(_ target: WebViewNativeLookupHitTarget) {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
+        pressedSegmentElementID = target.elementID
         let path = CGMutablePath()
         var visualRects: [CGRect] = []
         var strokeRects: [CGRect] = []
@@ -5833,7 +5840,15 @@ private final class NativeLookupHitTestOverlayView: UIView {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
+    func clearPressedTarget(matching elementID: String?) {
+        guard elementID == nil || pressedSegmentElementID == elementID else {
+            return
+        }
+        clearPressedTarget()
+    }
+
     private func clearPressedTargetImmediately() {
+        pressedSegmentElementID = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.path = nil
@@ -5868,7 +5883,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private static let segmentLongPressDriftTolerance: CGFloat = 24
     private static let segmentSwipeMovementTolerance: CGFloat = 4
     private static let segmentTapMaximumDuration: TimeInterval = 0.42
-    private static let segmentTapPressedHandoffDuration: TimeInterval = 0.16
+    private static let segmentTapPressedFallbackDuration: TimeInterval = 1.0
 
     weak var store: WebViewNativeLookupHitTestStore?
     weak var coordinateView: NativeLookupHitTestOverlayView?
@@ -6246,7 +6261,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         if touchStartWasActiveTarget {
             touchStartOverlay?.clearPressedTarget()
         } else {
-            touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
+            touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedFallbackDuration)
         }
         resetTrackingState(clearPressedTarget: false)
         state = .recognized
@@ -6283,6 +6298,38 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
+            var shouldHoldPressedTargetForHandoff = false
+            if touchStartWasActiveTarget {
+                store?.onActiveTargetTouchDown?(target)
+            } else {
+                let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
+                let didDispatchLookup = store?.handleTap(
+                    on: target,
+                    at: point,
+                    in: coordinateView.bounds.size,
+                    coordinateViewWindowOrigin: coordinateViewWindowOrigin
+                ) == true
+                logTouchDeliveryVerdict(
+                    stage: "reset.dispatchPendingNativeLookup",
+                    verdict: didDispatchLookup
+                        ? "pendingLookupDispatchedDuringRecognizerReset"
+                        : "pendingLookupDispatchFailedDuringRecognizerReset",
+                    reason: "unexpectedRecognizerReset",
+                    target: target,
+                    point: point,
+                    coordinateView: coordinateView,
+                    extra: [
+                        "lookupDispatchedOnReset": didDispatchLookup,
+                        "segmentTargetTouchesReachWebKit": false,
+                    ]
+                )
+                shouldHoldPressedTargetForHandoff = didDispatchLookup
+                if didDispatchLookup {
+                    touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedFallbackDuration)
+                }
+            }
+            resetTrackingState(clearPressedTarget: !shouldHoldPressedTargetForHandoff)
+            return
         }
         resetTrackingState()
     }
@@ -6462,7 +6509,26 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["payload"] = target.lookupPayload != nil
             payload["frame"] = target.frameInfo != nil
         }
-        _ = payload
+        let shouldLog = [
+            "touchesBegan.nativeCandidate",
+            "touchesBegan.nativeLookupPending",
+            "touchesEnded.missingTrackingState",
+            "touchesEnded.durationExceeded",
+            "touchesEnded.nativeLookupFailed",
+            "touchesEnded.nativeRecognized",
+            "touchesCancelled",
+            "reset.dropPendingNativeLookup",
+            "reset.dispatchPendingNativeLookup",
+            "failGesture.timeout",
+            "failGesture.movement",
+            "failGesture.nativeLookup.pageTurnStart",
+            "failGesture.nativeLookup.pageTurnSuppressedHit",
+            "failGesture.nativeLookup.pageTurnSuppressedHitTask",
+        ].contains(stage)
+        if shouldLog {
+            payload["stage"] = stage
+            Swift.debugPrint("# LOOKUP", payload)
+        }
         #else
         _ = stage
         _ = verdict
@@ -6764,6 +6830,11 @@ public class WebViewController: UIViewController {
         }
         store.onNativeTouchStreamFinished = { [weak self] reason in
             self?.restoreEarlySuppressedNativeLookupTapRecognizers(reason: reason)
+        }
+        store.onPressedTargetHandoffCompleted = { [weak self] elementID in
+            DispatchQueue.main.async { [weak self] in
+                self?.nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
+            }
         }
         store.onExternalTouchInteractionCancelled = { [weak self] reason in
             guard let self else { return }
