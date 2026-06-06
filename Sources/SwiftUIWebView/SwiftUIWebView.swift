@@ -932,6 +932,7 @@ public final class WebViewNativeLookupHitTestStore {
             } as Any,
         ]
     }
+    public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
     public var capturesSegmentTouchesInOverlay: Bool {
         UserDefaults.standard.bool(forKey: Self.strictOverlayCaptureDefaultsKey)
     }
@@ -5914,6 +5915,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
         )
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
+            let hasActiveWebTextSelection = store?.hasActiveWebTextSelection == true
             nativeLookupPressDebug("overlay.pointInside.segmentTarget", [
                 "point": WebViewNativeLookupHitTestStore.debugPointString(point),
                 "targetID": target.elementID,
@@ -5923,6 +5925,15 @@ private final class NativeLookupHitTestOverlayView: UIView {
                 "payload": target.lookupPayload != nil,
                 "frame": target.frameInfo != nil,
             ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new })
+            if hasActiveWebTextSelection {
+                nativeLookupPressDebug("overlay.pointInside.segmentTarget.textSelectionPassThrough", [
+                    "point": WebViewNativeLookupHitTestStore.debugPointString(point),
+                    "targetID": target.elementID,
+                    "targetCount": store?.targetCount as Any,
+                    "rect": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(1)).first as Any,
+                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new })
+                return false
+            }
             store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
             if capturesSegmentTouches {
                 return true
@@ -6021,6 +6032,26 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "targetCount": store?.targetCount as Any,
                     "segmentTargetTouchesReachWebKit": true,
                 ]
+            )
+            state = .failed
+            return
+        }
+        if store?.hasActiveWebTextSelection == true {
+            logTouchDeliveryVerdict(
+                stage: "touchesBegan.textSelectionActivePassThrough",
+                verdict: "passThrough.allowed",
+                reason: "webTextSelectionActive",
+                target: target,
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "hitPoint": Self.debugPointString(hitPoint),
+                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                    "hitBasis": "overlay",
+                    "nativeLookupEnabled": store?.isEnabled as Any,
+                    "targetCount": store?.targetCount as Any,
+                    "segmentTargetTouchesReachWebKit": true,
+                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
             )
             state = .failed
             return
@@ -6335,6 +6366,29 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
+        if store?.hasActiveWebTextSelection == true {
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.textSelectionActivePassThrough",
+                verdict: "passThrough.allowedAfterTextSelection",
+                reason: "webTextSelectionActive",
+                target: target,
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "movement": movement,
+                    "duration": duration,
+                    "startTargetID": target.elementID,
+                    "endTargetID": endTarget?.elementID as Any,
+                    "hitPoint": Self.debugPointString(hitPoint),
+                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                    "hitBasis": "overlay",
+                    "segmentTargetTouchesReachWebKit": true,
+                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
+            )
+            resetTrackingState()
+            state = .failed
+            return
+        }
         if touchStartWasActiveTarget {
             store?.onActiveTargetTouchDown?(target)
         } else {
@@ -6443,32 +6497,62 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             )
             var shouldHoldPressedTargetForHandoff = false
             if touchStartWasActiveTarget {
-                store?.onActiveTargetTouchDown?(target)
+                if store?.hasActiveWebTextSelection == true {
+                    logTouchDeliveryVerdict(
+                        stage: "reset.skipActiveTargetTextSelectionActive",
+                        verdict: "pendingLookupDroppedForTextSelection",
+                        reason: "webTextSelectionActive",
+                        target: target,
+                        point: point,
+                        coordinateView: coordinateView,
+                        extra: [
+                            "lookupDispatchedOnReset": false,
+                            "segmentTargetTouchesReachWebKit": true,
+                        ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
+                    )
+                } else {
+                    store?.onActiveTargetTouchDown?(target)
+                }
             } else {
-                let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
-                let didDispatchLookup = store?.handleTap(
-                    on: target,
-                    at: point,
-                    in: coordinateView.bounds.size,
-                    coordinateViewWindowOrigin: coordinateViewWindowOrigin
-                ) == true
-                logTouchDeliveryVerdict(
-                    stage: "reset.dispatchPendingNativeLookup",
-                    verdict: didDispatchLookup
-                        ? "pendingLookupDispatchedDuringRecognizerReset"
-                        : "pendingLookupDispatchFailedDuringRecognizerReset",
-                    reason: "unexpectedRecognizerReset",
-                    target: target,
-                    point: point,
-                    coordinateView: coordinateView,
-                    extra: [
-                        "lookupDispatchedOnReset": didDispatchLookup,
-                        "segmentTargetTouchesReachWebKit": false,
-                    ]
-                )
-                shouldHoldPressedTargetForHandoff = didDispatchLookup
-                if didDispatchLookup {
-                    touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedFallbackDuration)
+                if store?.hasActiveWebTextSelection == true {
+                    logTouchDeliveryVerdict(
+                        stage: "reset.skipDispatchTextSelectionActive",
+                        verdict: "pendingLookupDroppedForTextSelection",
+                        reason: "webTextSelectionActive",
+                        target: target,
+                        point: point,
+                        coordinateView: coordinateView,
+                        extra: [
+                            "lookupDispatchedOnReset": false,
+                            "segmentTargetTouchesReachWebKit": true,
+                        ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
+                    )
+                } else {
+                    let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
+                    let didDispatchLookup = store?.handleTap(
+                        on: target,
+                        at: point,
+                        in: coordinateView.bounds.size,
+                        coordinateViewWindowOrigin: coordinateViewWindowOrigin
+                    ) == true
+                    logTouchDeliveryVerdict(
+                        stage: "reset.dispatchPendingNativeLookup",
+                        verdict: didDispatchLookup
+                            ? "pendingLookupDispatchedDuringRecognizerReset"
+                            : "pendingLookupDispatchFailedDuringRecognizerReset",
+                        reason: "unexpectedRecognizerReset",
+                        target: target,
+                        point: point,
+                        coordinateView: coordinateView,
+                        extra: [
+                            "lookupDispatchedOnReset": didDispatchLookup,
+                            "segmentTargetTouchesReachWebKit": false,
+                        ]
+                    )
+                    shouldHoldPressedTargetForHandoff = didDispatchLookup
+                    if didDispatchLookup {
+                        touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedFallbackDuration)
+                    }
                 }
             }
             resetTrackingState(clearPressedTarget: !shouldHoldPressedTargetForHandoff)
