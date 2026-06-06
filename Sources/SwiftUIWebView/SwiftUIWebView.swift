@@ -867,8 +867,9 @@ public struct WebViewNativeLookupHit {
     }
 }
 
-private func nativeLookupPressDebug(_ stage: String, _ payload: [String: Any] = [:]) {
-    Swift.debugPrint("# PRESS", ["stage": stage].merging(payload) { _, new in new })
+private func nativeLookupPressDebug(_ stage: String, _ payload: @autoclosure () -> [String: Any] = [:]) {
+    _ = stage
+    _ = payload
 }
 
 public final class WebViewNativeLookupHitTestStore {
@@ -6859,7 +6860,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
-        Swift.debugPrint("# PRESS", payload)
         let shouldLog = [
             "touchesBegan.nativeCandidate",
             "touchesBegan.nativeLookupPending",
