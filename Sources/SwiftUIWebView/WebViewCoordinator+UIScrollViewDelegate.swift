@@ -79,18 +79,6 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             if newValue != hideNavigationDueToScroll.wrappedValue {
 #if DEBUG
                 debugPrint(
-                    "# HIDENAV",
-                    "stage=webScrollHideNavigation.request",
-                    "new=\(newValue)",
-                    "old=\(hideNavigationDueToScroll.wrappedValue)",
-                    "offsetX=\(String(format: "%.1f", currentOffset.x))",
-                    "offsetY=\(String(format: "%.1f", currentOffset.y))",
-                    "axis=\(navigationScrollAxis == .horizontal ? "horizontal" : "vertical")",
-                    "delta=\(String(format: "%.1f", scrollDifference))",
-                    "accumulated=\(String(format: "%.1f", accumulatedScrollOffset))",
-                    "threshold=\(String(format: "%.1f", threshold))"
-                )
-                debugPrint(
                     "# TABBAR webScrollHideNav",
                     "new=\(newValue)",
                     "old=\(hideNavigationDueToScroll.wrappedValue)",

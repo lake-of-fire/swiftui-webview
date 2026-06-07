@@ -47,10 +47,6 @@ private func lookupLog(_ stage: String, _ metadata: [String: String] = [:]) {
 }
 
 #if os(iOS)
-private func hideNavLog(_ stage: String, _ metadata: [String: String] = [:]) {
-    print((["# HIDENAV", "stage=\(stage)"] + metadata.map { "\($0.key)=\($0.value)" }).joined(separator: " "))
-}
-
 @discardableResult
 private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, in view: UIView) -> (applied: Int, changed: Int) {
     var appliedCount = 0
@@ -87,15 +83,6 @@ private func applyTopScrollEdgeEffectHidden(_ isHidden: Bool, to webView: WKWebV
     }
     let changedCount = descendantResult.changed + changedAncestorCount
     guard changedCount > 0 else { return }
-    hideNavLog("webView.topEdgeEffect.apply", [
-        "hidden": "\(isHidden)",
-        "reason": reason,
-        "webViewID": "\(ObjectIdentifier(webView))",
-        "changedScrollViews": "\(changedCount)",
-        "descendantScrollViews": "\(descendantResult.applied)",
-        "ancestorScrollViews": "\(ancestorCount)",
-        "url": webView.url?.absoluteString ?? "nil",
-    ])
 }
 #endif
 
@@ -828,6 +815,7 @@ public struct WebViewNativeLookupHit {
     public let elementID: String
     public let point: CGPoint
     public let rects: [CGRect]
+    public let coordinateOriginInWindow: CGPoint?
     public let lookupPayload: [String: Any]?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
@@ -842,6 +830,7 @@ public struct WebViewNativeLookupHit {
         elementID: String,
         point: CGPoint,
         rects: [CGRect] = [],
+        coordinateOriginInWindow: CGPoint? = nil,
         lookupPayload: [String: Any]? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
@@ -855,6 +844,7 @@ public struct WebViewNativeLookupHit {
         self.elementID = elementID
         self.point = point
         self.rects = rects
+        self.coordinateOriginInWindow = coordinateOriginInWindow
         self.lookupPayload = lookupPayload
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
@@ -870,6 +860,10 @@ public struct WebViewNativeLookupHit {
 private func nativeLookupPressDebug(_ stage: String, _ payload: @autoclosure () -> [String: Any] = [:]) {
     _ = stage
     _ = payload
+}
+
+private func nativeLookupDebug(_ stage: String, _ payload: @autoclosure () -> [String: Any] = [:]) {
+    Swift.debugPrint("# LOOKUP", ["stage": stage].merging(payload()) { _, new in new })
 }
 
 public final class WebViewNativeLookupHitTestStore {
@@ -1383,6 +1377,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            coordinateOriginInWindow: target.coordinateOriginInWindow,
             lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
@@ -1414,6 +1409,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            coordinateOriginInWindow: target.coordinateOriginInWindow,
             lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
@@ -2510,23 +2506,10 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
             if let body = message.body as? [String: Any],
                let requestedHideNavigation = body["hideNavigationDueToScroll"] as? Bool {
-                hideNavLog("webView.unhandledTap.set", [
-                    "old": String(hideNavigationDueToScroll.wrappedValue),
-                    "requested": String(requestedHideNavigation),
-                    "reason": String(describing: body["reason"] ?? "nil"),
-                    "frame": String(describing: body["frame"] ?? "nil"),
-                    "targetTag": String(describing: body["targetTag"] ?? "nil"),
-                    "targetClosestSegment": String(describing: body["targetClosestSegment"] ?? "nil"),
-                    "url": webView.state.pageURL.absoluteString
-                ])
                 withAnimation(.easeOut(duration: 0.18)) {
                     hideNavigationDueToScroll.wrappedValue = requestedHideNavigation
                 }
             } else {
-                hideNavLog("webView.unhandledTap.toggle", [
-                    "old": String(hideNavigationDueToScroll.wrappedValue),
-                    "url": webView.state.pageURL.absoluteString
-                ])
                 withAnimation(.easeOut(duration: 0.18)) {
                     hideNavigationDueToScroll.wrappedValue.toggle()
                 }
@@ -5908,14 +5891,27 @@ private final class NativeLookupHitTestOverlayView: UIView {
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        let overlayWindowOrigin = convert(CGPoint.zero, to: nil)
         let target = store?.hitTarget(
             at: point,
             in: bounds.size,
-            coordinateViewWindowOrigin: convert(CGPoint.zero, to: nil)
+            coordinateViewWindowOrigin: overlayWindowOrigin
         )
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
             let hasActiveWebTextSelection = store?.hasActiveWebTextSelection == true
+            nativeLookupDebug("overlay.pointInside.segmentTarget", [
+                "point": WebViewNativeLookupHitTestStore.debugPointString(point),
+                "targetID": target.elementID,
+                "capturesSegmentTouches": capturesSegmentTouches,
+                "targetCount": store?.targetCount as Any,
+                "bounds": WebViewNativeLookupHitTestStore.debugSizeString(bounds.size),
+                "overlayWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(overlayWindowOrigin),
+                "targetCoordinateOrigin": target.coordinateOriginInWindow.map(WebViewNativeLookupHitTestStore.debugPointString) as Any,
+                "rect": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(1)).first as Any,
+                "rebaseX": target.debugHitTestRebaseX as Any,
+                "rebaseY": target.debugHitTestRebaseY as Any,
+            ])
             nativeLookupPressDebug("overlay.pointInside.segmentTarget", [
                 "point": WebViewNativeLookupHitTestStore.debugPointString(point),
                 "targetID": target.elementID,
@@ -5942,6 +5938,20 @@ private final class NativeLookupHitTestOverlayView: UIView {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
                 lastPassThroughLogAt = now
+                nativeLookupDebug("overlay.pointInside.noSegmentTarget", [
+                    "point": WebViewNativeLookupHitTestStore.debugPointString(point),
+                    "targetCount": store?.targetCount as Any,
+                    "capturesSegmentTouches": store?.capturesSegmentTouchesInOverlay as Any,
+                    "enabled": store?.isEnabled as Any,
+                    "bounds": WebViewNativeLookupHitTestStore.debugSizeString(bounds.size),
+                    "overlayWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(overlayWindowOrigin),
+                    "nearest": store?.diagnostics(
+                        at: point,
+                        limit: 3,
+                        in: bounds.size,
+                        coordinateViewWindowOrigin: overlayWindowOrigin
+                    ) as Any,
+                ])
                 nativeLookupPressDebug("overlay.pointInside.noSegmentTarget", [
                     "point": WebViewNativeLookupHitTestStore.debugPointString(point),
                     "targetCount": store?.targetCount as Any,
@@ -6769,7 +6779,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     }
 
     private static func point(_ point: CGPoint, isInside target: WebViewNativeLookupHitTarget) -> Bool {
-        target.rects.contains { rect in
+        target.projectedRectsForCurrentHitTestOverlay.contains { rect in
             !rect.isNull && !rect.isEmpty && rect.contains(point)
         }
     }
@@ -7380,14 +7390,21 @@ public class WebViewController: UIViewController {
         } else {
             view.addSubview(nativeLookupHitTestOverlayView)
         }
-        let hitTestLayoutGuide = view.safeAreaLayoutGuide
         nativeLookupHitTestOverlayConstraints = [
-            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: hitTestLayoutGuide.topAnchor),
-            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: hitTestLayoutGuide.leftAnchor),
-            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: hitTestLayoutGuide.bottomAnchor),
-            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: hitTestLayoutGuide.rightAnchor)
+            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: webView.topAnchor),
+            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: webView.leftAnchor),
+            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
+        nativeLookupDebug("overlay.attach", [
+            "capturesSegmentTouches": capturesSegmentTouchesInOverlay,
+            "controllerBounds": WebViewNativeLookupHitTestStore.debugSizeString(view.bounds.size),
+            "webViewBounds": WebViewNativeLookupHitTestStore.debugSizeString(webView.bounds.size),
+            "controllerWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(view.convert(CGPoint.zero, to: nil)),
+            "webViewWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(webView.convert(CGPoint.zero, to: nil)),
+            "overlayWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(nativeLookupHitTestOverlayView.convert(CGPoint.zero, to: nil)),
+        ])
     }
 
     @MainActor
@@ -8184,11 +8201,6 @@ extension WebView: UIViewControllerRepresentable {
         }
 #if os(iOS)
         if controller.webView.hidesTopScrollEdgeEffect != config.hidesTopScrollEdgeEffect {
-            hideNavLog("webView.topEdgeEffect.propertyChanged", [
-                "old": "\(controller.webView.hidesTopScrollEdgeEffect)",
-                "new": "\(config.hidesTopScrollEdgeEffect)",
-                "webViewID": "\(ObjectIdentifier(controller.webView))",
-            ])
         }
         controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
         applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView, reason: "updateUIView.always")
