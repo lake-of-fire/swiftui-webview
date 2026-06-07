@@ -862,10 +862,6 @@ private func nativeLookupPressDebug(_ stage: String, _ payload: @autoclosure () 
     _ = payload
 }
 
-private func nativeLookupDebug(_ stage: String, _ payload: @autoclosure () -> [String: Any] = [:]) {
-    Swift.debugPrint("# LOOKUP", ["stage": stage].merging(payload()) { _, new in new })
-}
-
 public final class WebViewNativeLookupHitTestStore {
     private static let strictOverlayCaptureDefaultsKey = "NativeLookupStrictOverlayCapture"
 
@@ -5900,18 +5896,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
             let hasActiveWebTextSelection = store?.hasActiveWebTextSelection == true
-            nativeLookupDebug("overlay.pointInside.segmentTarget", [
-                "point": WebViewNativeLookupHitTestStore.debugPointString(point),
-                "targetID": target.elementID,
-                "capturesSegmentTouches": capturesSegmentTouches,
-                "targetCount": store?.targetCount as Any,
-                "bounds": WebViewNativeLookupHitTestStore.debugSizeString(bounds.size),
-                "overlayWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(overlayWindowOrigin),
-                "targetCoordinateOrigin": target.coordinateOriginInWindow.map(WebViewNativeLookupHitTestStore.debugPointString) as Any,
-                "rect": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(1)).first as Any,
-                "rebaseX": target.debugHitTestRebaseX as Any,
-                "rebaseY": target.debugHitTestRebaseY as Any,
-            ])
             nativeLookupPressDebug("overlay.pointInside.segmentTarget", [
                 "point": WebViewNativeLookupHitTestStore.debugPointString(point),
                 "targetID": target.elementID,
@@ -5938,20 +5922,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
                 lastPassThroughLogAt = now
-                nativeLookupDebug("overlay.pointInside.noSegmentTarget", [
-                    "point": WebViewNativeLookupHitTestStore.debugPointString(point),
-                    "targetCount": store?.targetCount as Any,
-                    "capturesSegmentTouches": store?.capturesSegmentTouchesInOverlay as Any,
-                    "enabled": store?.isEnabled as Any,
-                    "bounds": WebViewNativeLookupHitTestStore.debugSizeString(bounds.size),
-                    "overlayWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(overlayWindowOrigin),
-                    "nearest": store?.diagnostics(
-                        at: point,
-                        limit: 3,
-                        in: bounds.size,
-                        coordinateViewWindowOrigin: overlayWindowOrigin
-                    ) as Any,
-                ])
                 nativeLookupPressDebug("overlay.pointInside.noSegmentTarget", [
                     "point": WebViewNativeLookupHitTestStore.debugPointString(point),
                     "targetCount": store?.targetCount as Any,
@@ -6870,25 +6840,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
-        let shouldLog = [
-            "touchesBegan.nativeCandidate",
-            "touchesBegan.nativeLookupPending",
-            "touchesEnded.missingTrackingState",
-            "touchesEnded.durationExceeded",
-            "touchesEnded.nativeLookupFailed",
-            "touchesEnded.nativeRecognized",
-            "touchesCancelled",
-            "reset.dropPendingNativeLookup",
-            "reset.dispatchPendingNativeLookup",
-            "failGesture.timeout",
-            "failGesture.movement",
-            "failGesture.nativeLookup.pageTurnStart",
-            "failGesture.nativeLookup.pageTurnSuppressedHit",
-            "failGesture.nativeLookup.pageTurnSuppressedHitTask",
-        ].contains(stage)
-        if shouldLog {
-            Swift.debugPrint("# LOOKUP", payload)
-        }
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -7397,14 +7348,6 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
-        nativeLookupDebug("overlay.attach", [
-            "capturesSegmentTouches": capturesSegmentTouchesInOverlay,
-            "controllerBounds": WebViewNativeLookupHitTestStore.debugSizeString(view.bounds.size),
-            "webViewBounds": WebViewNativeLookupHitTestStore.debugSizeString(webView.bounds.size),
-            "controllerWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(view.convert(CGPoint.zero, to: nil)),
-            "webViewWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(webView.convert(CGPoint.zero, to: nil)),
-            "overlayWindowOrigin": WebViewNativeLookupHitTestStore.debugPointString(nativeLookupHitTestOverlayView.convert(CGPoint.zero, to: nil)),
-        ])
     }
 
     @MainActor
