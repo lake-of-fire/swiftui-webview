@@ -1151,6 +1151,7 @@ public struct WebViewNativeLookupHitTarget {
     public let coordinateOriginInWindow: CGPoint?
     public let lookupPayload: [String: Any]?
     public let frameInfo: WKFrameInfo?
+    public let nativeLookupFrameKey: String?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
     public let debugDistance: CGFloat?
@@ -1165,6 +1166,7 @@ public struct WebViewNativeLookupHitTarget {
         coordinateOriginInWindow: CGPoint? = nil,
         lookupPayload: [String: Any]? = nil,
         frameInfo: WKFrameInfo? = nil,
+        nativeLookupFrameKey: String? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
         debugDistance: CGFloat? = nil,
@@ -1178,6 +1180,7 @@ public struct WebViewNativeLookupHitTarget {
         self.coordinateOriginInWindow = coordinateOriginInWindow
         self.lookupPayload = lookupPayload
         self.frameInfo = frameInfo
+        self.nativeLookupFrameKey = nativeLookupFrameKey
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
         self.debugDistance = debugDistance
@@ -1304,13 +1307,7 @@ public final class WebViewNativeLookupHitTestStore {
             entries.removeAll()
             return
         }
-        entries = targets.compactMap { target in
-            let rects = target.rects
-                .filter { !$0.isNull && !$0.isEmpty }
-            let hitRects = rects.map { $0.insetBy(dx: -hitSlop, dy: -hitSlop) }
-            guard !hitRects.isEmpty else { return nil }
-            return Entry(target: target, rects: rects, hitRects: hitRects)
-        }
+        entries = makeEntries(for: targets)
         debugPrint(
             "# MAY15 nativeHitTargets.update",
             [
@@ -1322,6 +1319,29 @@ public final class WebViewNativeLookupHitTestStore {
                 "lastRects": entries.last.map { Self.debugRectStrings($0.rects.suffix(3)) } as Any,
             ] as [String : Any]
         )
+    }
+
+    public func updateTargets(
+        _ targets: [WebViewNativeLookupHitTarget],
+        replacingNativeLookupFrameKey frameKey: String
+    ) {
+        guard isEnabled else {
+            entries.removeAll()
+            return
+        }
+        let replacementEntries = makeEntries(for: targets)
+        entries.removeAll { $0.target.nativeLookupFrameKey == frameKey }
+        entries.append(contentsOf: replacementEntries)
+    }
+
+    private func makeEntries(for targets: [WebViewNativeLookupHitTarget]) -> [Entry] {
+        targets.compactMap { target in
+            let rects = target.rects
+                .filter { !$0.isNull && !$0.isEmpty }
+            let hitRects = rects.map { $0.insetBy(dx: -hitSlop, dy: -hitSlop) }
+            guard !hitRects.isEmpty else { return nil }
+            return Entry(target: target, rects: rects, hitRects: hitRects)
+        }
     }
 
     public func removeAllTargets() {
@@ -1521,6 +1541,7 @@ public final class WebViewNativeLookupHitTestStore {
             coordinateOriginInWindow: candidate.target.coordinateOriginInWindow,
             lookupPayload: candidate.target.lookupPayload,
             frameInfo: candidate.target.frameInfo,
+            nativeLookupFrameKey: candidate.target.nativeLookupFrameKey,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
             debugDistance: candidate.distance,
