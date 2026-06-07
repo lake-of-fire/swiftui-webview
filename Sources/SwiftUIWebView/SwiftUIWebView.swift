@@ -7219,12 +7219,11 @@ public class WebViewController: UIViewController {
         } else {
             view.addSubview(nativeLookupHitTestOverlayView)
         }
-        let hitTestLayoutGuide = view.safeAreaLayoutGuide
         nativeLookupHitTestOverlayConstraints = [
-            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: hitTestLayoutGuide.topAnchor),
-            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: hitTestLayoutGuide.leftAnchor),
-            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: hitTestLayoutGuide.bottomAnchor),
-            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: hitTestLayoutGuide.rightAnchor)
+            nativeLookupHitTestOverlayView.topAnchor.constraint(equalTo: webView.topAnchor),
+            nativeLookupHitTestOverlayView.leftAnchor.constraint(equalTo: webView.leftAnchor),
+            nativeLookupHitTestOverlayView.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+            nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
     }
