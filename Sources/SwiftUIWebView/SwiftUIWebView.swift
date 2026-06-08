@@ -2002,7 +2002,6 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func clearScriptCallerBinding() {
-        print("# READERLOAD scriptCaller.clear coordinator=\(readerLoadObjectIDString(self)) scriptCaller=\(scriptCaller?.id ?? "nil") currentWebView=\(readerLoadObjectIDString(navigator.webView))")
         scriptCaller?.asyncCaller = nil
     }
 
@@ -8688,7 +8687,6 @@ extension WebView: NSViewRepresentable {
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        print("# READERLOAD scriptCaller.bind.mac.make coordinator=\(readerLoadObjectIDString(context.coordinator)) scriptCaller=\(context.coordinator.scriptCaller?.id ?? "nil") webView=\(readerLoadObjectIDString(webView)) url=\(webView.url?.absoluteString ?? "nil")")
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
             guard let webView else {
                 throw ScriptCallerError.evaluationTimedOut
@@ -8780,7 +8778,6 @@ extension WebView: NSViewRepresentable {
         if let scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
-        print("# READERLOAD scriptCaller.bind.mac.update coordinator=\(readerLoadObjectIDString(context.coordinator)) scriptCaller=\(context.coordinator.scriptCaller?.id ?? "nil") hasAsync=\(context.coordinator.scriptCaller?.hasAsyncCaller ?? false) webView=\(readerLoadObjectIDString(webView)) url=\(webView.url?.absoluteString ?? "nil")")
         context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
             guard let webView else {
                 throw ScriptCallerError.evaluationTimedOut
