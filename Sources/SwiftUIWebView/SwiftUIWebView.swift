@@ -1308,17 +1308,6 @@ public final class WebViewNativeLookupHitTestStore {
             return
         }
         entries = makeEntries(for: targets)
-        debugPrint(
-            "# MAY15 nativeHitTargets.update",
-            [
-                "targetCount": targets.count,
-                "entryCount": entries.count,
-                "firstElementID": entries.first?.target.elementID as Any,
-                "firstRects": entries.first.map { Self.debugRectStrings($0.rects.prefix(3)) } as Any,
-                "lastElementID": entries.last?.target.elementID as Any,
-                "lastRects": entries.last.map { Self.debugRectStrings($0.rects.suffix(3)) } as Any,
-            ] as [String : Any]
-        )
     }
 
     public func updateTargets(
@@ -1725,31 +1714,10 @@ public final class WebViewNativeLookupHitTestStore {
                     ),
                 ] as [String : Any]
             )
-            debugPrint(
-                "# MAY15 nativeHitTargets.tapMiss",
-                [
-                    "point": Self.debugPointString(point),
-                    "containerSize": containerSize.map(Self.debugSizeString) as Any,
-                    "entryCount": entries.count,
-                ] as [String : Any]
-            )
             return false
         }
         debugPrint(
             "POPOVER nativeHitTargets.tapHit",
-            [
-                "point": Self.debugPointString(point),
-                "containerSize": containerSize.map(Self.debugSizeString) as Any,
-                "elementID": candidate.target.elementID,
-                "usedInflatedRects": exactCandidate == nil,
-                "distance": candidate.distance,
-                "centerDistance": candidate.centerDistance,
-                "rects": Self.debugRectStrings([candidate.rect]),
-                "hitRects": Self.debugRectStrings([candidate.hitRect]),
-            ] as [String : Any]
-        )
-        debugPrint(
-            "# MAY15 nativeHitTargets.tapHit",
             [
                 "point": Self.debugPointString(point),
                 "containerSize": containerSize.map(Self.debugSizeString) as Any,
@@ -1795,21 +1763,6 @@ public final class WebViewNativeLookupHitTestStore {
         )
         debugPrint(
             "POPOVER nativeHitTargets.tapHit",
-            [
-                "point": Self.debugPointString(point),
-                "containerSize": containerSize.map(Self.debugSizeString) as Any,
-                "elementID": target.elementID,
-                "usedInflatedRects": false,
-                "source": "capturedStartTarget",
-                "rects": Self.debugRectStrings(target.rects.prefix(4)),
-                "hitRects": Self.debugRectStrings(target.debugHitRects.prefix(4)),
-                "targetUsedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
-                "targetDistance": target.debugDistance as Any,
-                "targetCenterDistance": target.debugCenterDistance as Any,
-            ] as [String : Any]
-        )
-        debugPrint(
-            "# MAY15 nativeHitTargets.tapHit",
             [
                 "point": Self.debugPointString(point),
                 "containerSize": containerSize.map(Self.debugSizeString) as Any,
@@ -2486,15 +2439,6 @@ public class WebViewCoordinator: NSObject {
         pendingWebViewBindingTask?.cancel()
         pendingWebViewBindingTask = nil
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.detach.bindings",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "url": webView?.url?.absoluteString ?? "nil"
-                ] as [String : Any]
-            )
         }
         removeMessageHandlers(for: webView)
         lastUserScriptsContentController = nil
@@ -2556,16 +2500,6 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     func setWebView(_ webView: WKWebView) {
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.bind.setWebView",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "webView": String(describing: ObjectIdentifier(webView)),
-                    "url": webView.url?.absoluteString ?? "nil"
-                ] as [String : Any]
-            )
         }
         navigator.webView = webView
         (webView as? EnhancedWKWebView)?.onDidMoveToWindow = { [weak navigator, weak webView] isAttached in
@@ -3002,16 +2936,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         navigator.cancelReaderLoadHeartbeat(reason: "didFinishNavigation")
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.nav.finish",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "url": webView.url?.absoluteString ?? "nil",
-                    "isLoading": webView.isLoading
-                ] as [String : Any]
-            )
         }
         debugPrint("# READER webView.nav.finish",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -3164,17 +3088,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             scriptCaller?.removeAllMultiTargetFrames()
         }
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.nav.failProvisional",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "url": webView.url?.absoluteString ?? "nil",
-                    "isLoading": webView.isLoading,
-                    "error": String(describing: error)
-                ] as [String : Any]
-            )
         }
         _ = setLoading(
             false,
@@ -3215,17 +3128,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             scriptCaller?.removeAllMultiTargetFrames()
         }
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.nav.fail",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "url": webView.url?.absoluteString ?? "nil",
-                    "isLoading": webView.isLoading,
-                    "error": String(describing: error)
-                ] as [String : Any]
-            )
         }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         let now = Date()
@@ -3255,16 +3157,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             scriptCaller?.removeAllMultiTargetFrames()
         }
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.nav.commit",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "url": webView.url?.absoluteString ?? "nil",
-                    "isLoading": webView.isLoading
-                ] as [String : Any]
-            )
         }
         debugPrint("# READER webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -3371,16 +3263,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         navigator.nativeLookupHitTesting.removeAllTargets()
         if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.nav.start",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": navigator.debugObjectID,
-                    "url": webView.url?.absoluteString ?? "nil",
-                    "isLoading": webView.isLoading
-                ] as [String : Any]
-            )
         }
         debugPrint("# READER webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -4615,17 +4497,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         )
         guard let webView else {
             if !shouldLoadFallbackOnAttach {
-                debugPrint(
-                    "# LOOKUPSMAR6",
-                    [
-                        "stage": "sharedWebView.navigator.queueDataLoad",
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "bytes": data.count,
-                        "mimeType": mimeType,
-                        "baseURL": baseURL.absoluteString
-                    ] as [String : Any]
-                )
             }
             pendingDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
             return
@@ -4697,31 +4568,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
         )
         guard let webView else {
             if !shouldLoadFallbackOnAttach {
-                debugPrint(
-                    "# LOOKUPSMAR6",
-                    [
-                        "stage": "sharedWebView.navigator.queueHTML",
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "htmlLength": html.count,
-                        "baseURL": baseURL?.absoluteString ?? "nil"
-                    ] as [String : Any]
-                )
             }
             pendingHTML = (html: html, baseURL: baseURL)
             return
         }
         if !shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.navigator.loadHTML",
-                    "navigatorID": debugIdentifier ?? "nil",
-                    "navigatorObjectID": debugObjectID,
-                    "htmlLength": html.count,
-                    "baseURL": baseURL?.absoluteString ?? "nil"
-                ] as [String : Any]
-            )
         }
         webView.loadHTMLString(html, baseURL: baseURL)
     }
@@ -6438,24 +6289,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let windowFrame = convert(bounds, to: nil)
         let visualWindowRects = visualRects.map { convert($0, to: nil) }
         let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
-        debugPrint(
-            "# MAY15 nativeHitTargets.pressVisual",
-            [
-                "elementID": target.elementID,
-                "rawRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                "visualRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualRects.prefix(4)),
-                "strokeRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeRects.prefix(4)),
-                "visualWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualWindowRects.prefix(4)),
-                "strokeWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeWindowRects.prefix(4)),
-                "overlayBounds": WebViewNativeLookupHitTestStore.debugRectStrings([bounds]).first as Any,
-                "overlayWindowFrame": WebViewNativeLookupHitTestStore.debugRectStrings([windowFrame]).first as Any,
-                "pathBounds": WebViewNativeLookupHitTestStore.debugRectStrings([path.boundingBoxOfPath]).first as Any,
-                "topExpansion": PressedSegmentStyle.lookupAttachmentTopExpansion,
-                "strokeInset": PressedSegmentStyle.inset,
-                "strokeWidth": PressedSegmentStyle.strokeWidth,
-                "strokeAlpha": PressedSegmentStyle.pressedStrokeAlpha,
-            ] as [String : Any]
-        )
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
@@ -6497,34 +6330,10 @@ private final class NativeLookupHitTestOverlayView: UIView {
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         let target = store?.hitTarget(at: point, in: bounds.size)
         if let target {
-            debugPrint(
-                "# MAY15 nativeHitTargets.overlay",
-                [
-                    "stage": "ios.hitTest.observedPassThrough",
-                    "point": "{\(point.x), \(point.y)}",
-                    "containerSize": "{\(bounds.width), \(bounds.height)}",
-                    "elementID": target.elementID,
-                    "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                    "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
-                    "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
-                    "distance": target.debugDistance as Any,
-                    "centerDistance": target.debugCenterDistance as Any,
-                    "verdict": "nativeOverlayVisualOnly",
-                ] as [String : Any]
-            )
         } else {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
                 lastPassThroughLogAt = now
-                debugPrint(
-                    "# MAY15 nativeHitTargets.overlay",
-                    [
-                        "stage": "ios.hitTest.passThrough",
-                        "point": "{\(point.x), \(point.y)}",
-                        "containerSize": "{\(bounds.width), \(bounds.height)}",
-                        "nearest": store?.diagnostics(at: point, limit: 3) as Any,
-                    ] as [String : Any]
-                )
             }
         }
         return false
@@ -6560,14 +6369,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
               event.allTouches?.count == 1,
               let touch = touches.first,
               let coordinateView else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesBegan.invalidTouchSet",
-                    "touchCount": touches.count,
-                    "allTouchCount": event.allTouches?.count as Any,
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.invalidTouchSet",
                 verdict: "passThrough.allowed",
@@ -6588,20 +6389,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             in: coordinateView.bounds.size,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ) else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesBegan.noSegmentTarget",
-                    "point": Self.debugPointString(point),
-                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                    "nearest": store?.diagnostics(
-                        at: point,
-                        limit: 5,
-                        in: coordinateView.bounds.size,
-                        coordinateViewWindowOrigin: coordinateViewWindowOrigin
-                    ) as Any,
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.noSegmentTarget",
                 verdict: "passThrough.allowed",
@@ -6621,20 +6408,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "touchesBegan.nativeCandidate",
-                "point": Self.debugPointString(point),
-                "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                "elementID": target.elementID,
-                "rects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                "hitRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4)),
-                "usedInflatedHitRect": target.debugUsedInflatedHitRect as Any,
-                "distance": target.debugDistance as Any,
-                "centerDistance": target.debugCenterDistance as Any,
-            ] as [String : Any]
-        )
         logTouchDeliveryVerdict(
             stage: "touchesBegan.nativeCandidate",
             verdict: "pending.nativeRecognizerHoldingWebKitTouches",
@@ -6738,10 +6511,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
               let target = touchStartTarget,
               let touch = touches.first,
               let coordinateView else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                ["stage": "touchesEnded.missingTrackingState"] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.missingTrackingState",
                 verdict: "passThrough.allowed",
@@ -6756,14 +6525,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         let duration = event.timestamp - startedAt
         guard duration <= Self.segmentTapMaximumDuration else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesEnded.durationExceeded",
-                    "duration": duration,
-                    "maximumDuration": Self.segmentTapMaximumDuration,
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.durationExceeded",
                 verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -6783,17 +6544,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let point = touch.location(in: coordinateView)
         let movement = hypot(point.x - start.x, point.y - start.y)
         guard movement <= Self.segmentTapMovementTolerance else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "touchesEnded.nativeLookupFailed",
-                    "start": Self.debugPointString(start),
-                    "point": Self.debugPointString(point),
-                    "movement": movement,
-                    "duration": duration,
-                    "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                ] as [String : Any]
-            )
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.nativeLookupFailed",
                 verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -6823,17 +6573,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 in: coordinateView.bounds.size,
                 coordinateViewWindowOrigin: coordinateViewWindowOrigin
             ) == true else {
-                debugPrint(
-                    "# MAY15 nativeHitTargets.passThrough",
-                    [
-                        "stage": "touchesEnded.nativeLookupFailed",
-                        "start": Self.debugPointString(start),
-                        "point": Self.debugPointString(point),
-                        "movement": movement,
-                        "duration": duration,
-                        "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-                    ] as [String : Any]
-                )
                 logTouchDeliveryVerdict(
                     stage: "touchesEnded.nativeLookupFailed",
                     verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -6852,17 +6591,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 return
             }
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "touchesEnded.nativeRecognized",
-                "start": Self.debugPointString(start),
-                "point": Self.debugPointString(point),
-                "movement": movement,
-                "duration": duration,
-                "containerSize": Self.debugSizeString(coordinateView.bounds.size),
-            ] as [String : Any]
-        )
         logTouchDeliveryVerdict(
             stage: "touchesEnded.nativeRecognized",
             verdict: "passThrough.blockedForTapLookup",
@@ -6888,13 +6616,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "touchesCancelled",
-                "touchCount": touches.count,
-            ] as [String : Any]
-        )
         logTouchDeliveryVerdict(
             stage: "touchesCancelled",
             verdict: "passThrough.allowedAfterCancellation",
@@ -6929,7 +6650,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private func failGesture(reason: String, payload: [String: Any] = [:]) {
         var mergedPayload = payload
         mergedPayload["stage"] = "failGesture.\(reason)"
-        debugPrint("# MAY15 nativeHitTargets.passThrough", mergedPayload)
         logTouchDeliveryVerdict(
             stage: "failGesture.\(reason)",
             verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -6974,7 +6694,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload["hitRects"] = WebViewNativeLookupHitTestStore.debugRectStrings(target.debugHitRects.prefix(4))
         }
         debugPrint("POPOVER nativeGesture.touchDelivery", payload)
-        debugPrint("# MAY15 nativeHitTargets.touchDelivery", payload)
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -7214,22 +6933,6 @@ public class WebViewController: UIViewController {
         if nativeLookupHitTestGestureRecognizer.view !== webView {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-            debugPrint(
-                "# MAY15 nativeHitTargets.touchDelivery",
-                [
-                    "stage": "recognizer.attach",
-                    "verdict": "configuredToDelayWebKitTouchesAndGateWebKitTapRecognizers",
-                    "recognizerViewType": String(describing: type(of: webView)),
-                    "overlayViewType": String(describing: type(of: nativeLookupHitTestOverlayView)),
-                    "attachedToWebView": true,
-                    "attachedToOverlay": false,
-                    "overlayPassThrough": true,
-                    "segmentTargetTouchesReachWebKit": "webkitTapRecognizersRequireNativeLookupFailure",
-                    "delaysTouchesBegan": nativeLookupHitTestGestureRecognizer.delaysTouchesBegan,
-                    "delaysTouchesEnded": nativeLookupHitTestGestureRecognizer.delaysTouchesEnded,
-                    "cancelsTouchesInView": nativeLookupHitTestGestureRecognizer.cancelsTouchesInView,
-                ] as [String : Any]
-            )
         }
         configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
         DispatchQueue.main.async { [weak self] in
@@ -7275,18 +6978,6 @@ public class WebViewController: UIViewController {
             newlyConfigured.append(String(describing: type(of: recognizer)))
         }
         guard !newlyConfigured.isEmpty else { return }
-        debugPrint(
-            "# MAY15 nativeHitTargets.touchDelivery",
-            [
-                "stage": "recognizer.failureRequirements",
-                "verdict": "webkitTapRecognizersRequireNativeLookupFailure",
-                "reason": reason,
-                "tapRecognizerCount": tapRecognizers.count,
-                "newlyConfiguredCount": newlyConfigured.count,
-                "newlyConfiguredTypes": Array(newlyConfigured.prefix(8)),
-                "nativeRecognizerViewType": nativeLookupHitTestGestureRecognizer.view.map { String(describing: type(of: $0)) } ?? "nil",
-            ] as [String : Any]
-        )
     }
 
 }
@@ -7633,15 +7324,6 @@ extension WebView: UIViewControllerRepresentable {
         context: Context
     ) {
         if !navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.configure",
-                    "navigatorID": navigator.debugIdentifier ?? "nil",
-                    "controller": String(describing: ObjectIdentifier(controller)),
-                    "webView": String(describing: ObjectIdentifier(webView))
-                ] as [String : Any]
-            )
         }
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         if context.coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
@@ -7733,17 +7415,6 @@ extension WebView: UIViewControllerRepresentable {
         let webView = makeWebView(config: config, coordinator: context.coordinator)
         let controller = WebViewController(webView: webView)
         if !context.coordinator.navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.lifecycle.makeUIViewController",
-                    "navigatorID": context.coordinator.navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": context.coordinator.navigator.debugObjectID,
-                    "coordinator": String(describing: ObjectIdentifier(context.coordinator)),
-                    "controller": String(describing: ObjectIdentifier(controller)),
-                    "webView": String(describing: ObjectIdentifier(webView))
-                ] as [String : Any]
-            )
         }
         configureWebView(webView, controller: controller, context: context)
         context.coordinator.markSnapshotRestoreIfNeeded()
@@ -7772,20 +7443,6 @@ extension WebView: UIViewControllerRepresentable {
         controller.onViewWillDisappear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
             if !coordinator.navigator.shouldLoadFallbackOnAttach {
-                debugPrint(
-                    "# LOOKUPSMAR6",
-                    [
-                        "stage": "sharedWebView.lifecycle.viewWillDisappear",
-                        "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
-                        "navigatorObjectID": coordinator.navigator.debugObjectID,
-                        "url": controller.webView.url?.absoluteString ?? "nil",
-                        "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
-                        "window": String(describing: controller.view.window.map(ObjectIdentifier.init)),
-                        "isWebViewUnloaded": controller.isWebViewUnloaded,
-                        "autoUnloadOnDisappear": coordinator.lifecycleConfig.autoUnloadOnDisappear,
-                        "unloadOnlyWhenRemovedFromHierarchy": coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy
-                    ] as [String : Any]
-                )
             }
             #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
@@ -7797,20 +7454,6 @@ extension WebView: UIViewControllerRepresentable {
         controller.onWillMoveToNoParent = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
             if !coordinator.navigator.shouldLoadFallbackOnAttach {
-                debugPrint(
-                    "# LOOKUPSMAR6",
-                    [
-                        "stage": "sharedWebView.lifecycle.willMoveToNoParent",
-                        "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
-                        "navigatorObjectID": coordinator.navigator.debugObjectID,
-                        "url": controller.webView.url?.absoluteString ?? "nil",
-                        "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
-                        "window": String(describing: controller.view.window.map(ObjectIdentifier.init)),
-                        "isWebViewUnloaded": controller.isWebViewUnloaded,
-                        "autoUnloadOnDisappear": coordinator.lifecycleConfig.autoUnloadOnDisappear,
-                        "unloadOnlyWhenRemovedFromHierarchy": coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy
-                    ] as [String : Any]
-                )
             }
             guard coordinator.lifecycleConfig.unloadOnlyWhenRemovedFromHierarchy else { return }
             coordinator.unloadWebViewIfNeeded(controller: controller)
@@ -7927,20 +7570,6 @@ extension WebView: UIViewControllerRepresentable {
             }
         }
         if !context.coordinator.navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.lifecycle.updateUIViewController",
-                    "navigatorID": context.coordinator.navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": context.coordinator.navigator.debugObjectID,
-                    "coordinator": String(describing: ObjectIdentifier(context.coordinator)),
-                    "controller": String(describing: ObjectIdentifier(controller)),
-                    "webView": String(describing: ObjectIdentifier(controller.webView)),
-                    "isWebViewUnloaded": controller.isWebViewUnloaded,
-                    "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
-                    "window": String(describing: controller.view.window.map(ObjectIdentifier.init))
-                ] as [String : Any]
-            )
         }
         updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
@@ -8046,21 +7675,6 @@ extension WebView: UIViewControllerRepresentable {
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         if !coordinator.navigator.shouldLoadFallbackOnAttach {
-            debugPrint(
-                "# LOOKUPSMAR6",
-                [
-                    "stage": "sharedWebView.lifecycle.dismantleUIViewController",
-                    "navigatorID": coordinator.navigator.debugIdentifier ?? "nil",
-                    "navigatorObjectID": coordinator.navigator.debugObjectID,
-                    "coordinator": String(describing: ObjectIdentifier(coordinator)),
-                    "controller": String(describing: ObjectIdentifier(controller)),
-                    "webView": String(describing: ObjectIdentifier(controller.webView)),
-                    "url": controller.webView.url?.absoluteString ?? "nil",
-                    "isWebViewUnloaded": controller.isWebViewUnloaded,
-                    "parent": String(describing: controller.parent.map(ObjectIdentifier.init)),
-                    "window": String(describing: controller.view.window.map(ObjectIdentifier.init))
-                ] as [String : Any]
-            )
         }
         controller.clearSnapshotOverlay()
         coordinator.navigator.nativeLookupHitTesting.removeAllTargets()
@@ -8130,24 +7744,6 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         let windowFrame = convert(bounds, to: nil)
         let visualWindowRects = visualRects.map { convert($0, to: nil) }
         let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
-        debugPrint(
-            "# MAY15 nativeHitTargets.pressVisual",
-            [
-                "elementID": target.elementID,
-                "rawRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects.prefix(4)),
-                "visualRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualRects.prefix(4)),
-                "strokeRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeRects.prefix(4)),
-                "visualWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(visualWindowRects.prefix(4)),
-                "strokeWindowRects": WebViewNativeLookupHitTestStore.debugRectStrings(strokeWindowRects.prefix(4)),
-                "overlayBounds": WebViewNativeLookupHitTestStore.debugRectStrings([bounds]).first as Any,
-                "overlayWindowFrame": WebViewNativeLookupHitTestStore.debugRectStrings([windowFrame]).first as Any,
-                "pathBounds": WebViewNativeLookupHitTestStore.debugRectStrings([path.boundingBoxOfPath]).first as Any,
-                "topExpansion": PressedSegmentStyle.lookupAttachmentTopExpansion,
-                "strokeInset": PressedSegmentStyle.inset,
-                "strokeWidth": PressedSegmentStyle.strokeWidth,
-                "strokeAlpha": PressedSegmentStyle.pressedStrokeAlpha,
-            ] as [String : Any]
-        )
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
@@ -8191,26 +7787,10 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
             && alphaValue > 0
             && store?.containsClaimableTarget(at: point, in: bounds.size) == true
         if containsTarget {
-            debugPrint(
-                "# MAY15 nativeHitTargets.overlay",
-                [
-                    "stage": "mac.hitTest.claimed",
-                    "point": "{\(point.x), \(point.y)}",
-                    "containerSize": "{\(bounds.width), \(bounds.height)}",
-                ] as [String : Any]
-            )
         } else {
             let now = Date().timeIntervalSinceReferenceDate
             if now - lastPassThroughLogAt > 0.25 {
                 lastPassThroughLogAt = now
-                debugPrint(
-                    "# MAY15 nativeHitTargets.overlay",
-                    [
-                        "stage": "mac.hitTest.passThrough",
-                        "point": "{\(point.x), \(point.y)}",
-                        "containerSize": "{\(bounds.width), \(bounds.height)}",
-                    ] as [String : Any]
-                )
             }
         }
         guard containsTarget else {
@@ -8234,25 +7814,9 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         }
         let point = view.convert(event.locationInWindow, from: nil)
         guard let target = store?.hitTarget(at: point, in: view.bounds.size) else {
-            debugPrint(
-                "# MAY15 nativeHitTargets.passThrough",
-                [
-                    "stage": "mac.mouseDown.noSegmentTarget",
-                    "point": "{\(point.x), \(point.y)}",
-                    "containerSize": "{\(view.bounds.width), \(view.bounds.height)}",
-                ] as [String : Any]
-            )
             state = .failed
             return
         }
-        debugPrint(
-            "# MAY15 nativeHitTargets.passThrough",
-            [
-                "stage": "mac.mouseDown.nativeCandidate",
-                "point": "{\(point.x), \(point.y)}",
-                "containerSize": "{\(view.bounds.width), \(view.bounds.height)}",
-            ] as [String : Any]
-        )
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
         MainActor.assumeIsolated {
