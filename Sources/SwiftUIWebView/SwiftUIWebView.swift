@@ -2025,10 +2025,8 @@ public class WebViewCoordinator: NSObject {
         pendingWebViewBindingTask?.cancel()
         pendingWebViewBindingTask = nil
         let isCurrentWebView = webView == nil || navigator.webView === webView
-        print("# READERLOAD webView.teardown.begin coordinator=\(readerLoadObjectIDString(self)) detachedWebView=\(readerLoadObjectIDString(webView)) currentWebView=\(readerLoadObjectIDString(navigator.webView)) isCurrent=\(isCurrentWebView)")
         removeMessageHandlers(for: webView)
         guard isCurrentWebView else {
-            print("# READERLOAD webView.teardown.skipCurrentClear coordinator=\(readerLoadObjectIDString(self)) detachedWebView=\(readerLoadObjectIDString(webView)) currentWebView=\(readerLoadObjectIDString(navigator.webView))")
             return
         }
         lastUserScriptsContentController = nil
@@ -2038,7 +2036,6 @@ public class WebViewCoordinator: NSObject {
         clearScriptCallerBinding()
         invalidateWebViewObservations()
         schedulePaginationStateUpdate(paginationController.detach())
-        print("# READERLOAD webView.teardown.cleared coordinator=\(readerLoadObjectIDString(self)) detachedWebView=\(readerLoadObjectIDString(webView))")
     }
 
     @MainActor
@@ -3102,10 +3099,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         var newState = self.webView.state
         newState.mainFrameHTTPStatusCode = nil
         self.webView.state = newState
-        debugPrint(
-            "# 404 webView.nav.statusReset",
-            "url=\(webView.url?.absoluteString ?? "<nil>")"
-        )
     }
     
     @MainActor
@@ -3251,12 +3244,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 var newState = self.webView.state
                 newState.mainFrameHTTPStatusCode = response.statusCode
                 self.webView.state = newState
-                debugPrint(
-                    "# 404 webView.nav.mainFrameResponse",
-                    "url=\(response.url?.absoluteString ?? "<nil>")",
-                    "status=\(response.statusCode)",
-                    "isHTTPError=\(response.statusCode >= 400)"
-                )
             }
         }
         return .allow
