@@ -40,8 +40,47 @@ private func popoverWebViewInsetLog(_ metadata: [String: String], force: Bool = 
 
 @inline(__always)
 private func lookupLog(_ stage: String, _ metadata: [String: String] = [:]) {
-    _ = stage
-    _ = metadata
+    lookupLog(stage, metadata.mapValues { $0 as Any })
+}
+
+private func popoverLogValue(_ value: Any) -> String {
+    let mirror = Mirror(reflecting: value)
+    if mirror.displayStyle == .optional {
+        guard let child = mirror.children.first else { return "nil" }
+        return popoverLogValue(child.value)
+    }
+    switch value {
+    case let value as String:
+        return value.replacingOccurrences(of: "\n", with: "\\n")
+    case let value as CGFloat:
+        return String(format: "%.2f", Double(value))
+    case let value as Double:
+        return value.isFinite ? String(format: "%.2f", value) : "\(value)"
+    case let value as Float:
+        return value.isFinite ? String(format: "%.2f", Double(value)) : "\(value)"
+    case let value as CGRect:
+        return "{{\(String(format: "%.2f", value.origin.x)),\(String(format: "%.2f", value.origin.y))},{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}}"
+    case let value as CGPoint:
+        return "{\(String(format: "%.2f", value.x)),\(String(format: "%.2f", value.y))}"
+    case let value as CGSize:
+        return "{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}"
+    case let value as [String: Any]:
+        return "{" + value.keys.sorted().map { "\($0):\(popoverLogValue(value[$0] as Any))" }.joined(separator: ",") + "}"
+    case let value as [Any]:
+        return "[" + value.prefix(5).map { popoverLogValue($0) }.joined(separator: ",") + (value.count > 5 ? ",..." : "") + "]"
+    default:
+        return String(describing: value).replacingOccurrences(of: "\n", with: "\\n")
+    }
+}
+
+@inline(__always)
+private func lookupLog(_ stage: String, _ metadata: [String: Any]) {
+    let details = metadata.keys.sorted().map { "\($0)=\(popoverLogValue(metadata[$0] as Any))" }.joined(separator: " ")
+    if details.isEmpty {
+        print("# POPOVER \(stage)")
+    } else {
+        print("# POPOVER \(stage) \(details)")
+    }
 }
 
 #if os(iOS)
@@ -942,6 +981,15 @@ public final class WebViewNativeLookupHitTestStore {
             return
         }
         entries = makeEntries(for: targets)
+        lookupLog("store.updateTargets", [
+            "incoming": targets.count,
+            "stored": entries.count,
+            "firstID": targets.first?.elementID as Any,
+            "firstRect": targets.first?.rects.first as Any,
+            "firstOrigin": targets.first?.coordinateOriginInWindow as Any,
+            "firstFrameKey": targets.first?.nativeLookupFrameKey as Any,
+            "firstPayload": targets.first?.lookupPayload != nil,
+        ])
     }
 
     public func updateTargets(
@@ -955,6 +1003,16 @@ public final class WebViewNativeLookupHitTestStore {
         let replacementEntries = makeEntries(for: targets)
         entries.removeAll { $0.target.nativeLookupFrameKey == frameKey }
         entries.append(contentsOf: replacementEntries)
+        lookupLog("store.updateTargets.frame", [
+            "frameKey": frameKey,
+            "incoming": targets.count,
+            "replacementStored": replacementEntries.count,
+            "totalStored": entries.count,
+            "firstID": targets.first?.elementID as Any,
+            "firstRect": targets.first?.rects.first as Any,
+            "firstOrigin": targets.first?.coordinateOriginInWindow as Any,
+            "firstPayload": targets.first?.lookupPayload != nil,
+        ])
     }
 
     public func removeAllTargets() {
@@ -1382,12 +1440,32 @@ public final class WebViewNativeLookupHitTestStore {
             )
             : nil
         guard let candidate = exactCandidate ?? inflatedCandidate else {
+            lookupLog("store.handleTap.miss", [
+                "point": point,
+                "container": containerSize as Any,
+                "coordinateOrigin": coordinateViewWindowOrigin as Any,
+                "coordinateMinY": coordinateViewWindowMinY as Any,
+                "targetCount": entries.count,
+            ])
             return false
         }
         let target = target(
             for: candidate,
             usedInflatedHitRect: exactCandidate == nil
         )
+        lookupLog("store.handleTap.hit", [
+            "point": point,
+            "container": containerSize as Any,
+            "id": target.elementID,
+            "rect": target.rects.first as Any,
+            "hitRect": target.debugHitRects.first as Any,
+            "usedInflated": target.debugUsedInflatedHitRect as Any,
+            "rebaseX": target.debugHitTestRebaseX as Any,
+            "rebaseY": target.debugHitTestRebaseY as Any,
+            "distance": target.debugDistance as Any,
+            "targetOrigin": target.coordinateOriginInWindow as Any,
+            "payload": target.lookupPayload != nil,
+        ])
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
             point: point,
@@ -1420,6 +1498,19 @@ public final class WebViewNativeLookupHitTestStore {
             coordinateViewWindowOrigin: coordinateViewWindowOrigin,
             targetCoordinateOriginInWindow: target.coordinateOriginInWindow
         )
+        lookupLog("store.handleTap.target", [
+            "point": point,
+            "rebasedPoint": rebased.point,
+            "container": containerSize as Any,
+            "id": target.elementID,
+            "rect": target.rects.first as Any,
+            "hitRect": target.debugHitRects.first as Any,
+            "usedInflated": target.debugUsedInflatedHitRect as Any,
+            "rebaseX": rebased.rebaseX,
+            "rebaseY": rebased.rebaseY,
+            "targetOrigin": target.coordinateOriginInWindow as Any,
+            "payload": target.lookupPayload != nil,
+        ])
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
             point: point,
@@ -6845,6 +6936,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
+        if stage != "touchesMoved" {
+            lookupLog("touch.\(stage)", payload)
+        }
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
