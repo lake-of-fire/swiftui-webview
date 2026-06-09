@@ -26,8 +26,6 @@ private func safeAreaLog(_ stage: String, _ metadata: [String: String] = [:]) {
     _ = metadata
 }
 
-private var popoverWebViewInsetLogSignatures = Set<String>()
-
 @inline(__always)
 private func bookLog(_ stage: String, _ metadata: [String: String] = [:]) {
     _ = stage
