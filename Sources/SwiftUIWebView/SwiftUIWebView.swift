@@ -75,12 +75,24 @@ private func popoverLogValue(_ value: Any) -> String {
 
 @inline(__always)
 private func lookupLog(_ stage: String, _ metadata: [String: Any]) {
+    guard shouldLogLookupStage(stage) else { return }
     let details = metadata.keys.sorted().map { "\($0)=\(popoverLogValue(metadata[$0] as Any))" }.joined(separator: " ")
     if details.isEmpty {
         print("# POPOVER \(stage)")
     } else {
         print("# POPOVER \(stage) \(details)")
     }
+}
+
+private let lookupDiagnosticStages: Set<String> = [
+    "store.handleTap.target"
+]
+
+private func shouldLogLookupStage(_ stage: String) -> Bool {
+    if ProcessInfo.processInfo.environment["MANABI_VERBOSE_POPOVER"] == "1" {
+        return true
+    }
+    return lookupDiagnosticStages.contains(stage)
 }
 
 #if os(iOS)
