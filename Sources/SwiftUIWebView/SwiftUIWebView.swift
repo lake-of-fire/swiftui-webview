@@ -78,14 +78,25 @@ private func lookupLog(_ stage: String, _ metadata: [String: Any]) {
     guard shouldLogLookupStage(stage) else { return }
     let details = metadata.keys.sorted().map { "\($0)=\(popoverLogValue(metadata[$0] as Any))" }.joined(separator: " ")
     if details.isEmpty {
-        print("# POPOVER \(stage)")
+        print("# LOOKUP \(stage)")
     } else {
-        print("# POPOVER \(stage) \(details)")
+        print("# LOOKUP \(stage) \(details)")
     }
 }
 
 private let lookupDiagnosticStages: Set<String> = [
-    "store.handleTap.target"
+    "store.updateTargets",
+    "store.updateTargets.frame",
+    "store.removeAllTargets",
+    "store.handleTap.miss",
+    "store.handleTap.hit",
+    "store.handleTap.target",
+    "touch.touchesBegan.noSegmentTarget",
+    "touch.touchesBegan.nativeCandidate",
+    "touch.touchesEnded.nativeRecognized",
+    "controller.attachNativeLookupOverlay",
+    "controller.nativeLookup.enabled",
+    "controller.nativeLookup.store"
 ]
 
 private func shouldLogLookupStage(_ stage: String) -> Bool {
@@ -910,8 +921,7 @@ public struct WebViewNativeLookupHit {
 }
 
 private func nativeLookupPressDebug(_ stage: String, _ payload: @autoclosure () -> [String: Any] = [:]) {
-    _ = stage
-    _ = payload
+    lookupLog(stage, payload())
 }
 
 public final class WebViewNativeLookupHitTestStore {
@@ -7232,6 +7242,14 @@ public class WebViewController: UIViewController {
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
         let previousCaptureMode = capturesNativeLookupSegmentTouchesInOverlay
         capturesNativeLookupSegmentTouchesInOverlay = store.capturesSegmentTouchesInOverlay
+        lookupLog("controller.nativeLookup.store", [
+            "previousCaptureMode": previousCaptureMode,
+            "captureMode": capturesNativeLookupSegmentTouchesInOverlay,
+            "targetCount": store.targetCount,
+            "isEnabled": store.isEnabled,
+            "overlayInstalled": nativeLookupHitTestOverlayView.superview != nil,
+            "recognizerHost": nativeLookupHitTestGestureRecognizer.view.map { String(describing: type(of: $0)) } as Any,
+        ])
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
@@ -7439,6 +7457,16 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             recognizerHostView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
         }
+        lookupLog("controller.attachNativeLookupOverlay", [
+            "captureMode": capturesSegmentTouchesInOverlay,
+            "recognizerHost": String(describing: type(of: recognizerHostView)),
+            "overlayHadSuperview": nativeLookupHitTestOverlayView.superview != nil,
+            "webViewWindow": webView.window != nil,
+            "webViewBounds": webView.bounds,
+            "overlayBounds": nativeLookupHitTestOverlayView.bounds,
+            "targetCount": nativeLookupHitTestGestureRecognizer.store?.targetCount as Any,
+            "isEnabled": nativeLookupHitTestGestureRecognizer.store?.isEnabled as Any,
+        ])
         nativeLookupHitTestGestureRecognizer.clientCoordinateView = webView
         if capturesSegmentTouchesInOverlay {
         } else {
@@ -7465,6 +7493,14 @@ public class WebViewController: UIViewController {
     func setNativeLookupHitTestingEnabled(_ enabled: Bool, reason: String) {
         let wasInstalled = nativeLookupHitTestGestureRecognizer.view != nil
             || nativeLookupHitTestOverlayView.superview != nil
+        lookupLog("controller.nativeLookup.enabled", [
+            "enabled": enabled,
+            "reason": reason,
+            "wasInstalled": wasInstalled,
+            "overlayInstalled": nativeLookupHitTestOverlayView.superview != nil,
+            "recognizerHost": nativeLookupHitTestGestureRecognizer.view.map { String(describing: type(of: $0)) } as Any,
+            "targetCount": nativeLookupHitTestGestureRecognizer.store?.targetCount as Any,
+        ])
         if enabled {
             if !wasInstalled {
                 attachNativeLookupHitTestOverlay()
