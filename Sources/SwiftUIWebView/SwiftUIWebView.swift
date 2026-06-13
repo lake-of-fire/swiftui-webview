@@ -2810,10 +2810,15 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
+            let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
+            if hasActiveLookup,
+               navigator.nativeLookupHitTesting.activeNativeTouchElementID == nil {
+                navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
+                return
+            }
             if navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup {
                 return
             }
-            let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
             if hasActiveLookup {
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
@@ -6358,9 +6363,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
-        cancelsTouchesInView = true
-        delaysTouchesBegan = true
-        delaysTouchesEnded = true
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -6629,8 +6634,47 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         state = .failed
     }
 
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+        false
+    }
+
     override func reset() {
+        if state == .possible {
+            dispatchPendingNativeLookupFromResetIfNeeded()
+        }
         resetTrackingState()
+    }
+
+    private func dispatchPendingNativeLookupFromResetIfNeeded() {
+        guard let target = touchStartTarget,
+              let point = touchStartPoint,
+              let coordinateView else { return }
+        guard Self.point(point, isInside: target),
+              store?.hasActiveWebTextSelection != true else {
+            touchStartOverlay?.clearPressedTarget()
+            store?.onTouchDownHitCancelled?(target)
+            return
+        }
+        if touchStartWasActiveTarget {
+            store?.onActiveTargetTouchDown?(target)
+            touchStartOverlay?.clearPressedTarget()
+            return
+        }
+        let didDispatchLookup = store?.handleTap(
+            on: target,
+            at: point,
+            in: coordinateView.bounds.size
+        ) == true
+        if didDispatchLookup {
+            touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
+        } else {
+            touchStartOverlay?.clearPressedTarget()
+            store?.onTouchDownHitCancelled?(target)
+        }
     }
 
     private func resetTrackingState(clearPressedTarget: Bool = true) {
@@ -6712,7 +6756,6 @@ public class WebViewController: UIViewController {
     private var snapshotImageView: UIImageView?
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
-    private var nativeLookupTapFailureRequirementRecognizerIDs: Set<ObjectIdentifier> = []
     private var lastKnownWebViewSize: CGSize = .zero
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
@@ -6738,7 +6781,6 @@ public class WebViewController: UIViewController {
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateObscuredInsets()
-        configureNativeLookupTapFailureRequirements(reason: "viewDidLayoutSubviews")
         let size = webView.bounds.size
         if size.width > 1, size.height > 1 {
             lastKnownWebViewSize = size
@@ -6934,10 +6976,6 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
         }
-        configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
-        DispatchQueue.main.async { [weak self] in
-            self?.configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay.async")
-        }
         if let snapshotImageView {
             view.insertSubview(nativeLookupHitTestOverlayView, belowSubview: snapshotImageView)
         } else {
@@ -6950,34 +6988,6 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
-    }
-
-    @MainActor
-    private func configureNativeLookupTapFailureRequirements(reason: String) {
-        var tapRecognizers: [UIGestureRecognizer] = []
-        func collectTapRecognizers(in candidate: UIView) {
-            if let recognizers = candidate.gestureRecognizers {
-                for recognizer in recognizers
-                where recognizer !== nativeLookupHitTestGestureRecognizer
-                    && recognizer is UITapGestureRecognizer {
-                    tapRecognizers.append(recognizer)
-                }
-            }
-            for subview in candidate.subviews {
-                collectTapRecognizers(in: subview)
-            }
-        }
-        collectTapRecognizers(in: webView)
-
-        var newlyConfigured: [String] = []
-        for recognizer in tapRecognizers {
-            let identifier = ObjectIdentifier(recognizer)
-            guard !nativeLookupTapFailureRequirementRecognizerIDs.contains(identifier) else { continue }
-            recognizer.require(toFail: nativeLookupHitTestGestureRecognizer)
-            nativeLookupTapFailureRequirementRecognizerIDs.insert(identifier)
-            newlyConfigured.append(String(describing: type(of: recognizer)))
-        }
-        guard !newlyConfigured.isEmpty else { return }
     }
 
 }
@@ -7342,7 +7352,8 @@ extension WebView: UIViewControllerRepresentable {
         webView.uiDelegate = context.coordinator
         webView.scrollView.delegate = context.coordinator
         webView.buildMenu = buildMenu
-        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
+        let nativeLookupHitTestingEnabled = config.nativeLookupHitTestingEnabled
+        navigator.nativeLookupHitTesting.isEnabled = nativeLookupHitTestingEnabled
         webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
 #if os(iOS)
@@ -7403,6 +7414,10 @@ extension WebView: UIViewControllerRepresentable {
         context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+        controller.setNativeLookupHitTestingEnabled(
+            nativeLookupHitTestingEnabled,
+            reason: "configureWebView"
+        )
         refreshDarkModeSetting(webView: webView)
         applyVisualConfiguration(webView: webView, containerView: controller.view)
     }
@@ -7470,8 +7485,13 @@ extension WebView: UIViewControllerRepresentable {
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
-        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
+        let nativeLookupHitTestingEnabled = config.nativeLookupHitTestingEnabled
+        navigator.nativeLookupHitTesting.isEnabled = nativeLookupHitTestingEnabled
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+        controller.setNativeLookupHitTestingEnabled(
+            nativeLookupHitTestingEnabled,
+            reason: "updateUIViewController"
+        )
         if let resolvedWebViewPool {
             resolvedWebViewPool.attachWarmShelfIfNeeded(to: controller.view.window)
         }
