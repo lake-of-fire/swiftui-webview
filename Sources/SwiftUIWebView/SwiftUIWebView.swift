@@ -18,6 +18,37 @@ private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> 
 
 @inline(__always)
 private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) {
+    let loggedPrefixes = [
+        "webViewNavigator.requestDeferredUntilAttached",
+        "webViewNavigator.directLoad",
+        "webViewNavigator.dataLoad",
+        "webViewNavigator.htmlLoad",
+        "webViewNavigator.pending",
+        "webViewNavigator.preProvisionalWatchdog",
+        "webViewNavigator.competingOperation",
+        "webView.nav.",
+        "webView.processTerminated",
+        "readerDocState"
+    ]
+    guard loggedPrefixes.contains(where: { stage.hasPrefix($0) }) else { return }
+    let fields = metadata
+        .sorted { $0.key < $1.key }
+        .map { key, value in "\(key)=\(value)" }
+        .joined(separator: " ")
+    let line = fields.isEmpty
+        ? "# READERLOAD stage=\(stage)\n"
+        : "# READERLOAD stage=\(stage) \(fields)\n"
+    print(line, terminator: "")
+    guard let data = line.data(using: .utf8) else { return }
+    let url = URL(fileURLWithPath: "/tmp/manabi-reader-load.log")
+    if FileManager.default.fileExists(atPath: url.path),
+       let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    } else {
+        try? data.write(to: url, options: .atomic)
+    }
 }
 
 @inline(__always)
@@ -2552,7 +2583,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             if isEBookDocState {
                 let epubSignature = [
                     href,
-                    reason,
                     readyState,
                     hasReaderContent,
                     String(describing: hasReaderRenderReady),
@@ -2572,6 +2602,28 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 ].joined(separator: "|")
                 if lastEpubReaderDocStateSignature != epubSignature {
                     lastEpubReaderDocStateSignature = epubSignature
+                    readerLoadLog(
+                        "readerDocState",
+                        [
+                            "bodyDisplay": bodyDisplay,
+                            "bodyLoading": bodyLoading,
+                            "bodyOpacity": bodyOpacity,
+                            "bodyVisibility": bodyVisibility,
+                            "currentURL": webView.state.pageURL.absoluteString,
+                            "elapsedMs": elapsedMs,
+                            "fontsStatus": fontsStatus,
+                            "hasReaderContent": hasReaderContent,
+                            "hasReaderRenderReady": String(describing: hasReaderRenderReady),
+                            "hasVisibleFoliateView": hasVisibleFoliateView,
+                            "href": href,
+                            "manabiFontPending": manabiFontPending,
+                            "manabiFontReady": manabiFontReady,
+                            "readerContentTextLength": readerContentTextLength,
+                            "readyState": readyState,
+                            "reason": reason,
+                            "visibleMarkAsReadButtonCount": visibleMarkAsReadButtonCount
+                        ]
+                    )
                 }
             }
             if let hasReaderRenderReady,
@@ -5869,9 +5921,9 @@ private final class NativeLookupHitTestOverlayView: UIView {
             if hasActiveWebTextSelection {
                 return false
             }
-            store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
+            //store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
             if capturesSegmentTouches {
-                //store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
+                store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
                 return true
             }
         }
