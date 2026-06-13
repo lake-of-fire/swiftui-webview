@@ -4405,7 +4405,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
     }
-    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
@@ -4601,30 +4600,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         return results.map(normalizeJavaScriptResult)
     }
 
-    @MainActor
-    public func evaluateJavaScriptUnsafe(
-        _ js: String,
-        in frame: WKFrameInfo? = nil,
-        duplicateInMultiTargetFrames: Bool = false,
-        in world: WKContentWorld? = nil
-    ) {
-        guard let unsafeCaller else {
-            print("No unsafeCaller set for WebViewScriptCaller \(id)")
-            return
-        }
-
-        unsafeCaller(js, frame, world)
-
-        guard duplicateInMultiTargetFrames else { return }
-        for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-            if targetFrame == frame { continue }
-            unsafeCaller(js, targetFrame, world)
-            if targetFrame.request.url == nil {
-                multiTargetFrames.removeValue(forKey: uuid)
-            }
-        }
-    }
-    
     /// Returns whether the frame was already added.
     @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String, canonicalURL: URL? = nil) -> Bool {
@@ -5896,6 +5871,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
             }
             store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
             if capturesSegmentTouches {
+                //store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
                 return true
             }
         }
@@ -8606,13 +8582,6 @@ extension WebView: NSViewRepresentable {
                 throw error
             }
         }
-        context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
-            guard let webView else { return }
-            let resolvedWorld = world ?? .page
-#if DEBUG
-#endif
-            webView.evaluateJavaScript(js, in: frame, in: resolvedWorld, completionHandler: nil)
-        }
         
         refreshDarkModeSetting(webView: webView)
         context.coordinator.lastAppliedConfigurationState = webViewConfigurationState(
@@ -8676,10 +8645,6 @@ extension WebView: NSViewRepresentable {
                 let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
                 return WebViewScriptCaller.JavaScriptEvaluationResult(result)
             }
-        }
-        context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
-            guard let webView else { return }
-            webView.evaluateJavaScript(js, in: frame, in: world ?? .page, completionHandler: nil)
         }
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
