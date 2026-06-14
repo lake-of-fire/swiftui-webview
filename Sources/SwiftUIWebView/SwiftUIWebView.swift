@@ -1212,6 +1212,7 @@ public struct WebViewNativeLookupHit {
     public let elementID: String
     public let point: CGPoint
     public let rects: [CGRect]
+    public let coordinateOriginInWindow: CGPoint?
     public let lookupPayload: [String: Any]?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
@@ -1226,6 +1227,7 @@ public struct WebViewNativeLookupHit {
         elementID: String,
         point: CGPoint,
         rects: [CGRect] = [],
+        coordinateOriginInWindow: CGPoint? = nil,
         lookupPayload: [String: Any]? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
@@ -1239,6 +1241,7 @@ public struct WebViewNativeLookupHit {
         self.elementID = elementID
         self.point = point
         self.rects = rects
+        self.coordinateOriginInWindow = coordinateOriginInWindow
         self.lookupPayload = lookupPayload
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
@@ -1734,6 +1737,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            coordinateOriginInWindow: target.coordinateOriginInWindow,
             lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
@@ -1780,6 +1784,7 @@ public final class WebViewNativeLookupHitTestStore {
             elementID: target.elementID,
             point: point,
             rects: target.rects,
+            coordinateOriginInWindow: target.coordinateOriginInWindow,
             lookupPayload: target.lookupPayload,
             debugUsedInflatedHitRect: target.debugUsedInflatedHitRect,
             debugHitRects: target.debugHitRects,
