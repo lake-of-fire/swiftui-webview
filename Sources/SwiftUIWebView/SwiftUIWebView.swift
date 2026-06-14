@@ -39,8 +39,10 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
         ? "# READERLOAD stage=\(stage)\n"
         : "# READERLOAD stage=\(stage) \(fields)\n"
     print(line, terminator: "")
+    guard ProcessInfo.processInfo.environment["MANABI_READER_LOAD_DEBUG"] == "1" else { return }
     guard let data = line.data(using: .utf8) else { return }
-    let url = URL(fileURLWithPath: "/tmp/manabi-reader-load.log")
+    let path = ProcessInfo.processInfo.environment["MANABI_READER_LOAD_DEBUG_PATH"] ?? "/tmp/manabi-reader-load.log"
+    let url = URL(fileURLWithPath: path)
     if FileManager.default.fileExists(atPath: url.path),
        let handle = try? FileHandle(forWritingTo: url) {
         defer { try? handle.close() }
@@ -1375,6 +1377,8 @@ public final class WebViewNativeLookupHitTestStore {
                 "hitTestY": candidate.hitTestPoint.y,
                 "hitTestRebaseX": candidate.hitTestRebaseX,
                 "hitTestRebaseY": candidate.hitTestRebaseY,
+                "rectX": candidate.rect.minX,
+                "rectW": candidate.rect.width,
                 "rectY": candidate.rect.minY,
                 "rectH": candidate.rect.height,
             ] as [String : Any]
@@ -2529,10 +2533,19 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
-            if navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup {
+            let suppressForNativeLookup = navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup
+            let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
+            print(
+                "# POPOVER native.unhandledTap",
+                "suppress=\(suppressForNativeLookup)",
+                "hasActiveLookup=\(hasActiveLookup)",
+                "activeNativeTouchElementID=\(String(describing: navigator.nativeLookupHitTesting.activeNativeTouchElementID))",
+                "targetCount=\(navigator.nativeLookupHitTesting.targetCount)",
+                "body=\(popoverLogValue(message.body as Any))"
+            )
+            if suppressForNativeLookup {
                 return
             }
-            let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
             if hasActiveLookup {
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
@@ -6807,6 +6820,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
+        print(
+            "# POPOVER native.gesture",
+            payload.keys.sorted()
+                .map { "\($0)=\(popoverLogValue(payload[$0] as Any))" }
+                .joined(separator: " ")
+        )
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -6952,6 +6971,7 @@ public class WebViewController: UIViewController {
             return
         }
         if lastAppliedWebKitObscuredInsets == insets {
+            syncManabiChromeInsetsToPage(webView: webView, insets: insets, reason: reason)
             return
         }
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
@@ -7004,6 +7024,7 @@ public class WebViewController: UIViewController {
             }
         }
         lastAppliedWebKitObscuredInsets = insets
+        syncManabiChromeInsetsToPage(webView: webView, insets: insets, reason: reason)
 
         // WebKit treats _obscuredInsets as the content inset/visible-content-rect input.
         // Do not also mirror it into minimum/maximum viewport insets; that changes viewport
@@ -7042,6 +7063,43 @@ public class WebViewController: UIViewController {
         //            webView.setValue(insets, forKey: "obscuredInsets")
         //        webView.safeAreaInsetsDidChange()
         // TODO: investigate _isChangingObscuredInsetsInteractively
+    }
+
+    private func syncManabiChromeInsetsToPage(
+        webView: WKWebView,
+        insets: UIEdgeInsets,
+        reason: String
+    ) {
+        guard insets.top.isFinite else { return }
+#if DEBUG
+        print(
+            "# POPOVER webview.chromeInsets.sync",
+            "reason=\(reason)",
+            "top=\(insets.top)",
+            "bottom=\(insets.bottom)",
+            "webViewFrame=\(webView.frame)",
+            "webViewBounds=\(webView.bounds)",
+            "webViewSafeAreaTop=\(webView.safeAreaInsets.top)",
+            "url=\(webView.url?.absoluteString ?? "nil")"
+        )
+#endif
+        let escapedReason = reason
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        let script = """
+        (() => {
+          const existing = window.__manabiChromeInsets || {};
+          window.__manabiChromeInsets = {
+            ...existing,
+            obscuredTopInset: \(insets.top),
+            obscuredTopInsetSource: 'webview-obscured-insets:\(escapedReason)',
+            revision: Date.now()
+          };
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
     private func updateObscuredInsets(reason: String = "unknown") {
@@ -8355,6 +8413,47 @@ extension WebView: UIViewControllerRepresentable {
 #endif
 
 #if os(macOS)
+private func nativeLookupMacPopoverLogValue(_ value: Any) -> String {
+    let mirror = Mirror(reflecting: value)
+    if mirror.displayStyle == .optional {
+        guard let child = mirror.children.first else { return "nil" }
+        return nativeLookupMacPopoverLogValue(child.value)
+    }
+    switch value {
+    case let value as String:
+        return value.replacingOccurrences(of: "\n", with: "\\n")
+    case let value as Bool:
+        return value ? "true" : "false"
+    case let value as CGFloat:
+        return value.isFinite ? String(format: "%.2f", Double(value)) : "\(value)"
+    case let value as Double:
+        return value.isFinite ? String(format: "%.2f", value) : "\(value)"
+    case let value as CGPoint:
+        return "{\(String(format: "%.2f", value.x)),\(String(format: "%.2f", value.y))}"
+    case let value as CGSize:
+        return "{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}"
+    case let value as CGRect:
+        return "{{\(String(format: "%.2f", value.minX)),\(String(format: "%.2f", value.minY))},{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}}"
+    case let value as [String: Any]:
+        return "{" + value.keys.sorted().map { "\($0):\(nativeLookupMacPopoverLogValue(value[$0] as Any))" }.joined(separator: ",") + "}"
+    case let value as [Any]:
+        return "[" + value.prefix(5).map { nativeLookupMacPopoverLogValue($0) }.joined(separator: ",") + (value.count > 5 ? ",..." : "") + "]"
+    default:
+        return String(describing: value).replacingOccurrences(of: "\n", with: "\\n")
+    }
+}
+
+private func nativeLookupMacPopoverLog(_ stage: String, _ payload: [String: Any] = [:]) {
+    let details = payload.keys.sorted()
+        .map { "\($0)=\(nativeLookupMacPopoverLogValue(payload[$0] as Any))" }
+        .joined(separator: " ")
+    if details.isEmpty {
+        print("# POPOVER \(stage)")
+    } else {
+        print("# POPOVER \(stage) \(details)")
+    }
+}
+
 private final class NativeLookupHitTestOverlayNSView: NSView {
     private enum PressedSegmentStyle {
         static let pressedStrokeAlpha: CGFloat = 0.8
@@ -8438,9 +8537,10 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        let target = store?.hitTarget(at: point, in: bounds.size)
         let containsTarget = !isHidden
             && alphaValue > 0
-            && store?.containsClaimableTarget(at: point, in: bounds.size) == true
+            && target != nil
         guard containsTarget else {
             return nil
         }
@@ -8457,6 +8557,7 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
 
     override func mouseDown(with event: NSEvent) {
         guard let view else {
+            nativeLookupMacPopoverLog("mac.click.mouseDown.noView")
             state = .failed
             return
         }
@@ -8467,6 +8568,18 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         }
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
+        nativeLookupMacPopoverLog("mac.click.mouseDown.target", [
+            "point": point,
+            "windowPoint": event.locationInWindow,
+            "bounds": view.bounds,
+            "targetID": target.elementID,
+            "targetRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects),
+            "hasLookupPayload": target.lookupPayload != nil,
+            "frameInfo": target.frameInfo as Any,
+            "activeElementID": store?.activeElementID as Any,
+            "mouseDownWasActiveTarget": mouseDownWasActiveTarget,
+            "targetCount": store?.targetCount as Any,
+        ])
         store?.onActiveTargetTouchDown?(target)
         if store?.showsPressedTargetOverlay == true {
             pressedOverlay?.showPressedTarget(target)
@@ -8494,6 +8607,7 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
 public final class WebViewHostNSView: NSView {
     let webView: EnhancedWKWebView
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayNSView()
+    private var lastSyncedLookupViewportOriginSignature: String?
     private lazy var nativeLookupHitTestGestureRecognizer = NativeLookupHitTestClickGestureRecognizer(
         target: self,
         action: #selector(handleNativeLookupHitTestClick(_:))
@@ -8510,6 +8624,11 @@ public final class WebViewHostNSView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    public override func layout() {
+        super.layout()
+        syncLookupViewportOrigin(reason: "host.layout")
     }
 
     @MainActor
@@ -8543,9 +8662,63 @@ public final class WebViewHostNSView: NSView {
         nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
     }
 
+    @MainActor
+    private func syncLookupViewportOrigin(reason: String) {
+        guard let contentView = window?.contentView else { return }
+        let webViewWindowRect = webView.convert(webView.bounds, to: nil)
+        let contentHeight = contentView.bounds.height
+        let originX = webViewWindowRect.minX
+        let originY = max(0, contentHeight - webViewWindowRect.maxY)
+        let signature = [
+            String(format: "%.3f", Double(originX)),
+            String(format: "%.3f", Double(originY)),
+            String(format: "%.3f", Double(webViewWindowRect.width)),
+            String(format: "%.3f", Double(webViewWindowRect.height)),
+            reason
+        ].joined(separator: "|")
+        guard signature != lastSyncedLookupViewportOriginSignature else { return }
+        lastSyncedLookupViewportOriginSignature = signature
+        nativeLookupMacPopoverLog("webview.lookupViewportOrigin.sync", [
+            "reason": reason,
+            "originX": originX,
+            "originY": originY,
+            "webViewWindowRect": webViewWindowRect,
+            "contentViewBounds": contentView.bounds,
+            "webViewBounds": webView.bounds,
+            "url": webView.url?.absoluteString as Any,
+        ])
+        let escapedReason = reason
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        let script = """
+        (() => {
+          const existing = window.__manabiChromeInsets || {};
+          window.__manabiChromeInsets = {
+            ...existing,
+            viewportOriginX: \(originX),
+            viewportOriginY: \(originY),
+            viewportOriginSource: 'mac-webview-host:\(escapedReason)',
+            viewportOriginRevision: Date.now()
+          };
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+
     @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
         guard recognizer.state == .ended else { return }
-        _ = recognizer.store?.handleTap(at: recognizer.location(in: nativeLookupHitTestOverlayView), in: nativeLookupHitTestOverlayView.bounds.size)
+        let point = recognizer.location(in: nativeLookupHitTestOverlayView)
+        let handled = recognizer.store?.handleTap(at: point, in: nativeLookupHitTestOverlayView.bounds.size) == true
+        nativeLookupMacPopoverLog("mac.click.ended.dispatch", [
+            "point": point,
+            "bounds": nativeLookupHitTestOverlayView.bounds,
+            "handled": handled,
+            "targetCount": recognizer.store?.targetCount as Any,
+            "enabled": recognizer.store?.isEnabled as Any,
+            "nearest": recognizer.store?.diagnostics(at: point, limit: 5, in: nativeLookupHitTestOverlayView.bounds.size) as Any,
+        ])
     }
 }
 
