@@ -2535,6 +2535,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         } else if message.name == "swiftUIWebViewUnhandledTap" {
             let suppressForNativeLookup = navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
+            let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
             print(
                 "# POPOVER native.unhandledTap",
                 "suppress=\(suppressForNativeLookup)",
