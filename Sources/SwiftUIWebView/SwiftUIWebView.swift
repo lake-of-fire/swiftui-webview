@@ -8607,7 +8607,6 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
 public final class WebViewHostNSView: NSView {
     let webView: EnhancedWKWebView
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayNSView()
-    private var lastSyncedLookupViewportOriginSignature: String?
     private lazy var nativeLookupHitTestGestureRecognizer = NativeLookupHitTestClickGestureRecognizer(
         target: self,
         action: #selector(handleNativeLookupHitTestClick(_:))
@@ -8624,11 +8623,6 @@ public final class WebViewHostNSView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    public override func layout() {
-        super.layout()
-        syncLookupViewportOrigin(reason: "host.layout")
     }
 
     @MainActor
@@ -8660,51 +8654,6 @@ public final class WebViewHostNSView: NSView {
         nativeLookupHitTestGestureRecognizer.numberOfClicksRequired = 1
         nativeLookupHitTestGestureRecognizer.delaysPrimaryMouseButtonEvents = true
         nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
-    }
-
-    @MainActor
-    private func syncLookupViewportOrigin(reason: String) {
-        guard let contentView = window?.contentView else { return }
-        let webViewWindowRect = webView.convert(webView.bounds, to: nil)
-        let contentHeight = contentView.bounds.height
-        let originX = webViewWindowRect.minX
-        let originY = max(0, contentHeight - webViewWindowRect.maxY)
-        let signature = [
-            String(format: "%.3f", Double(originX)),
-            String(format: "%.3f", Double(originY)),
-            String(format: "%.3f", Double(webViewWindowRect.width)),
-            String(format: "%.3f", Double(webViewWindowRect.height)),
-            reason
-        ].joined(separator: "|")
-        guard signature != lastSyncedLookupViewportOriginSignature else { return }
-        lastSyncedLookupViewportOriginSignature = signature
-        nativeLookupMacPopoverLog("webview.lookupViewportOrigin.sync", [
-            "reason": reason,
-            "originX": originX,
-            "originY": originY,
-            "webViewWindowRect": webViewWindowRect,
-            "contentViewBounds": contentView.bounds,
-            "webViewBounds": webView.bounds,
-            "url": webView.url?.absoluteString as Any,
-        ])
-        let escapedReason = reason
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-        let script = """
-        (() => {
-          const existing = window.__manabiChromeInsets || {};
-          window.__manabiChromeInsets = {
-            ...existing,
-            viewportOriginX: \(originX),
-            viewportOriginY: \(originY),
-            viewportOriginSource: 'mac-webview-host:\(escapedReason)',
-            viewportOriginRevision: Date.now()
-          };
-        })();
-        """
-        webView.evaluateJavaScript(script, completionHandler: nil)
     }
 
     @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
