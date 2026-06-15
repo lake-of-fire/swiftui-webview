@@ -2567,17 +2567,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 return
             }
             print(
-                "# HIDENAV native.unhandledTap.received",
-                "current=\(currentHideNavigation)",
-                "requested=\(String(describing: requestedHideNavigation))",
-                "isNavigationStateMessage=\(isNavigationStateMessage)",
-                "suppress=\(suppressForNativeLookup)",
-                "hasActiveLookup=\(hasActiveLookup)",
-                "activeNativeTouchElementID=\(String(describing: navigator.nativeLookupHitTesting.activeNativeTouchElementID))",
-                "targetCount=\(navigator.nativeLookupHitTesting.targetCount)",
-                "body=\(popoverLogValue(message.body as Any))"
-            )
-            print(
                 "# POPOVER native.unhandledTap",
                 "suppress=\(suppressForNativeLookup)",
                 "hasActiveLookup=\(hasActiveLookup)",
@@ -2586,62 +2575,29 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 "body=\(popoverLogValue(message.body as Any))"
             )
             if suppressForNativeLookup, !isNavigationStateMessage {
-                print(
-                    "# HIDENAV native.unhandledTap.skip",
-                    "reason=suppressedForNativeLookup",
-                    "current=\(currentHideNavigationDueToScroll)"
-                )
                 return
             }
             if !isNavigationStateMessage,
                let body = message.body as? [String: Any],
                let targetClosestSegment = body["targetClosestSegment"] as? String,
                !targetClosestSegment.isEmpty {
-                print(
-                    "# HIDENAV native.unhandledTap.skip",
-                    "reason=targetClosestSegment",
-                    "current=\(currentHideNavigationDueToScroll)",
-                    "body=\(popoverLogValue(message.body as Any))"
-                )
                 return
             }
             if hasActiveLookup, !isNavigationStateMessage {
-                print(
-                    "# HIDENAV native.unhandledTap.skip",
-                    "reason=closeActiveLookup",
-                    "current=\(currentHideNavigationDueToScroll)"
-                )
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
             }
             if let body = message.body as? [String: Any],
                let requestedHideNavigation = body["hideNavigationDueToScroll"] as? Bool {
-                print(
-                    "# HIDENAV native.unhandledTap.applyRequested",
-                    "new=\(requestedHideNavigation)",
-                    "old=\(currentHideNavigationDueToScroll)",
-                    "reason=\(String(describing: body["reason"]))"
-                )
                 withAnimation(.easeOut(duration: 0.18)) {
                     setHideNavigationDueToScroll(requestedHideNavigation)
                 }
             } else {
                 if let lastScrollHideNavigationMessageAt,
                    Date.timeIntervalSinceReferenceDate - lastScrollHideNavigationMessageAt < 0.7 {
-                    print(
-                        "# HIDENAV native.unhandledTap.skip",
-                        "reason=recentScrollNavigationState",
-                        "current=\(currentHideNavigationDueToScroll)",
-                        "body=\(popoverLogValue(message.body as Any))"
-                    )
                     return
                 }
                 let nextHideNavigation = !currentHideNavigationDueToScroll
-                print(
-                    "# HIDENAV native.unhandledTap.toggle",
-                    "new=\(nextHideNavigation)",
-                    "old=\(currentHideNavigationDueToScroll)"
-                )
                 withAnimation(.easeOut(duration: 0.18)) {
                     setHideNavigationDueToScroll(nextHideNavigation)
                 }

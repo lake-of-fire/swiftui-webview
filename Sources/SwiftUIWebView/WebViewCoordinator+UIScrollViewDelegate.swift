@@ -45,13 +45,6 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         lastContentOffset = scrollView.contentOffset
         accumulatedScrollOffset = 0
         refreshNavigationScrollSemantics(scrollView)
-        print(
-            "# HIDENAV native.scroll.begin",
-            "offsetX=\(String(format: "%.1f", scrollView.contentOffset.x))",
-            "offsetY=\(String(format: "%.1f", scrollView.contentOffset.y))",
-            "hidden=\(currentHideNavigationDueToScroll)",
-            "axis=\(navigationScrollAxis == .horizontal ? "horizontal" : "vertical")"
-        )
         logLayoutScroll("scroll.beginDrag", scrollView: scrollView, force: true)
     }
 
@@ -84,27 +77,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         if abs(accumulatedScrollOffset) >= threshold {
             let newValue = accumulatedScrollOffset > 0
             if newValue != currentHideNavigationDueToScroll {
-                print(
-                    "# HIDENAV native.scroll.threshold",
-                    "new=\(newValue)",
-                    "old=\(currentHideNavigationDueToScroll)",
-                    "offsetX=\(String(format: "%.1f", currentOffset.x))",
-                    "offsetY=\(String(format: "%.1f", currentOffset.y))",
-                    "deltaX=\(String(format: "%.1f", deltaX))",
-                    "deltaY=\(String(format: "%.1f", deltaY))",
-                    "resolvedDelta=\(String(format: "%.1f", scrollDifference))",
-                    "accumulated=\(String(format: "%.1f", accumulatedScrollOffset))",
-                    "threshold=\(String(format: "%.1f", threshold))",
-                    "axis=\(navigationScrollAxis == .horizontal ? "horizontal" : "vertical")",
-                    "tracking=\(scrollView.isTracking)",
-                    "dragging=\(scrollView.isDragging)"
-                )
                 withAnimation(.easeIn(duration: newValue ? 0.3 : 0.1)) {
-                    print(
-                        "# HIDENAV native.scroll.apply",
-                        "new=\(newValue)",
-                        "old=\(self.currentHideNavigationDueToScroll)"
-                    )
                     self.setHideNavigationDueToScroll(newValue)
                 }
             }
