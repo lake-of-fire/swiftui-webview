@@ -2241,6 +2241,26 @@ public class WebViewCoordinator: NSObject {
         messageHandlers.handlers.keys.map { $0 }
     }
     var hideNavigationDueToScroll: Binding<Bool>
+    internal var mirroredHideNavigationDueToScroll: Bool?
+    internal var lastNativeHideNavigationSetAt: TimeInterval?
+    internal var lastScrollHideNavigationMessageAt: TimeInterval?
+    internal var currentHideNavigationDueToScroll: Bool {
+        mirroredHideNavigationDueToScroll ?? hideNavigationDueToScroll.wrappedValue
+    }
+    internal func setHideNavigationDueToScroll(_ value: Bool) {
+        mirroredHideNavigationDueToScroll = value
+        lastNativeHideNavigationSetAt = Date.timeIntervalSinceReferenceDate
+        hideNavigationDueToScroll.wrappedValue = value
+    }
+    internal func syncHideNavigationDueToScrollFromHost(_ value: Bool) {
+        if let mirroredHideNavigationDueToScroll,
+           mirroredHideNavigationDueToScroll != value,
+           let lastNativeHideNavigationSetAt,
+           Date.timeIntervalSinceReferenceDate - lastNativeHideNavigationSetAt < 0.5 {
+            return
+        }
+        mirroredHideNavigationDueToScroll = value
+    }
     var textSelection: Binding<String?>
 
 #if os(iOS)
@@ -2378,6 +2398,7 @@ public class WebViewCoordinator: NSObject {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
+        self.mirroredHideNavigationDueToScroll = hideNavigationDueToScroll.wrappedValue
         self.textSelection = textSelection
         
         // TODO: Make about:blank history initialization optional via configuration.
@@ -2816,24 +2837,41 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
+            let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
+            let isNavigationStateMessage = requestedHideNavigation != nil
+            if isNavigationStateMessage {
+                lastScrollHideNavigationMessageAt = Date.timeIntervalSinceReferenceDate
+            }
+            if let requestedHideNavigation,
+               requestedHideNavigation == currentHideNavigationDueToScroll {
+                return
+            }
             if hasActiveLookup,
+               !isNavigationStateMessage,
                navigator.nativeLookupHitTesting.activeNativeTouchElementID == nil {
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
             }
-            if navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup {
+            if navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup, !isNavigationStateMessage {
                 return
             }
-            if hasActiveLookup {
+            if !isNavigationStateMessage,
+               let body = message.body as? [String: Any],
+               let targetClosestSegment = body["targetClosestSegment"] as? String,
+               !targetClosestSegment.isEmpty {
+                return
+            }
+            if hasActiveLookup, !isNavigationStateMessage {
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
             }
 #if DEBUG
             let body = message.body as? [String: Any]
+            let currentHideNavigation = currentHideNavigationDueToScroll
             debugPrint(
                 "# TABBAR webUnhandledTapHideNav",
-                "current=\(hideNavigationDueToScroll.wrappedValue)",
-                "next=\(!hideNavigationDueToScroll.wrappedValue)",
+                "current=\(currentHideNavigation)",
+                "next=\(!currentHideNavigation)",
                 "frame=\(body?["frame"] ?? "nil")",
                 "targetTag=\(body?["targetTag"] ?? "nil")",
                 "targetClosestSegment=\(body?["targetClosestSegment"] ?? "nil")"
@@ -2842,11 +2880,16 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             if let body = message.body as? [String: Any],
                let requestedHideNavigation = body["hideNavigationDueToScroll"] as? Bool {
                 withAnimation(.easeOut(duration: 0.18)) {
-                    hideNavigationDueToScroll.wrappedValue = requestedHideNavigation
+                    setHideNavigationDueToScroll(requestedHideNavigation)
                 }
             } else {
+                if let lastScrollHideNavigationMessageAt,
+                   Date.timeIntervalSinceReferenceDate - lastScrollHideNavigationMessageAt < 0.7 {
+                    return
+                }
+                let nextHideNavigation = !currentHideNavigationDueToScroll
                 withAnimation(.easeOut(duration: 0.18)) {
-                    hideNavigationDueToScroll.wrappedValue.toggle()
+                    setHideNavigationDueToScroll(nextHideNavigation)
                 }
             }
             return
@@ -5681,7 +5724,7 @@ fileprivate struct UnhandledTapUserScript {
         return;
     }
 
-    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,mnb-seg,mnb-seg *,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
+    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
     const MOVE_THRESHOLD = 8;
     const LONG_PRESS_THRESHOLD_MS = 450;
     const activePointers = new Map();
@@ -5797,6 +5840,11 @@ fileprivate struct UnhandledTapUserScript {
             return;
         }
         const duration = performance.now() - entry.startTime;
+        const finalDX = (event.clientX ?? entry.startX) - entry.startX;
+        const finalDY = (event.clientY ?? entry.startY) - entry.startY;
+        if (Math.hypot(finalDX, finalDY) > MOVE_THRESHOLD) {
+            entry.moved = true;
+        }
         const newSelection = selectionText();
         const selectionChanged = newSelection.length > 0 && newSelection !== entry.startSelection;
         if (entry.moved || duration > LONG_PRESS_THRESHOLD_MS || selectionChanged) {
@@ -5809,8 +5857,17 @@ fileprivate struct UnhandledTapUserScript {
         if (suppressUntil > Date.now()) {
             return;
         }
+        const targetClosestSegment = event.target?.closest?.('mnb-seg')?.getAttribute?.('id') ?? null;
+        if (targetClosestSegment) {
+            return;
+        }
         window.webkit.messageHandlers[handlerName].postMessage({
-            frame: window === window.top ? 'top' : 'child'
+            frame: window === window.top ? 'top' : 'child',
+            targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
+            targetClosestSegment,
+            clientX: event.clientX ?? null,
+            clientY: event.clientY ?? null,
+            reason: 'pointerUpBlankTap'
         });
     }
 
@@ -5820,8 +5877,13 @@ fileprivate struct UnhandledTapUserScript {
 
     let lastScrollPosition = { x: window.scrollX || 0, y: window.scrollY || 0 };
     let accumulatedScroll = { value: 0 };
+    let lastPostedScrollHidden = { value: null };
     const SCROLL_THRESHOLD = 24;
     function postHideNavigationForScroll(hidden, reason) {
+        if (lastPostedScrollHidden.value === hidden) {
+            return;
+        }
+        lastPostedScrollHidden.value = hidden;
         try {
             window.webkit.messageHandlers[handlerName].postMessage({
                 frame: window === window.top ? 'top' : 'child',
@@ -5842,6 +5904,9 @@ fileprivate struct UnhandledTapUserScript {
         const dy = currentY - lastScrollPosition.y;
         lastScrollPosition.x = currentX;
         lastScrollPosition.y = currentY;
+        if (Math.abs(dx) > Math.abs(dy)) {
+            return;
+        }
 
         const delta = Math.abs(dy) >= Math.abs(dx) ? dy : dx;
         if (Math.abs(delta) < 0.5) {
@@ -8146,6 +8211,7 @@ extension WebView {
             }
         }
         context.coordinator.hideNavigationDueToScroll = $hideNavigationDueToScroll
+        context.coordinator.syncHideNavigationDueToScrollFromHost(hideNavigationDueToScroll)
         context.coordinator.textSelection = $textSelection
     }
 
