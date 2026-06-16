@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import OrderedCollections
 import LRUCache
 import Foundation
+import os.signpost
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -14,6 +15,100 @@ import AppKit
 private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> String {
     guard let start else { return "nil" }
     return String(format: "%.3fs", now.timeIntervalSince(start))
+}
+
+public enum ReaderLoadSignposts {
+    public enum Event {
+        case navigatorContentBegin
+        case navigatorContentResolved
+        case navigatorContentDispatch
+        case loadFileURL
+        case loadHTMLString
+        case webKitDidStart
+        case webKitDidCommit
+        case webKitDidFinish
+        case jsDOMContentLoaded
+        case installManabiReaderStart
+        case installManabiReaderEnd
+        case manabiReaderInitialized
+        case manabiSegmentsReady
+        case custom(String)
+    }
+
+    private static let log = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "ManabiReader",
+        category: .pointsOfInterest
+    )
+
+    public static func event(_ event: Event, _ metadata: [String: String] = [:]) {
+        let payload = metadata
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: " ")
+        switch event {
+        case .navigatorContentBegin:
+            os_signpost(.event, log: log, name: "navigator.content.begin", "%{public}@", payload)
+        case .navigatorContentResolved:
+            os_signpost(.event, log: log, name: "navigator.content.resolved", "%{public}@", payload)
+        case .navigatorContentDispatch:
+            os_signpost(.event, log: log, name: "navigator.content.dispatch", "%{public}@", payload)
+        case .loadFileURL:
+            os_signpost(.event, log: log, name: "loadFileURL", "%{public}@", payload)
+        case .loadHTMLString:
+            os_signpost(.event, log: log, name: "loadHTMLString", "%{public}@", payload)
+        case .webKitDidStart:
+            os_signpost(.event, log: log, name: "WebKit.didStart", "%{public}@", payload)
+        case .webKitDidCommit:
+            os_signpost(.event, log: log, name: "WebKit.didCommit", "%{public}@", payload)
+        case .webKitDidFinish:
+            os_signpost(.event, log: log, name: "WebKit.didFinish", "%{public}@", payload)
+        case .jsDOMContentLoaded:
+            os_signpost(.event, log: log, name: "JS.DOMContentLoaded", "%{public}@", payload)
+        case .installManabiReaderStart:
+            os_signpost(.event, log: log, name: "installManabiReader.start", "%{public}@", payload)
+        case .installManabiReaderEnd:
+            os_signpost(.event, log: log, name: "installManabiReader.end", "%{public}@", payload)
+        case .manabiReaderInitialized:
+            os_signpost(.event, log: log, name: "manabiReaderInitialized", "%{public}@", payload)
+        case .manabiSegmentsReady:
+            os_signpost(.event, log: log, name: "manabiSegmentsReady", "%{public}@", payload)
+        case let .custom(stage):
+            os_signpost(.event, log: log, name: "readerLoad.custom", "%{public}@", [payload, "stage=\(stage)"].filter { !$0.isEmpty }.joined(separator: " "))
+        }
+    }
+
+    public static func event(named stage: String, metadata: [String: String] = [:]) {
+        switch stage {
+        case "navigator.content.begin":
+            event(.navigatorContentBegin, metadata)
+        case "navigator.content.resolved":
+            event(.navigatorContentResolved, metadata)
+        case "navigator.content.dispatch":
+            event(.navigatorContentDispatch, metadata)
+        case "loadFileURL":
+            event(.loadFileURL, metadata)
+        case "loadHTMLString":
+            event(.loadHTMLString, metadata)
+        case "WebKit.didStart":
+            event(.webKitDidStart, metadata)
+        case "WebKit.didCommit":
+            event(.webKitDidCommit, metadata)
+        case "WebKit.didFinish":
+            event(.webKitDidFinish, metadata)
+        case "JS.DOMContentLoaded":
+            event(.jsDOMContentLoaded, metadata)
+        case "installManabiReader.start":
+            event(.installManabiReaderStart, metadata)
+        case "installManabiReader.end":
+            event(.installManabiReaderEnd, metadata)
+        case "manabiReaderInitialized":
+            event(.manabiReaderInitialized, metadata)
+        case "manabiSegmentsReady":
+            event(.manabiSegmentsReady, metadata)
+        default:
+            event(.custom(stage), metadata)
+        }
+    }
 }
 
 @inline(__always)
@@ -1487,6 +1582,7 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
     public let isForMainFrameOnly: Bool
     public let world: WKContentWorld?
     public let allowedDomains: Set<String>
+    public let configurationSignatureComponent: String
     
     @MainActor
     public lazy var webKitUserScript: WKUserScript = {
@@ -1518,6 +1614,13 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
         self.isForMainFrameOnly = forMainFrameOnly
         self.world = world
         self.allowedDomains = allowedDomains
+        self.configurationSignatureComponent = [
+            "\(source.hashValue)",
+            "\(injectionTime.rawValue)",
+            "\(forMainFrameOnly)",
+            "\(world.map { String(describing: $0) } ?? "nil")",
+            allowedDomains.sorted().joined(separator: ",")
+        ].joined(separator: "|")
     }
     
     public func hash(into hasher: inout Hasher) {
@@ -2634,6 +2737,17 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let foliateViewRectDescription = (body["foliateViewRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             let centerElementDescription = (body["elementAtCenter"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             let centerClosestReaderContentDescription = (body["centerClosestReaderContent"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
+            if reason == "domcontentloaded" {
+                ReaderLoadSignposts.event(
+                    .jsDOMContentLoaded,
+                    [
+                        "currentURL": webView.state.pageURL.absoluteString,
+                        "elapsedMs": elapsedMs,
+                        "href": href,
+                        "readyState": readyState
+                    ]
+                )
+            }
             let isEBookDocState = webView.state.pageURL.absoluteString.hasPrefix("ebook://") || href.hasPrefix("ebook://")
             if isEBookDocState {
                 let epubSignature = [
@@ -2687,6 +2801,15 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 newState.hasReaderRenderReady = hasReaderRenderReady
                 webView.state = newState
             }
+        } else if message.name == "readerLoadSignpost" {
+            guard let body = message.body as? [String: Any],
+                  let stage = body["stage"] as? String else { return }
+            let metadata = body.reduce(into: [String: String]()) { partialResult, entry in
+                guard entry.key != "stage" else { return }
+                partialResult[entry.key] = String(describing: entry.value)
+            }
+            ReaderLoadSignposts.event(named: stage, metadata: metadata)
+            return
         }
         /* else if message.name == "swiftUIWebViewIsWarm" {
          if !webView.isWarm, let onWarm = webView.onWarm {
@@ -2765,6 +2888,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
         logEpubNavigationTransition("finish", webView: webView)
         let finishNow = Date()
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
+        ReaderLoadSignposts.event(
+            .webKitDidFinish,
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceCommit": readerLoadElapsedString(since: navigator.readerLoadCommittedAt, now: finishNow),
+                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: finishNow),
+                "requestURL": activeRequestURL?.absoluteString ?? "nil",
+                "traceID": navigator.readerLoadTraceID ?? "nil"
+            ]
+        )
         readerLoadLog(
             "webView.nav.finish",
             [
@@ -3061,6 +3194,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
         navigator.readerLoadCommittedAt = commitNow
         navigator.updateInternalLoaderCorrelation(for: webView.url, now: commitNow)
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
+        ReaderLoadSignposts.event(
+            .webKitDidCommit,
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: commitNow),
+                "elapsedSinceProvisionalStart": readerLoadElapsedString(since: navigator.readerLoadProvisionalStartedAt, now: commitNow),
+                "requestURL": activeRequestURL?.absoluteString ?? "nil",
+                "traceID": navigator.readerLoadTraceID ?? "nil"
+            ]
+        )
         readerLoadLog(
             "webView.nav.commit",
             [
@@ -3115,6 +3258,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
         navigator.readerLoadProvisionalStartedAt = provisionalNow
         navigator.updateInternalLoaderCorrelation(for: webView.url, now: provisionalNow)
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
+        ReaderLoadSignposts.event(
+            .webKitDidStart,
+            [
+                "currentURL": webView.url?.absoluteString ?? "nil",
+                "elapsedSinceIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: provisionalNow),
+                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: provisionalNow),
+                "requestURL": activeRequestURL?.absoluteString ?? "nil",
+                "traceID": navigator.readerLoadTraceID ?? "nil"
+            ]
+        )
         readerLoadLog(
             "webView.nav.provisionalStart",
             [
@@ -3952,6 +4105,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
                     }
                     if let url = request.url, url.isFileURL {
+                        ReaderLoadSignposts.event(
+                            .loadFileURL,
+                            [
+                                "reason": "pendingRequestRetry",
+                                "url": url.absoluteString
+                            ]
+                        )
                         webView.loadFileURL(url, allowingReadAccessTo: url)
                     } else {
                         webView.load(request)
@@ -4011,6 +4171,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 webView.reload()
             } else if let url = request.url, url.isFileURL {
                 markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
+                ReaderLoadSignposts.event(
+                    .loadFileURL,
+                    [
+                        "reason": "skipAlreadyLoading.reloadPath:\(diagnosticsReason)",
+                        "url": url.absoluteString
+                    ]
+                )
                 webView.loadFileURL(url, allowingReadAccessTo: url)
             } else {
                 markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
@@ -4028,6 +4195,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
             markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
             readerLoadLog(
                 "webViewNavigator.loadFileURLBegin",
+                [
+                    "currentURL": webView.url?.absoluteString ?? "nil",
+                    "reason": diagnosticsReason,
+                    "url": url.absoluteString
+                ]
+            )
+            ReaderLoadSignposts.event(
+                .loadFileURL,
                 [
                     "currentURL": webView.url?.absoluteString ?? "nil",
                     "reason": diagnosticsReason,
@@ -4173,6 +4348,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                 }
+                ReaderLoadSignposts.event(
+                    .loadHTMLString,
+                    [
+                        "baseURL": pendingHTML.baseURL?.absoluteString ?? "nil",
+                        "bytes": "\(pendingHTML.html.utf8.count)",
+                        "reason": "pendingHTMLFlush"
+                    ]
+                )
                 webView.loadHTMLString(pendingHTML.html, baseURL: pendingHTML.baseURL)
                 self.pendingHTML = nil
                 self.pendingHTMLSetAt = nil
@@ -4232,6 +4415,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         "hasWindow": "\(webView.window != nil)",
                         "reason": "navigator.loadFileURL",
                         "sceneState": readerLoadSceneStateString(for: webView),
+                        "url": url.absoluteString
+                    ]
+                )
+                ReaderLoadSignposts.event(
+                    .loadFileURL,
+                    [
+                        "currentURL": webView.url?.absoluteString ?? "nil",
+                        "reason": "navigator.loadFileURL",
                         "url": url.absoluteString
                     ]
                 )
@@ -4379,6 +4570,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "webViewID": readerLoadObjectIDString(webView),
                 "hasSuperview": "\(webView.superview != nil)",
                 "hasWindow": "\(webView.window != nil)"
+            ]
+        )
+        ReaderLoadSignposts.event(
+            .loadHTMLString,
+            [
+                "baseURL": baseURL?.absoluteString ?? "nil",
+                "bytes": "\(html.utf8.count)",
+                "reason": "direct"
             ]
         )
         webView.loadHTMLString(html, baseURL: baseURL)
@@ -8965,14 +9164,7 @@ extension WebView {
         }
         let allScripts = Self.systemScripts + scripts
         let signature = allScripts
-            .map { script in
-                [
-                    "\(script.source.hashValue)",
-                    "\(script.injectionTime.rawValue)",
-                    "\(script.isForMainFrameOnly)",
-                    "\(script.world.map { String(describing: $0) } ?? "nil")"
-                ].joined(separator: "|")
-            }
+            .map(\.configurationSignatureComponent)
             .joined(separator: "||")
         return (allScripts, signature)
     }
@@ -9401,6 +9593,7 @@ extension WebView {
         "swiftUIWebViewTextSelection",
         "readerBootstrapPing",
         "readerDocState",
+        "readerLoadSignpost",
         "swiftUIWebViewUnhandledTap",
     ]
 }
