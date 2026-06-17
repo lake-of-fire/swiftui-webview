@@ -1904,7 +1904,6 @@ public class WebViewCoordinator: NSObject {
     private var pendingPaginationApplyTask: Task<Void, Never>?
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
-    private var lastEpubReaderDocStateSignature: String?
     private var lastMainFrameNavigationRequestURL: URL?
     private var lastMainFrameNavigationSourceURL: URL?
     private var lastMainFrameNavigationMainDocumentURL: URL?
@@ -2717,26 +2716,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let reason = body["reason"] as? String ?? "unknown"
             let readyState = body["readyState"] as? String ?? "unknown"
             let elapsedMs = body["elapsedMs"].map { String(describing: $0) } ?? "nil"
-            let hasReaderContentBool = body["hasReaderContent"] as? Bool ?? false
-            let hasReaderContent = body["hasReaderContent"].map { String(describing: $0) } ?? "nil"
             let hasReaderRenderReady = body["hasReaderRenderReady"] as? Bool
-            let manabiFontPending = body["manabiFontPending"].map { String(describing: $0) } ?? "nil"
-            let manabiFontReady = body["manabiFontReady"].map { String(describing: $0) } ?? "nil"
-            let bodyLoading = body["bodyLoading"].map { String(describing: $0) } ?? "nil"
-            let hasCustomFontStyle = body["hasCustomFontStyle"].map { String(describing: $0) } ?? "nil"
-            let hasCustomFontGate = body["hasCustomFontGate"].map { String(describing: $0) } ?? "nil"
-            let fontsStatus = body["fontsStatus"].map { String(describing: $0) } ?? "nil"
-            let bodyDisplay = body["bodyDisplay"] as? String ?? "nil"
-            let bodyVisibility = body["bodyVisibility"] as? String ?? "nil"
-            let bodyOpacity = body["bodyOpacity"].map { String(describing: $0) } ?? "nil"
-            let hasVisibleFoliateView = body["hasVisibleFoliateView"].map { String(describing: $0) } ?? "nil"
-            let visibleMarkAsReadButtonCount = body["visibleMarkAsReadButtonCount"].map { String(describing: $0) } ?? "nil"
-            let readerContentTextLength = body["readerContentTextLength"].map { String(describing: $0) } ?? "nil"
-            let readerContentRectDescription = (body["readerContentRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
-            let readerStageRectDescription = (body["readerStageRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
-            let foliateViewRectDescription = (body["foliateViewRect"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
-            let centerElementDescription = (body["elementAtCenter"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
-            let centerClosestReaderContentDescription = (body["centerClosestReaderContent"] as? [String: Any]).map { String(describing: $0) } ?? "nil"
             if reason == "domcontentloaded" {
                 ReaderLoadSignposts.event(
                     .jsDOMContentLoaded,
@@ -2747,53 +2727,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                         "readyState": readyState
                     ]
                 )
-            }
-            let isEBookDocState = webView.state.pageURL.absoluteString.hasPrefix("ebook://") || href.hasPrefix("ebook://")
-            if isEBookDocState {
-                let epubSignature = [
-                    href,
-                    readyState,
-                    hasReaderContent,
-                    String(describing: hasReaderRenderReady),
-                    hasVisibleFoliateView,
-                    visibleMarkAsReadButtonCount,
-                    readerContentTextLength,
-                    bodyDisplay,
-                    bodyVisibility,
-                    bodyOpacity,
-                    manabiFontPending,
-                    manabiFontReady,
-                    bodyLoading,
-                    fontsStatus,
-                    readerContentRectDescription,
-                    foliateViewRectDescription,
-                    centerElementDescription
-                ].joined(separator: "|")
-                if lastEpubReaderDocStateSignature != epubSignature {
-                    lastEpubReaderDocStateSignature = epubSignature
-                    readerLoadLog(
-                        "readerDocState",
-                        [
-                            "bodyDisplay": bodyDisplay,
-                            "bodyLoading": bodyLoading,
-                            "bodyOpacity": bodyOpacity,
-                            "bodyVisibility": bodyVisibility,
-                            "currentURL": webView.state.pageURL.absoluteString,
-                            "elapsedMs": elapsedMs,
-                            "fontsStatus": fontsStatus,
-                            "hasReaderContent": hasReaderContent,
-                            "hasReaderRenderReady": String(describing: hasReaderRenderReady),
-                            "hasVisibleFoliateView": hasVisibleFoliateView,
-                            "href": href,
-                            "manabiFontPending": manabiFontPending,
-                            "manabiFontReady": manabiFontReady,
-                            "readerContentTextLength": readerContentTextLength,
-                            "readyState": readyState,
-                            "reason": reason,
-                            "visibleMarkAsReadButtonCount": visibleMarkAsReadButtonCount
-                        ]
-                    )
-                }
             }
             if let hasReaderRenderReady,
                webView.state.hasReaderRenderReady != hasReaderRenderReady {
@@ -5203,10 +5136,11 @@ fileprivate struct ReaderDocStateUserScript {
             ? performance.now.bind(performance)
             : () => Date.now();
         const bootstrapStartedAt = bootstrapNow();
+        const isEbookDocument = window.location.href.startsWith("ebook://");
         let stateMachine = { stopped: false, attempts: 0 };
         let rafHandle = { value: 0 };
         let timeoutHandle = { value: 0 };
-        let observer = new MutationObserver(() => {
+        let observer = isEbookDocument ? null : new MutationObserver(() => {
             postState("mutation");
         });
         function rounded(value) {
@@ -5249,10 +5183,14 @@ fileprivate struct ReaderDocStateUserScript {
             const readerContentRect = readerContent?.getBoundingClientRect?.() ?? null;
             const readerStageRect = readerStage?.getBoundingClientRect?.() ?? null;
             const foliateViewRect = foliateView?.getBoundingClientRect?.() ?? null;
-            const centerX = Math.max(0, Math.round(window.innerWidth / 2));
-            const centerY = Math.max(0, Math.round(window.innerHeight / 2));
-            const elementAtCenter = document.elementFromPoint(centerX, centerY);
-            const readerContentText = (readerContent?.textContent || "").trim();
+            const includeDetailedDiagnostics = window.__manabiReaderDocStateDetailed === true;
+            const centerX = includeDetailedDiagnostics ? Math.max(0, Math.round(window.innerWidth / 2)) : 0;
+            const centerY = includeDetailedDiagnostics ? Math.max(0, Math.round(window.innerHeight / 2)) : 0;
+            const elementAtCenter = includeDetailedDiagnostics ? document.elementFromPoint(centerX, centerY) : null;
+            const shouldMeasureReaderContentText = includeDetailedDiagnostics || !foliateView;
+            const readerContentTextLength = shouldMeasureReaderContentText && readerContent
+                ? (readerContent.textContent || "").trim().length
+                : null;
             const hasReaderModeContent = !!readerContent;
             const hasVisibleReaderModeContent = !!readerContent
                 && !!readerContentRect
@@ -5261,7 +5199,7 @@ fileprivate struct ReaderDocStateUserScript {
                 && readerContentStyle?.visibility !== 'hidden'
                 && readerContentStyle?.display !== 'none'
                 && Number.parseFloat(readerContentStyle?.opacity || "1") > 0.01
-                && readerContentText.length > 0;
+                && (readerContentTextLength === null || readerContentTextLength > 0);
             const hasVisibleFoliateView = !!foliateView
                 && !!foliateViewRect
                 && foliateViewRect.width > 1
@@ -5313,19 +5251,20 @@ fileprivate struct ReaderDocStateUserScript {
                 } : null,
                 hasVisibleFoliateView,
                 readerContentChildCount: readerContent?.childElementCount ?? null,
-                readerContentTextLength: readerContentText.length,
-                visibleMarkAsReadButtonCount: Array.from(document.querySelectorAll(".mnb-tracking-button")).filter((button) => {
-                    const style = window.getComputedStyle(button);
-                    return style.display !== "none"
-                        && style.visibility !== "hidden"
-                        && Number.parseFloat(style.opacity || "1") > 0.01;
-                }).length,
+                readerContentTextLength,
+                visibleMarkAsReadButtonCount: includeDetailedDiagnostics
+                    ? Array.from(document.querySelectorAll(".mnb-tracking-button")).filter((button) => {
+                        const style = window.getComputedStyle(button);
+                        return style.display !== "none"
+                            && style.visibility !== "hidden"
+                            && Number.parseFloat(style.opacity || "1") > 0.01;
+                    }).length
+                    : null,
                 hasReaderRenderReady:
-                    ((((html?.dataset?.manabiReaderRenderReady === '1'
+                    (((html?.dataset?.manabiReaderRenderReady === '1'
                     || body?.dataset?.manabiReaderRenderReady === '1')
-                    && hasReaderModeContent)
+                    && (hasReaderModeContent || hasVisibleFoliateView))
                     || hasVisibleReaderModeContent)
-                    || hasVisibleFoliateView)
                     && (html?.dataset?.manabiFontPending ?? null) !== '1'
                     && bodyStyle?.visibility !== 'hidden'
                     && bodyStyle?.display !== 'none'
@@ -5345,7 +5284,7 @@ fileprivate struct ReaderDocStateUserScript {
         function stopPolling() {
             if (stateMachine.stopped) { return; }
             stateMachine.stopped = true;
-            try { observer.disconnect(); } catch (_error) {}
+            try { observer?.disconnect?.(); } catch (_error) {}
             if (rafHandle.value) { cancelAnimationFrame(rafHandle.value); }
             if (timeoutHandle.value) { clearTimeout(timeoutHandle.value); }
         }
@@ -5357,6 +5296,12 @@ fileprivate struct ReaderDocStateUserScript {
                 return true;
             }
             return false;
+        }
+        window.__manabiPostReaderDocStateEvent = function(reason) {
+            return postState(reason || "event");
+        };
+        if (isEbookDocument) {
+            return;
         }
         let attempts = 0;
         function scheduleNextTick() {
@@ -5370,7 +5315,7 @@ fileprivate struct ReaderDocStateUserScript {
                 }, 25);
             });
         }
-        if (document.documentElement) {
+        if (!isEbookDocument && document.documentElement && observer) {
             observer.observe(document.documentElement, {
                 childList: true,
                 subtree: true,
@@ -5382,7 +5327,9 @@ fileprivate struct ReaderDocStateUserScript {
         document.addEventListener("DOMContentLoaded", () => { postState("domcontentloaded"); });
         window.addEventListener("load", () => { postState("load"); });
         if (!postState("initial")) {
-            scheduleNextTick();
+            if (!isEbookDocument) {
+                scheduleNextTick();
+            }
         }
     } catch (e) { /* noop */ }
 })();
@@ -6219,6 +6166,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private static let segmentSwipeMovementTolerance: CGFloat = 4
     private static let segmentTapMaximumDuration: TimeInterval = 0.42
     private static let segmentTapPressedFallbackDuration: TimeInterval = 1.0
+    private static let touchDeliveryLoggingEnabled: Bool = {
+#if DEBUG
+        ProcessInfo.processInfo.environment["MANABI_NATIVE_LOOKUP_TOUCH_LOGS"] == "1"
+#else
+        false
+#endif
+    }()
 
     weak var store: WebViewNativeLookupHitTestStore?
     weak var coordinateView: NativeLookupHitTestOverlayView?
@@ -6991,7 +6945,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
     }
 
-    private func clearPressedVisualForMovementIfNeeded(payload _: [String: Any]) {
+    private func clearPressedVisualForMovementIfNeeded(payload _: @autoclosure () -> [String: Any]) {
         guard !touchStartPressedVisualCleared else { return }
         touchStartPressedVisualCleared = true
         touchStartOverlay?.clearPressedTarget()
@@ -7003,17 +6957,18 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
     }
 
-    private func failGesture(reason: String, payload: [String: Any] = [:]) {
-        var mergedPayload = payload
-        mergedPayload["stage"] = "failGesture.\(reason)"
-        logTouchDeliveryVerdict(
-            stage: "failGesture.\(reason)",
-            verdict: "passThrough.allowedAfterRecognizerFailure",
-            reason: reason,
-            target: touchStartTarget,
-            coordinateView: coordinateView,
-            extra: payload.merging(["segmentTargetTouchesReachWebKit": true]) { current, _ in current }
-        )
+    private func failGesture(reason: String, payload: @autoclosure () -> [String: Any] = [:]) {
+        if Self.touchDeliveryLoggingEnabled {
+            let payload = payload()
+            logTouchDeliveryVerdict(
+                stage: "failGesture.\(reason)",
+                verdict: "passThrough.allowedAfterRecognizerFailure",
+                reason: reason,
+                target: touchStartTarget,
+                coordinateView: coordinateView,
+                extra: payload.merging(["segmentTargetTouchesReachWebKit": true]) { current, _ in current }
+            )
+        }
         resetTrackingState()
         state = .failed
     }
@@ -7025,8 +6980,10 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         target: WebViewNativeLookupHitTarget? = nil,
         point: CGPoint? = nil,
         coordinateView: NativeLookupHitTestOverlayView? = nil,
-        extra: [String: Any] = [:]
+        extra: @autoclosure () -> [String: Any] = [:]
     ) {
+        guard Self.touchDeliveryLoggingEnabled else { return }
+        let extra = extra()
         var payload: [String: Any] = [
             "verdict": verdict,
             "reason": reason
