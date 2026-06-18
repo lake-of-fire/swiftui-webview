@@ -5439,6 +5439,15 @@ fileprivate struct ReaderDocStateUserScript {
         let rafHandle = { value: 0 };
         let timeoutHandle = { value: 0 };
         let lastTextVisibleSignature = null;
+        const isEbookDocument = (() => {
+            try {
+                const href = String(window.location?.href || "");
+                if (href.startsWith("ebook://")) { return true; }
+                return document.body?.dataset?.isEbook === "true";
+            } catch (_error) {
+                return false;
+            }
+        })();
         let observer = new MutationObserver(() => {
             postState("mutation");
         });
@@ -5647,6 +5656,12 @@ fileprivate struct ReaderDocStateUserScript {
                 return true;
             }
             return false;
+        }
+        window.__manabiPostReaderDocStateEvent = function(reason) {
+            return postState(reason || "event");
+        };
+        if (isEbookDocument) {
+            return;
         }
         let attempts = 0;
         function scheduleNextTick() {
