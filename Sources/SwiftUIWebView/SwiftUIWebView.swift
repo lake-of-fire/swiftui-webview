@@ -4695,6 +4695,50 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
+    private func compactJavaScriptDiagnosticString(_ string: String, limit: Int = 360) -> String {
+        let escaped = string
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+        guard escaped.count > limit else { return escaped }
+        let headLength = max(0, limit / 2)
+        let tailLength = max(0, limit - headLength)
+        return "\(escaped.prefix(headLength))...\(escaped.suffix(tailLength))"
+    }
+
+    private func diagnosticJavaScriptHash(_ js: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in js.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        let raw = String(hash, radix: 16)
+        return String(repeating: "0", count: max(0, 16 - raw.count)) + raw
+    }
+
+    private func logJavaScriptEvaluationException(_ error: NSError, js: String, frame: WKFrameInfo?) {
+        guard error.domain == WKError.errorDomain,
+              error.code == WKError.javaScriptExceptionOccurred.rawValue else {
+            return
+        }
+        let message = error.userInfo["WKJavaScriptExceptionMessage"] as? String ?? ""
+        let isSyntaxFailure = message.contains("SyntaxError") || message.contains("Unexpected end of script")
+        guard isSyntaxFailure else { return }
+        let line = error.userInfo["WKJavaScriptExceptionLineNumber"] ?? "nil"
+        let column = error.userInfo["WKJavaScriptExceptionColumnNumber"] ?? "nil"
+        let frameURL = frame?.webView?.url?.absoluteString ?? "nil"
+        print(
+            "# JSERROR evaluateJavaScript",
+            "message=\(compactJavaScriptDiagnosticString(message, limit: 180))",
+            "line=\(line)",
+            "column=\(column)",
+            "frameURL=\(compactJavaScriptDiagnosticString(frameURL, limit: 220))",
+            "scriptUTF8Length=\(js.utf8.count)",
+            "scriptHash=\(diagnosticJavaScriptHash(js))",
+            "script=\(compactJavaScriptDiagnosticString(js))"
+        )
+    }
+
     //    @MainActor
     @discardableResult
     public func evaluateJavaScript(
@@ -4794,6 +4838,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             if !handled {
 #if DEBUG
 #endif
+                logJavaScriptEvaluationException(nsError, js: js, frame: frame)
                 throw primaryError
             }
         }
