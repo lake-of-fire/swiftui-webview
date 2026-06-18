@@ -3001,7 +3001,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
                     hasReaderRenderReady:
-                        ((((html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
+                        ((((html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
                         && hasReaderModeContent)
                         || hasVisibleReaderModeContent)
                         || hasVisibleFoliateView)
@@ -5123,7 +5123,7 @@ fileprivate struct PageIconChangeUserScript {
 }
 
 @MainActor
-fileprivate struct ReaderDocStateUserScript {
+struct ReaderDocStateUserScript {
     let userScript: WebViewUserScript
 
     init() {
@@ -5261,8 +5261,8 @@ fileprivate struct ReaderDocStateUserScript {
                     }).length
                     : null,
                 hasReaderRenderReady:
-                    (((html?.dataset?.manabiReaderRenderReady === '1'
-                    || body?.dataset?.manabiReaderRenderReady === '1')
+                    (((html?.dataset?.mnbReaderRenderReady === '1'
+                    || body?.dataset?.mnbReaderRenderReady === '1')
                     && (hasReaderModeContent || hasVisibleFoliateView))
                     || hasVisibleReaderModeContent)
                     && (html?.dataset?.manabiFontPending ?? null) !== '1'
@@ -5320,7 +5320,7 @@ fileprivate struct ReaderDocStateUserScript {
                 childList: true,
                 subtree: true,
                 attributes: true,
-                attributeFilter: ["data-manabi-reader-render-ready", "class", "style"]
+                attributeFilter: ["data-mnb-reader-render-ready", "class", "style"]
             });
         }
         document.addEventListener("readystatechange", () => { postState("readystatechange"); });
