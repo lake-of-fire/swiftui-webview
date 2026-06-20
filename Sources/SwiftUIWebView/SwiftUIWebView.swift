@@ -188,12 +188,24 @@ private func popoverLogValue(_ value: Any) -> String {
     case let value as CGSize:
         return "{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}"
     case let value as [String: Any]:
-        return "{" + value.keys.sorted().map { "\($0):\(popoverLogValue(value[$0] as Any))" }.joined(separator: ",") + "}"
+        return "{" + value.keys.sorted()
+            .filter { !popoverShouldRedactLogKey($0) }
+            .map { "\($0):\(popoverLogValue(value[$0] as Any))" }
+            .joined(separator: ",") + "}"
     case let value as [Any]:
         return "[" + value.prefix(5).map { popoverLogValue($0) }.joined(separator: ",") + (value.count > 5 ? ",..." : "") + "]"
     default:
         return String(describing: value).replacingOccurrences(of: "\n", with: "\\n")
     }
+}
+
+private func popoverShouldRedactLogKey(_ key: String) -> Bool {
+    let lowercased = key.lowercased()
+    return lowercased == "url"
+        || lowercased.hasSuffix("url")
+        || lowercased.contains("framekey")
+        || lowercased == "nativelookupframekey"
+        || lowercased == "locationhref"
 }
 
 #if os(iOS)
@@ -1047,6 +1059,8 @@ public final class WebViewNativeLookupHitTestStore {
     public var onPressedTargetHandoffCompleted: ((String?) -> Void)?
     public var onActiveLookupBlankTap: (() -> Void)?
     public var onExternalTouchInteractionCancelled: ((String) -> Void)?
+    public var onSegmentSwipe: ((CGFloat, CGFloat) -> Void)?
+    public var onCaptureModeChanged: ((Bool) -> Void)?
     public var activeLookupElementID: (() -> String?)?
     public var activeElementID: String?
     public var showsPressedTargetOverlay = false
@@ -1073,9 +1087,14 @@ public final class WebViewNativeLookupHitTestStore {
     }
     public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
     public var capturesSegmentTouchesInOverlay =
-        UserDefaults.standard.bool(forKey: WebViewNativeLookupHitTestStore.strictOverlayCaptureDefaultsKey)
+        UserDefaults.standard.bool(forKey: WebViewNativeLookupHitTestStore.strictOverlayCaptureDefaultsKey) {
+        didSet {
+            guard capturesSegmentTouchesInOverlay != oldValue else { return }
+            onCaptureModeChanged?(capturesSegmentTouchesInOverlay)
+        }
+    }
 
-    public init(hitSlop: CGFloat = 3) {
+    public init(hitSlop: CGFloat = 18) {
         self.hitSlop = hitSlop
     }
 
@@ -1135,6 +1154,10 @@ public final class WebViewNativeLookupHitTestStore {
         }
         nativeTouchElementID = nil
         onNativeTouchStreamFinished?(reason)
+    }
+
+    public func dispatchSegmentSwipe(dx: CGFloat, dy: CGFloat) {
+        onSegmentSwipe?(dx, dy)
     }
 
     public func hitTarget(
@@ -6098,6 +6121,8 @@ private final class NativeLookupHitTestOverlayView: UIView {
     private let pressedSegmentLayer = CAShapeLayer()
     private var clearPressedSegmentWorkItem: DispatchWorkItem?
     private var pressedSegmentElementID: String?
+    private var lastPointInsideMissLogTime: TimeInterval = 0
+    private var lastPointInsideHitLogTime: TimeInterval = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -6132,9 +6157,15 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let path = CGMutablePath()
         var visualRects: [CGRect] = []
         var strokeRects: [CGRect] = []
-        for visualRect in target.projectedRectsForCurrentHitTestOverlay(
-            topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion
-        ) {
+        let pressedVisualRects = target.coordinateOriginInWindow == nil
+            ? target.projectedRectsForCurrentHitTestOverlay(topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion)
+            : target.rects.map { rect in
+                var expandedRect = rect
+                expandedRect.origin.y -= PressedSegmentStyle.lookupAttachmentTopExpansion
+                expandedRect.size.height += PressedSegmentStyle.lookupAttachmentTopExpansion
+                return expandedRect
+            }
+        for visualRect in pressedVisualRects {
             let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
             visualRects.append(visualRect)
             strokeRects.append(strokeRect)
@@ -6192,6 +6223,13 @@ private final class NativeLookupHitTestOverlayView: UIView {
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
             let hasActiveWebTextSelection = store?.hasActiveWebTextSelection == true
+            logPointInsideHit(
+                point: point,
+                target: target,
+                capturesSegmentTouches: capturesSegmentTouches,
+                hasActiveWebTextSelection: hasActiveWebTextSelection,
+                overlayWindowOrigin: overlayWindowOrigin
+            )
             if hasActiveWebTextSelection {
                 return false
             }
@@ -6201,14 +6239,53 @@ private final class NativeLookupHitTestOverlayView: UIView {
                 return true
             }
         }
+        if store?.targetCount ?? 0 > 0 {
+            let now = CACurrentMediaTime()
+            if now - lastPointInsideMissLogTime > 0.5 {
+                lastPointInsideMissLogTime = now
+                print(
+                    "# POPOVER native.overlay.pointInside.miss",
+                    "point=\(point)",
+                    "size=\(bounds.size)",
+                    "targetCount=\(store?.targetCount ?? 0)",
+                    "captures=\(store?.capturesSegmentTouchesInOverlay == true)",
+                    "textSelection=\(store?.hasActiveWebTextSelection == true)",
+                    "nearest=\(popoverLogValue(store?.diagnostics(at: point, limit: 3, in: bounds.size, coordinateViewWindowOrigin: overlayWindowOrigin) as Any))"
+                )
+            }
+        }
         return false
+    }
+
+    private func logPointInsideHit(
+        point: CGPoint,
+        target: WebViewNativeLookupHitTarget,
+        capturesSegmentTouches: Bool,
+        hasActiveWebTextSelection: Bool,
+        overlayWindowOrigin: CGPoint
+    ) {
+        let now = CACurrentMediaTime()
+        guard now - lastPointInsideHitLogTime > 0.5 else { return }
+        lastPointInsideHitLogTime = now
+        print(
+            "# POPOVER native.overlay.pointInside.hit",
+            "point=\(point)",
+            "size=\(bounds.size)",
+            "id=\(target.elementID)",
+            "captures=\(capturesSegmentTouches)",
+            "textSelection=\(hasActiveWebTextSelection)",
+            "inflated=\(target.debugUsedInflatedHitRect as Any)",
+            "distance=\(target.debugDistance as Any)",
+            "selectedPoint=\(target.debugHitTestPoint.map { popoverLogValue($0) } ?? "nil")",
+            "nearest=\(popoverLogValue(store?.diagnostics(at: point, limit: 2, in: bounds.size, coordinateViewWindowOrigin: overlayWindowOrigin) as Any))"
+        )
     }
 }
 
 private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer {
     private static let segmentTapMovementTolerance: CGFloat = 10
     private static let segmentLongPressDriftTolerance: CGFloat = 24
-    private static let segmentSwipeMovementTolerance: CGFloat = 4
+    private static let segmentSwipeMovementTolerance: CGFloat = 24
     private static let segmentTapMaximumDuration: TimeInterval = 0.42
     private static let segmentTapPressedFallbackDuration: TimeInterval = 1.0
     private static let touchDeliveryLoggingEnabled: Bool = {
@@ -6231,6 +6308,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchStartIsInsideTarget = false
     private var touchHasMoved = false
     private var touchLatestPoint: CGPoint?
+    private var touchForwardedSegmentSwipe = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
     private var tapExpirationWorkItem: DispatchWorkItem?
     private var suppressedCompetingTapRecognizers: [(recognizer: UIGestureRecognizer, wasEnabled: Bool)] = []
@@ -6528,6 +6606,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             }
         }
         if isSwipeLikeMovement {
+            let didForwardSwipe = !touchForwardedSegmentSwipe
+            if didForwardSwipe {
+                touchForwardedSegmentSwipe = true
+                store?.dispatchSegmentSwipe(dx: dx, dy: dy)
+            }
             clearPressedVisualForMovementIfNeeded(payload: [
                 "start": Self.debugPointString(start),
                 "point": Self.debugPointString(point),
@@ -6557,6 +6640,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "exceededTapMovement": exceededTapMovement,
                 "exceededLongPressDrift": exceededLongPressDrift,
                 "isInsideStartTarget": isInsideStartTarget,
+                "segmentSwipeForwarded": didForwardSwipe,
             ])
         }
     }
@@ -6611,8 +6695,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             in: hitTestView.bounds.size,
             coordinateViewWindowOrigin: hitTestViewWindowOrigin
         )
-        let endedInsideStartTarget = Self.point(point, isInside: target)
-            && endTarget?.elementID == target.elementID
+        let endedInsideStartTarget = endTarget?.elementID == target.elementID
         logTouchDeliveryVerdict(
             stage: "touchesEnded.endTarget",
             verdict: endTarget?.elementID == target.elementID
@@ -6927,6 +7010,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartIsInsideTarget = false
         touchHasMoved = false
         touchLatestPoint = nil
+        touchForwardedSegmentSwipe = false
         restoreSuppressedCompetingTapRecognizers(reason: "resetTrackingState")
         store?.finishNativeTouchStream(reason: "resetTrackingState")
         if clearPressedTarget {
@@ -7027,8 +7111,14 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         coordinateView: NativeLookupHitTestOverlayView? = nil,
         extra: @autoclosure () -> [String: Any] = [:]
     ) {
-        guard Self.touchDeliveryLoggingEnabled else { return }
         let extra = extra()
+        let targetCount = extra["targetCount"] as? Int ?? 0
+        let shouldLog = Self.touchDeliveryLoggingEnabled
+            || target != nil
+            || targetCount > 0
+            || stage.contains("nativeLookup")
+            || stage.contains("noSegmentTarget")
+        guard shouldLog else { return }
         var payload: [String: Any] = [
             "verdict": verdict,
             "reason": reason
@@ -7350,8 +7440,7 @@ public class WebViewController: UIViewController {
             "bottom=\(insets.bottom)",
             "webViewFrame=\(webView.frame)",
             "webViewBounds=\(webView.bounds)",
-            "webViewSafeAreaTop=\(webView.safeAreaInsets.top)",
-            "url=\(webView.url?.absoluteString ?? "nil")"
+            "webViewSafeAreaTop=\(webView.safeAreaInsets.top)"
         )
 #endif
         let escapedReason = reason
@@ -7443,6 +7532,16 @@ public class WebViewController: UIViewController {
             guard let self else { return }
             self.nativeLookupHitTestOverlayView.clearPressedTarget()
             self.nativeLookupHitTestGestureRecognizer.cancelForExternalPageMotion(reason: reason)
+        }
+        store.onCaptureModeChanged = { [weak self] capturesSegmentTouchesInOverlay in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.capturesNativeLookupSegmentTouchesInOverlay = capturesSegmentTouchesInOverlay
+                if self.nativeLookupHitTestOverlayView.superview != nil
+                    || self.nativeLookupHitTestGestureRecognizer.view != nil {
+                    self.attachNativeLookupHitTestOverlay()
+                }
+            }
         }
     }
 
