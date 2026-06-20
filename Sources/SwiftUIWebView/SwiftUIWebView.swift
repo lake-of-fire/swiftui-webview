@@ -126,7 +126,9 @@ private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) 
         "readerDocState"
     ]
     guard loggedPrefixes.contains(where: { stage.hasPrefix($0) }) else { return }
+    let redactedKeys: Set<String> = ["currentURL", "url"]
     let fields = metadata
+        .filter { key, _ in !redactedKeys.contains(key) }
         .sorted { $0.key < $1.key }
         .map { key, value in "\(key)=\(value)" }
         .joined(separator: " ")
@@ -6108,6 +6110,10 @@ public class EnhancedWKWebView: WKWebView {
 }
 
 #if os(iOS)
+private var verboseNativeLookupPositionLoggingEnabled: Bool {
+    ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1"
+}
+
 private final class NativeLookupHitTestOverlayView: UIView {
     private enum PressedSegmentStyle {
         static let pressedStrokeAlpha: CGFloat = 0.8
@@ -6157,15 +6163,9 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let path = CGMutablePath()
         var visualRects: [CGRect] = []
         var strokeRects: [CGRect] = []
-        let pressedVisualRects = target.coordinateOriginInWindow == nil
-            ? target.projectedRectsForCurrentHitTestOverlay(topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion)
-            : target.rects.map { rect in
-                var expandedRect = rect
-                expandedRect.origin.y -= PressedSegmentStyle.lookupAttachmentTopExpansion
-                expandedRect.size.height += PressedSegmentStyle.lookupAttachmentTopExpansion
-                return expandedRect
-            }
-        for visualRect in pressedVisualRects {
+        for visualRect in target.projectedRectsForCurrentHitTestOverlay(
+            topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion
+        ) {
             let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
             visualRects.append(visualRect)
             strokeRects.append(strokeRect)
@@ -6241,7 +6241,8 @@ private final class NativeLookupHitTestOverlayView: UIView {
         }
         if store?.targetCount ?? 0 > 0 {
             let now = CACurrentMediaTime()
-            if now - lastPointInsideMissLogTime > 0.5 {
+            if verboseNativeLookupPositionLoggingEnabled,
+               now - lastPointInsideMissLogTime > 0.5 {
                 lastPointInsideMissLogTime = now
                 print(
                     "# POPOVER native.overlay.pointInside.miss",
@@ -6264,6 +6265,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
         hasActiveWebTextSelection: Bool,
         overlayWindowOrigin: CGPoint
     ) {
+        guard verboseNativeLookupPositionLoggingEnabled else { return }
         let now = CACurrentMediaTime()
         guard now - lastPointInsideHitLogTime > 0.5 else { return }
         lastPointInsideHitLogTime = now
@@ -7181,6 +7183,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
+        guard verboseNativeLookupPositionLoggingEnabled else { return }
         print(
             "# POPOVER native.gesture",
             payload.keys.sorted()
@@ -7433,15 +7436,17 @@ public class WebViewController: UIViewController {
     ) {
         guard insets.top.isFinite else { return }
 #if DEBUG
-        print(
-            "# POPOVER webview.chromeInsets.sync",
-            "reason=\(reason)",
-            "top=\(insets.top)",
-            "bottom=\(insets.bottom)",
-            "webViewFrame=\(webView.frame)",
-            "webViewBounds=\(webView.bounds)",
-            "webViewSafeAreaTop=\(webView.safeAreaInsets.top)"
-        )
+        if ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1" {
+            print(
+                "# POPOVER webview.chromeInsets.sync",
+                "reason=\(reason)",
+                "top=\(insets.top)",
+                "bottom=\(insets.bottom)",
+                "webViewFrame=\(webView.frame)",
+                "webViewBounds=\(webView.bounds)",
+                "webViewSafeAreaTop=\(webView.safeAreaInsets.top)"
+            )
+        }
 #endif
         let escapedReason = reason
             .replacingOccurrences(of: "\\", with: "\\\\")
