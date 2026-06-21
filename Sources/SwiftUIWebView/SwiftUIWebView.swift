@@ -2701,7 +2701,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 "targetCount=\(navigator.nativeLookupHitTesting.targetCount)",
                 "body=\(popoverLogValue(message.body as Any))"
             )
-            if suppressForNativeLookup, !isNavigationStateMessage {
+            if suppressForNativeLookup {
                 return
             }
             if !isNavigationStateMessage,
