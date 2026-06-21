@@ -1169,29 +1169,16 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> WebViewNativeLookupHitTarget? {
         guard isEnabled else { return nil }
-        let exactCandidate = bestCandidate(
-            at: point,
-            usingInflatedRects: false,
-            containerSize: containerSize,
-            coordinateViewWindowMinY: coordinateViewWindowMinY,
-            coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        )
-        if let exactCandidate {
-            return target(
-                for: exactCandidate,
-                usedInflatedHitRect: false
-            )
-        }
         return bestCandidate(
             at: point,
-            usingInflatedRects: true,
+            usingInflatedRects: false,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ).map {
             target(
                 for: $0,
-                usedInflatedHitRect: true
+                usedInflatedHitRect: false
             )
         }
     }
@@ -1511,28 +1498,18 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
-        let exactCandidate = bestCandidate(
+        guard let candidate = bestCandidate(
             at: point,
             usingInflatedRects: false,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        )
-        let inflatedCandidate = exactCandidate == nil
-            ? bestCandidate(
-                at: point,
-                usingInflatedRects: true,
-                containerSize: containerSize,
-                coordinateViewWindowMinY: coordinateViewWindowMinY,
-                coordinateViewWindowOrigin: coordinateViewWindowOrigin
-            )
-            : nil
-        guard let candidate = exactCandidate ?? inflatedCandidate else {
+        ) else {
             return false
         }
         let target = target(
             for: candidate,
-            usedInflatedHitRect: exactCandidate == nil
+            usedInflatedHitRect: false
         )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
