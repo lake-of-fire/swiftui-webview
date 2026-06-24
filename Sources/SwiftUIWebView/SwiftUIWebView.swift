@@ -1171,14 +1171,14 @@ public final class WebViewNativeLookupHitTestStore {
         guard isEnabled else { return nil }
         return bestCandidate(
             at: point,
-            usingInflatedRects: false,
+            usingInflatedRects: true,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ).map {
             target(
                 for: $0,
-                usedInflatedHitRect: false
+                usedInflatedHitRect: true
             )
         }
     }
@@ -1334,7 +1334,7 @@ public final class WebViewNativeLookupHitTestStore {
             frameInfo: candidate.target.frameInfo,
             nativeLookupFrameKey: candidate.target.nativeLookupFrameKey,
             debugUsedInflatedHitRect: usedInflatedHitRect,
-            debugHitRects: [candidate.hitRect],
+            debugHitRects: [candidate.rect],
             debugDistance: candidate.distance,
             debugCenterDistance: candidate.centerDistance,
             debugHitTestPoint: candidate.hitTestPoint,
@@ -1500,7 +1500,7 @@ public final class WebViewNativeLookupHitTestStore {
     ) -> Bool {
         guard let candidate = bestCandidate(
             at: point,
-            usingInflatedRects: false,
+            usingInflatedRects: true,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
@@ -1509,7 +1509,7 @@ public final class WebViewNativeLookupHitTestStore {
         }
         let target = target(
             for: candidate,
-            usedInflatedHitRect: false
+            usedInflatedHitRect: true
         )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
@@ -5494,7 +5494,7 @@ fileprivate struct UnhandledTapUserScript {
                 clientX: event.clientX ?? null,
                 clientY: event.clientY ?? null,
                 targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-                targetClosestSegment: event.target?.closest?.('mnb-seg')?.getAttribute?.('id') ?? null,
+                targetClosestSegment: event.target?.closest?.('m-m')?.getAttribute?.('id') ?? null,
             });
             return;
         }
@@ -5625,11 +5625,11 @@ fileprivate struct UnhandledTapUserScript {
                 clientX: event.clientX ?? null,
                 clientY: event.clientY ?? null,
                 targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-                targetClosestSegment: event.target?.closest?.('mnb-seg')?.getAttribute?.('id') ?? null,
+                targetClosestSegment: event.target?.closest?.('m-m')?.getAttribute?.('id') ?? null,
             });
             return;
         }
-        const targetClosestSegment = event.target?.closest?.('mnb-seg')?.getAttribute?.('id') ?? null;
+        const targetClosestSegment = event.target?.closest?.('m-m')?.getAttribute?.('id') ?? null;
         if (targetClosestSegment) {
             logPopover('pointerUp.skipSegmentTarget', {
                 pointerId: event.pointerId,
