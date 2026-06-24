@@ -1046,7 +1046,13 @@ public final class WebViewNativeLookupHitTestStore {
         let index: Int
     }
 
+    private struct ResolvedCandidate {
+        let candidate: Candidate
+        let usedInflatedHitRect: Bool
+    }
+
     private let hitSlop: CGFloat
+    private let maximumInflatedHitDistance: CGFloat
     private var entries: [Entry] = []
     private var nativeTouchElementID: String?
     private var suppressUnhandledTapUntil: TimeInterval = 0
@@ -1096,8 +1102,9 @@ public final class WebViewNativeLookupHitTestStore {
         }
     }
 
-    public init(hitSlop: CGFloat = 18) {
+    public init(hitSlop: CGFloat = 18, maximumInflatedHitDistance: CGFloat = 4) {
         self.hitSlop = hitSlop
+        self.maximumInflatedHitDistance = maximumInflatedHitDistance
     }
 
     public func updateTargets(
@@ -1169,18 +1176,12 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> WebViewNativeLookupHitTarget? {
         guard isEnabled else { return nil }
-        return bestCandidate(
+        return resolvedCandidate(
             at: point,
-            usingInflatedRects: true,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        ).map {
-            target(
-                for: $0,
-                usedInflatedHitRect: true
-            )
-        }
+        ).map { target(for: $0) }
     }
 
     public func exactHitTarget(
@@ -1278,6 +1279,56 @@ public final class WebViewNativeLookupHitTestStore {
         return best
     }
 
+    private func inflatedCandidate(
+        at point: CGPoint,
+        containerSize: CGSize? = nil,
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
+    ) -> Candidate? {
+        guard let candidate = bestCandidate(
+            at: point,
+            usingInflatedRects: true,
+            containerSize: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ) else { return nil }
+        return candidate.distance <= maximumInflatedHitDistance ? candidate : nil
+    }
+
+    private func resolvedCandidate(
+        at point: CGPoint,
+        allowingInflatedHitRect: Bool = true,
+        containerSize: CGSize? = nil,
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
+    ) -> ResolvedCandidate? {
+        if let exactCandidate = bestCandidate(
+            at: point,
+            usingInflatedRects: false,
+            containerSize: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ) {
+            return ResolvedCandidate(
+                candidate: exactCandidate,
+                usedInflatedHitRect: false
+            )
+        }
+        guard allowingInflatedHitRect,
+              let inflatedCandidate = inflatedCandidate(
+                  at: point,
+                  containerSize: containerSize,
+                  coordinateViewWindowMinY: coordinateViewWindowMinY,
+                  coordinateViewWindowOrigin: coordinateViewWindowOrigin
+              ) else {
+            return nil
+        }
+        return ResolvedCandidate(
+            candidate: inflatedCandidate,
+            usedInflatedHitRect: true
+        )
+    }
+
     private func bestRectCandidate(
         for entry: Entry,
         point: CGPoint,
@@ -1340,6 +1391,13 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestPoint: candidate.hitTestPoint,
             debugHitTestRebaseX: candidate.hitTestRebaseX,
             debugHitTestRebaseY: candidate.hitTestRebaseY
+        )
+    }
+
+    private func target(for resolvedCandidate: ResolvedCandidate) -> WebViewNativeLookupHitTarget {
+        target(
+            for: resolvedCandidate.candidate,
+            usedInflatedHitRect: resolvedCandidate.usedInflatedHitRect
         )
     }
 
@@ -1498,19 +1556,15 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
-        guard let candidate = bestCandidate(
+        guard let resolvedCandidate = resolvedCandidate(
             at: point,
-            usingInflatedRects: true,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ) else {
             return false
         }
-        let target = target(
-            for: candidate,
-            usedInflatedHitRect: true
-        )
+        let target = target(for: resolvedCandidate)
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
             point: point,
