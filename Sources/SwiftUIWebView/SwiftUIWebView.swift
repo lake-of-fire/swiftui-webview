@@ -8959,7 +8959,11 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
 
     weak var store: WebViewNativeLookupHitTestStore?
     private weak var pressedOverlay: NativeLookupHitTestOverlayNSView?
-    private var mouseDownWasActiveTarget = false
+    fileprivate private(set) var mouseDownWasActiveTarget = false
+
+    fileprivate func clearMouseDownWasActiveTarget() {
+        mouseDownWasActiveTarget = false
+    }
 
     override func mouseDown(with event: NSEvent) {
         guard let view else {
@@ -8998,7 +9002,6 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         } else {
             pressedOverlay?.clearPressedTarget(after: Self.segmentClickPressedHandoffDuration)
         }
-        mouseDownWasActiveTarget = false
         pressedOverlay = nil
     }
 
@@ -9065,7 +9068,18 @@ public final class WebViewHostNSView: NSView {
     @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
         guard recognizer.state == .ended else { return }
         let point = recognizer.location(in: nativeLookupHitTestOverlayView)
+        if recognizer.mouseDownWasActiveTarget {
+            nativeLookupMacPopoverLog("mac.click.ended.suppressedActiveTarget", [
+                "point": point,
+                "bounds": nativeLookupHitTestOverlayView.bounds,
+                "targetCount": recognizer.store?.targetCount as Any,
+                "enabled": recognizer.store?.isEnabled as Any,
+            ])
+            recognizer.clearMouseDownWasActiveTarget()
+            return
+        }
         let handled = recognizer.store?.handleTap(at: point, in: nativeLookupHitTestOverlayView.bounds.size) == true
+        recognizer.clearMouseDownWasActiveTarget()
         nativeLookupMacPopoverLog("mac.click.ended.dispatch", [
             "point": point,
             "bounds": nativeLookupHitTestOverlayView.bounds,
