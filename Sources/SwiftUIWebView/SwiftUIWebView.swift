@@ -113,19 +113,23 @@ public enum ReaderLoadSignposts {
 
 @inline(__always)
 private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) {
+    let verboseReaderLoadLogging =
+        ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_LOGS"] == "1"
+        || ProcessInfo.processInfo.environment["MANABI_READER_LOAD_DEBUG"] == "1"
+        || ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
     let loggedPrefixes = [
         "webViewNavigator.requestDeferredUntilAttached",
-        "webViewNavigator.directLoad",
         "webViewNavigator.dataLoad",
         "webViewNavigator.htmlLoad",
         "webViewNavigator.pending",
         "webViewNavigator.preProvisionalWatchdog",
         "webViewNavigator.competingOperation",
-        "webView.nav.",
+        "webView.nav.fail",
+        "webView.nav.cancel",
         "webView.processTerminated",
         "readerDocState"
     ]
-    guard loggedPrefixes.contains(where: { stage.hasPrefix($0) }) else { return }
+    guard verboseReaderLoadLogging || loggedPrefixes.contains(where: { stage.hasPrefix($0) }) else { return }
     let redactedKeys: Set<String> = ["currentURL", "url"]
     let fields = metadata
         .filter { key, _ in !redactedKeys.contains(key) }
