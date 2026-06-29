@@ -757,7 +757,7 @@ private func webViewPaginationDebugLog(_ stage: String, _ metadata: [String: Any
     guard ProcessInfo.processInfo.environment["MANABI_WEBVIEW_PAGINATION_DEBUG"] == "1" else { return }
     var payload = metadata
     payload["stage"] = stage
-    Swift.debugPrint("# WEBVIEWPAGINATION", payload)
+    ()
     #endif
 }
 
@@ -2728,14 +2728,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                requestedHideNavigation == currentHideNavigation {
                 return
             }
-            print(
-                "# POPOVER native.unhandledTap",
-                "suppress=\(suppressForNativeLookup)",
-                "hasActiveLookup=\(hasActiveLookup)",
-                "activeNativeTouchElementID=\(String(describing: navigator.nativeLookupHitTesting.activeNativeTouchElementID))",
-                "targetCount=\(navigator.nativeLookupHitTesting.targetCount)",
-                "body=\(popoverLogValue(message.body as Any))"
-            )
+            ()
             if suppressForNativeLookup {
                 return
             }
@@ -4787,16 +4780,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         let line = error.userInfo["WKJavaScriptExceptionLineNumber"] ?? "nil"
         let column = error.userInfo["WKJavaScriptExceptionColumnNumber"] ?? "nil"
         let frameURL = frame?.webView?.url?.absoluteString ?? "nil"
-        print(
-            "# JSERROR evaluateJavaScript",
-            "message=\(compactJavaScriptDiagnosticString(message, limit: 180))",
-            "line=\(line)",
-            "column=\(column)",
-            "frameURL=\(compactJavaScriptDiagnosticString(frameURL, limit: 220))",
-            "scriptUTF8Length=\(js.utf8.count)",
-            "scriptHash=\(diagnosticJavaScriptHash(js))",
-            "script=\(compactJavaScriptDiagnosticString(js))"
-        )
+        ()
     }
 
     //    @MainActor
@@ -6279,15 +6263,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
             if verboseNativeLookupPositionLoggingEnabled,
                now - lastPointInsideMissLogTime > 0.5 {
                 lastPointInsideMissLogTime = now
-                print(
-                    "# POPOVER native.overlay.pointInside.miss",
-                    "point=\(point)",
-                    "size=\(bounds.size)",
-                    "targetCount=\(store?.targetCount ?? 0)",
-                    "captures=\(store?.capturesSegmentTouchesInOverlay == true)",
-                    "textSelection=\(store?.hasActiveWebTextSelection == true)",
-                    "nearest=\(popoverLogValue(store?.diagnostics(at: point, limit: 3, in: bounds.size, coordinateViewWindowOrigin: overlayWindowOrigin) as Any))"
-                )
+                ()
             }
         }
         return false
@@ -6304,18 +6280,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let now = CACurrentMediaTime()
         guard now - lastPointInsideHitLogTime > 0.5 else { return }
         lastPointInsideHitLogTime = now
-        print(
-            "# POPOVER native.overlay.pointInside.hit",
-            "point=\(point)",
-            "size=\(bounds.size)",
-            "id=\(target.elementID)",
-            "captures=\(capturesSegmentTouches)",
-            "textSelection=\(hasActiveWebTextSelection)",
-            "inflated=\(target.debugUsedInflatedHitRect as Any)",
-            "distance=\(target.debugDistance as Any)",
-            "selectedPoint=\(target.debugHitTestPoint.map { popoverLogValue($0) } ?? "nil")",
-            "nearest=\(popoverLogValue(store?.diagnostics(at: point, limit: 2, in: bounds.size, coordinateViewWindowOrigin: overlayWindowOrigin) as Any))"
-        )
+        ()
     }
 }
 
@@ -7219,12 +7184,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         payload["stage"] = stage
         guard verboseNativeLookupPositionLoggingEnabled else { return }
-        print(
-            "# POPOVER native.gesture",
-            payload.keys.sorted()
-                .map { "\($0)=\(popoverLogValue(payload[$0] as Any))" }
-                .joined(separator: " ")
-        )
+        ()
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -7446,9 +7406,7 @@ public class WebViewController: UIViewController {
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
-        debugPrint(
-            "# BOTTOM stage=webViewController.applyObscuredInsets reason=\(reason) appliedBottom=\(insets.bottom) scrollContentInsetBottom=\(webView.scrollView.contentInset.bottom) scrollAdjustedContentInsetBottom=\(webView.scrollView.adjustedContentInset.bottom) scrollIndicatorInsetBottom=\(webView.scrollView.verticalScrollIndicatorInsets.bottom) contentOffsetY=\(webView.scrollView.contentOffset.y) contentSizeHeight=\(webView.scrollView.contentSize.height) boundsHeight=\(webView.scrollView.bounds.height) webViewID=\(readerLoadObjectIDString(webView))"
-        )
+        ()
         if webViewLayoutShouldLog(webView: webView) {
             var payload = webViewLayoutScrollPayload(webView: webView)
             payload["reason"] = reason
@@ -7472,15 +7430,7 @@ public class WebViewController: UIViewController {
         guard insets.top.isFinite else { return }
 #if DEBUG
         if ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1" {
-            print(
-                "# POPOVER webview.chromeInsets.sync",
-                "reason=\(reason)",
-                "top=\(insets.top)",
-                "bottom=\(insets.bottom)",
-                "webViewFrame=\(webView.frame)",
-                "webViewBounds=\(webView.bounds)",
-                "webViewSafeAreaTop=\(webView.safeAreaInsets.top)"
-            )
+            ()
         }
 #endif
         let escapedReason = reason
@@ -8858,9 +8808,9 @@ private func nativeLookupMacPopoverLog(_ stage: String, _ payload: [String: Any]
         .map { "\($0)=\(nativeLookupMacPopoverLogValue(payload[$0] as Any))" }
         .joined(separator: " ")
     if details.isEmpty {
-        print("# POPOVER \(stage)")
+        ()
     } else {
-        print("# POPOVER \(stage) \(details)")
+        ()
     }
 }
 
@@ -9572,7 +9522,7 @@ extension WebView {
             guard let ruleList else {
                 if let error {
 #if DEBUG
-                    print("# contentRules.compile error", error)
+                    ()
 #endif
                 }
                 readerLoadLog(
