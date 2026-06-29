@@ -112,65 +112,13 @@ public enum ReaderLoadSignposts {
 }
 
 @inline(__always)
-private func readerLoadLog(_ stage: String, _ metadata: [String: String] = [:]) {
-    let verboseReaderLoadLogging =
-        ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_LOGS"] == "1"
-        || ProcessInfo.processInfo.environment["MANABI_READER_LOAD_DEBUG"] == "1"
-        || ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
-    let loggedPrefixes = [
-        "webViewNavigator.requestDeferredUntilAttached",
-        "webViewNavigator.dataLoad",
-        "webViewNavigator.htmlLoad",
-        "webViewNavigator.pending",
-        "webViewNavigator.preProvisionalWatchdog",
-        "webViewNavigator.competingOperation",
-        "webView.nav.fail",
-        "webView.nav.cancel",
-        "webView.processTerminated",
-        "readerDocState"
-    ]
-    guard verboseReaderLoadLogging || loggedPrefixes.contains(where: { stage.hasPrefix($0) }) else { return }
-    let redactedKeys: Set<String> = ["currentURL", "url"]
-    let fields = metadata
-        .filter { key, _ in !redactedKeys.contains(key) }
-        .sorted { $0.key < $1.key }
-        .map { key, value in "\(key)=\(value)" }
-        .joined(separator: " ")
-    let line = fields.isEmpty
-        ? "# READERLOAD stage=\(stage)\n"
-        : "# READERLOAD stage=\(stage) \(fields)\n"
-    print(line, terminator: "")
-    guard ProcessInfo.processInfo.environment["MANABI_READER_LOAD_DEBUG"] == "1" else { return }
-    guard let data = line.data(using: .utf8) else { return }
-    let path = ProcessInfo.processInfo.environment["MANABI_READER_LOAD_DEBUG_PATH"] ?? "/tmp/manabi-reader-load.log"
-    let url = URL(fileURLWithPath: path)
-    if FileManager.default.fileExists(atPath: url.path),
-       let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-    } else {
-        try? data.write(to: url, options: .atomic)
-    }
-}
+private func safeAreaLog(_: String, _: [String: String] = [:]) {}
 
 @inline(__always)
-private func safeAreaLog(_ stage: String, _ metadata: [String: String] = [:]) {
-    _ = stage
-    _ = metadata
-}
+private func bookLog(_: String, _: [String: String] = [:]) {}
 
 @inline(__always)
-private func bookLog(_ stage: String, _ metadata: [String: String] = [:]) {
-    _ = stage
-    _ = metadata
-}
-
-@inline(__always)
-private func popoverWebViewInsetLog(_ metadata: [String: String], force: Bool = false) {
-    _ = metadata
-    _ = force
-}
+private func popoverWebViewInsetLog(_: [String: String], force _: Bool = false) {}
 
 private func popoverLogValue(_ value: Any) -> String {
     let mirror = Mirror(reflecting: value)
@@ -752,20 +700,10 @@ public enum WebViewPaginationError: Error, LocalizedError {
 }
 
 @inline(__always)
-private func webViewPaginationDebugLog(_ stage: String, _ metadata: [String: Any] = [:]) {
-    #if DEBUG
-    guard ProcessInfo.processInfo.environment["MANABI_WEBVIEW_PAGINATION_DEBUG"] == "1" else { return }
-    var payload = metadata
-    payload["stage"] = stage
-    ()
-    #endif
-}
+private func webViewPaginationDebugLog(_: String, _: [String: Any] = [:]) {}
 
 @inline(__always)
-func webViewLayoutDebugLog(_ stage: String, _ metadata: [String: Any] = [:]) {
-    _ = stage
-    _ = metadata
-}
+func webViewLayoutDebugLog(_: String, _: [String: Any] = [:]) {}
 
 func webViewLayoutRounded(_ value: CGFloat) -> Double {
     Double((value * 100).rounded() / 100)
@@ -2609,15 +2547,6 @@ public class WebViewCoordinator: NSObject {
         var newState = webView.state
         newState.loadingProgress = progress
         webView.state = newState
-        readerLoadLog(
-            "webView.loadingProgress.emit",
-            [
-                "currentURL": navigator.webView?.url?.absoluteString ?? "nil",
-                "isLoading": "\(webView.state.isLoading)",
-                "nextProgress": progress.map { String(format: "%.3f", $0) } ?? "nil",
-                "previousProgress": previousProgress.map { String(format: "%.3f", $0) } ?? "nil"
-            ]
-        )
     }
 
     @MainActor
@@ -2647,16 +2576,6 @@ public class WebViewCoordinator: NSObject {
         newState.loadingProgress = nil
         webView.state = newState
 
-        readerLoadLog(
-            "webView.loadingProgress.forceClear.end",
-            [
-                "effectivePageURL": effectivePageURL.absoluteString,
-                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(),
-                "isLoading": "\(webView.state.isLoading)",
-                "loadingProgress": webView.state.loadingProgress.map { String(format: "%.3f", $0) } ?? "nil",
-                "reason": reason
-            ]
-        )
     }
 }
 
@@ -2728,7 +2647,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                requestedHideNavigation == currentHideNavigation {
                 return
             }
-            ()
             if suppressForNativeLookup {
                 return
             }
@@ -2884,18 +2802,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "traceID": navigator.readerLoadTraceID ?? "nil"
             ]
         )
-        readerLoadLog(
-            "webView.nav.finish",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(now: finishNow),
-                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: finishNow),
-                "elapsedSinceCommit": readerLoadElapsedString(since: navigator.readerLoadCommittedAt, now: finishNow),
-                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: finishNow),
-                "requestURL": activeRequestURL?.absoluteString ?? "nil",
-                "traceID": navigator.readerLoadTraceID ?? "nil"
-            ]
-        )
         if isInternalReaderLoaderURL(activeRequestURL) {
             let issueGap = navigator.readerLoadIssuedAt.map { finishNow.timeIntervalSince($0) } ?? 0
             let provisionalGap: TimeInterval
@@ -2913,17 +2819,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 commitGap = 0
             }
             let finishGap = navigator.readerLoadCommittedAt.map { finishNow.timeIntervalSince($0) } ?? 0
-            readerLoadLog(
-                "webView.nav.loaderSummary",
-                [
-                    "commitGap": String(format: "%.3fs", commitGap),
-                    "finishGap": String(format: "%.3fs", finishGap),
-                    "issueToFinishGap": String(format: "%.3fs", issueGap),
-                    "provisionalGap": String(format: "%.3fs", provisionalGap),
-                    "requestURL": activeRequestURL?.absoluteString ?? "nil",
-                    "traceID": navigator.readerLoadTraceID ?? "nil"
-                ]
-            )
             if let requestURL = activeRequestURL?.absoluteString {
                 clearReaderLoaderCorrelationTimestamps(for: requestURL)
             }
@@ -2990,15 +2885,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
             if let url = response as? String, let newURL = URL(string: url), self.webView.state.pageURL != newURL {
                 let now = Date()
-                readerLoadLog(
-                    "webView.pageURLUpdatedFromDocument",
-                    [
-                        "documentURL": newURL.absoluteString,
-                        "elapsedSinceCommit": readerLoadElapsedString(since: self.navigator.readerLoadCommittedAt, now: now),
-                        "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: self.navigator.readerLoadRequestedAt, now: now),
-                        "previousPageURL": self.webView.state.pageURL.absoluteString
-                    ]
-                )
                 var newState = self.webView.state
                 newState.pageURL = newURL
                 self.webView.state = newState
@@ -3100,16 +2986,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             error: error
         )
         let now = Date()
-        readerLoadLog(
-            "webView.nav.failProvisional",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: now),
-                "error": error.localizedDescription,
-                "requestURL": navigator.activeReaderLoadRequestURL(for: webView.url)?.absoluteString ?? "nil",
-                "traceID": navigator.readerLoadTraceID ?? "nil"
-            ]
-        )
         navigator.clearReaderLoadTrace()
 #if os(iOS)
         if awaitingSnapshotReload {
@@ -3120,14 +2996,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        readerLoadLog(
-            "webView.processTerminated",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "processPoolID": readerLoadObjectIDString(webView.configuration.processPool),
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
         setLoading(false, isProvisionallyNavigating: false)
     }
     
@@ -3138,16 +3006,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         let now = Date()
-        readerLoadLog(
-            "webView.nav.fail",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: now),
-                "error": error.localizedDescription,
-                "requestURL": navigator.activeReaderLoadRequestURL(for: webView.url)?.absoluteString ?? "nil",
-                "traceID": navigator.readerLoadTraceID ?? "nil"
-            ]
-        )
         if let requestURL = navigator.activeReaderLoadRequestURL(for: webView.url)?.absoluteString,
            isInternalReaderLoaderURL(navigator.activeReaderLoadRequestURL(for: webView.url)) {
             clearReaderLoaderCorrelationTimestamps(for: requestURL)
@@ -3184,18 +3042,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             .webKitDidCommit,
             [
                 "currentURL": webView.url?.absoluteString ?? "nil",
-                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: commitNow),
-                "elapsedSinceProvisionalStart": readerLoadElapsedString(since: navigator.readerLoadProvisionalStartedAt, now: commitNow),
-                "requestURL": activeRequestURL?.absoluteString ?? "nil",
-                "traceID": navigator.readerLoadTraceID ?? "nil"
-            ]
-        )
-        readerLoadLog(
-            "webView.nav.commit",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(now: commitNow),
-                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: commitNow),
                 "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: commitNow),
                 "elapsedSinceProvisionalStart": readerLoadElapsedString(since: navigator.readerLoadProvisionalStartedAt, now: commitNow),
                 "requestURL": activeRequestURL?.absoluteString ?? "nil",
@@ -3254,66 +3100,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "traceID": navigator.readerLoadTraceID ?? "nil"
             ]
         )
-        readerLoadLog(
-            "webView.nav.provisionalStart",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "elapsedSinceDataLoadIssued": navigator.readerLoadDirectDataElapsedString(now: provisionalNow),
-                "elapsedSinceDataLoadReturned": navigator.readerLoadDirectDataReturnedElapsedString(now: provisionalNow),
-                "elapsedSinceIssued": readerLoadElapsedString(since: navigator.readerLoadIssuedAt, now: provisionalNow),
-                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt, now: provisionalNow),
-                "requestURL": activeRequestURL?.absoluteString ?? "nil",
-                "traceID": navigator.readerLoadTraceID ?? "nil"
-            ]
-        )
         if let currentURL = webView.url?.absoluteString, isInternalReaderLoaderURL(URL(string: currentURL)) {
             if let loaderStartTimestamp = navigator.readerLoadInternalLoaderStartedAt {
-                readerLoadLog(
-                    "webView.nav.provisionalStart.afterInternalSchemeStart",
-                    [
-                        "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderStartTimestamp)),
-                        "requestURL": currentURL,
-                        "traceID": navigator.readerLoadTraceID ?? "nil"
-                    ]
-                )
                 if let loaderResponseTimestamp = navigator.readerLoadInternalLoaderResponseAt {
-                    readerLoadLog(
-                        "webView.nav.provisionalStart.afterInternalSchemeResponse",
-                        [
-                            "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderResponseTimestamp)),
-                            "requestURL": currentURL,
-                            "traceID": navigator.readerLoadTraceID ?? "nil"
-                        ]
-                    )
                 }
                 if let loaderDataTimestamp = navigator.readerLoadInternalLoaderDataAt {
-                    readerLoadLog(
-                        "webView.nav.provisionalStart.afterInternalSchemeData",
-                        [
-                            "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderDataTimestamp)),
-                            "requestURL": currentURL,
-                            "traceID": navigator.readerLoadTraceID ?? "nil"
-                        ]
-                    )
                 }
                 if let loaderFinishTimestamp = navigator.readerLoadInternalLoaderFinishedAt {
-                    readerLoadLog(
-                        "webView.nav.provisionalStart.afterInternalSchemeFinish",
-                        [
-                            "elapsed": String(format: "%.3fs", provisionalNow.timeIntervalSince(loaderFinishTimestamp)),
-                            "requestURL": currentURL,
-                            "traceID": navigator.readerLoadTraceID ?? "nil"
-                        ]
-                    )
                 }
             } else {
-                readerLoadLog(
-                    "webView.nav.provisionalStart.beforeInternalSchemeStart",
-                    [
-                        "requestURL": currentURL,
-                        "traceID": navigator.readerLoadTraceID ?? "nil"
-                    ]
-                )
             }
         }
         if navigator.pendingRequest?.url == webView.url {
@@ -3354,16 +3149,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         let isInternalLocalRequest = requestURL?.scheme?.lowercased() == "internal"
             && requestURL?.host?.lowercased() == "local"
         if let requestURL, isInternalLocalRequest {
-            readerLoadLog(
-                "webView.nav.decidePolicyAction",
-                [
-                    "currentURL": webView.url?.absoluteString ?? "nil",
-                    "mainFrame": "\(navigationAction.targetFrame?.isMainFrame ?? false)",
-                    "mainDocumentURL": navigationAction.request.mainDocumentURL?.absoluteString ?? "nil",
-                    "navigationType": "\(navigationAction.navigationType.rawValue)",
-                    "requestURL": requestURL.absoluteString
-                ]
-            )
         }
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
         let isInternalReaderLoaderNavigation = isMainDocumentNavigation && isInternalReaderLoaderURL(requestURL)
@@ -3373,28 +3158,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
            let canonicalLoaderURL = canonicalContentURLForReaderLoader(loaderRequestedURL),
            requestedURL == canonicalLoaderURL,
            navigationAction.navigationType == .other {
-            readerLoadLog(
-                "webView.nav.cancelLateCanonicalRedirect",
-                [
-                    "canonicalURL": requestedURL.absoluteString,
-                    "loaderURL": loaderRequestedURL.absoluteString,
-                    "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: navigator.readerLoadRequestedAt),
-                    "navigationType": "\(navigationAction.navigationType.rawValue)"
-                ]
-            )
             return (.cancel, preferences)
         }
         if let decision = await onNavigationAction?(navigationAction) {
             if isInternalReaderLoaderNavigation {
-                readerLoadLog(
-                    "webView.nav.decidePolicyReturn",
-                    [
-                        "decision": "\(decision.rawValue)",
-                        "elapsed": readerLoadElapsedString(since: startedAt),
-                        "requestURL": requestURL?.absoluteString ?? "nil",
-                        "source": "onNavigationAction"
-                    ]
-                )
             }
             return (decision, preferences)
         }
@@ -3402,15 +3169,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)
                 if isInternalReaderLoaderNavigation {
-                    readerLoadLog(
-                        "webView.nav.decidePolicyReturn",
-                        [
-                            "decision": "\(WKNavigationActionPolicy.cancel.rawValue)",
-                            "elapsed": readerLoadElapsedString(since: startedAt),
-                            "requestURL": requestURL?.absoluteString ?? "nil",
-                            "source": "blockedHost"
-                        ]
-                    )
                 }
                 return (.cancel, preferences)
             }
@@ -3459,15 +3217,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
         if isInternalReaderLoaderNavigation {
-            readerLoadLog(
-                "webView.nav.decidePolicyReturn",
-                [
-                    "decision": "\(WKNavigationActionPolicy.allow.rawValue)",
-                    "elapsed": readerLoadElapsedString(since: startedAt),
-                    "requestURL": requestURL?.absoluteString ?? "nil",
-                    "source": "defaultAllow"
-                ]
-            )
         }
         return (.allow, preferences)
     }
@@ -3561,23 +3310,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     fileprivate func logAttachmentEvent(_ source: String, webView: WKWebView?) {
-        readerLoadLog(
-            "webViewNavigator.attachmentState",
-            [
-                "currentURL": webView?.url?.absoluteString ?? "nil",
-                "elapsedSinceIssued": readerLoadElapsedString(since: readerLoadIssuedAt),
-                "elapsedSinceRequested": readerLoadElapsedString(since: readerLoadRequestedAt),
-                "hasAttachedWebView": "\(hasAttachedWebView)",
-                "hasSuperview": "\(webView?.superview != nil)",
-                "hasWindow": "\(webView?.window != nil)",
-                "isReadyForRequest": "\(webView.map { $0.window != nil && $0.superview != nil } ?? false)",
-                "requestURL": readerLoadRequestedURL?.absoluteString ?? "nil",
-                "sceneState": readerLoadSceneStateString(for: webView),
-                "source": source,
-                "traceID": currentReaderLoadTrace?.id.uuidString ?? "nil",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
     }
 
     @MainActor fileprivate var readerLoadTraceID: String? {
@@ -3695,20 +3427,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                   currentTrace.provisionalStartedAt == nil,
                   let issuedAt = currentTrace.issuedAt else { return }
             let now = Date()
-            readerLoadLog(
-                "webViewNavigator.preProvisionalWatchdog",
-                [
-                    "currentURL": self.webView?.url?.absoluteString ?? "nil",
-                    "elapsedSinceIssued": String(format: "%.3fs", now.timeIntervalSince(issuedAt)),
-                    "estimatedProgress": self.webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil",
-                    "hasSuperview": "\(self.webView?.superview != nil)",
-                    "hasWindow": "\(self.webView?.window != nil)",
-                    "isLoading": "\(self.webView?.isLoading ?? false)",
-                    "requestURL": currentTrace.requestURL?.absoluteString ?? "nil",
-                    "sceneState": readerLoadSceneStateString(for: self.webView),
-                    "traceID": currentTrace.id.uuidString
-                ]
-            )
         }
     }
 
@@ -3729,7 +3447,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         payload["requestURL"] = requestURL.absoluteString
         payload["sceneState"] = readerLoadSceneStateString(for: webView)
         payload["traceID"] = trace.id.uuidString
-        readerLoadLog("webViewNavigator.competingOperation.\(operation)", payload)
     }
 
     @MainActor
@@ -3758,16 +3475,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
         let traceRequestedAt = beginReaderLoadTrace(for: request.url)
-        readerLoadLog(
-            "webViewNavigator.loadRequest",
-            [
-                "attached": "\(webView != nil)",
-                "hasSuperview": "\(webView?.superview != nil)",
-                "hasWindow": "\(webView?.window != nil)",
-                "requestedAt": String(format: "%.3f", traceRequestedAt.timeIntervalSince1970),
-                "url": request.url?.absoluteString ?? "nil"
-            ]
-        )
     }
 
     @MainActor
@@ -3847,34 +3554,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard let webView else { return }
         let estimatedProgress = webView.estimatedProgress
         let isLoading = webView.isLoading
-        readerLoadLog(
-            "webViewNavigator.preIssueState",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "estimatedProgress": String(format: "%.3f", estimatedProgress),
-                "hasSuperview": "\(webView.superview != nil)",
-                "hasWindow": "\(webView.window != nil)",
-                "isLoading": "\(isLoading)",
-                "reason": reason,
-                "requestURL": request.url?.absoluteString ?? "nil",
-                "sceneState": readerLoadSceneStateString(for: webView),
-                "traceID": readerLoadTraceID ?? "nil",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
         let hasPotentialStaleLoad = isLoading
             || (estimatedProgress > readerLoadStaleLoadingStateThreshold && estimatedProgress < 0.999)
         guard hasPotentialStaleLoad else { return }
-        readerLoadLog(
-            "webViewNavigator.preIssueState.anomaly",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "estimatedProgress": String(format: "%.3f", estimatedProgress),
-                "isLoading": "\(isLoading)",
-                "reason": reason,
-                "requestURL": request.url?.absoluteString ?? "nil"
-            ]
-        )
     }
 
     @MainActor
@@ -3897,18 +3579,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             return false
         }
 
-        readerLoadLog(
-            "webViewNavigator.staleAboutBlankDetected",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "estimatedProgress": String(format: "%.3f", estimatedProgress),
-                "isLoading": "\(isLoading)",
-                "reason": reason,
-                "requestURL": request.url?.absoluteString ?? "nil",
-                "sceneState": readerLoadSceneStateString(for: webView),
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
 
         logCompetingOperationIfNeeded(
             "stopLoading",
@@ -3918,16 +3588,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             ]
         )
         webView.stopLoading()
-        readerLoadLog(
-            "webViewNavigator.staleAboutBlankStopLoading",
-            [
-                "currentURL": webView.url?.absoluteString ?? "nil",
-                "estimatedProgress": String(format: "%.3f", webView.estimatedProgress),
-                "isLoading": "\(webView.isLoading)",
-                "reason": reason,
-                "requestURL": request.url?.absoluteString ?? "nil"
-            ]
-        )
         return false
     }
 
@@ -3935,40 +3595,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
     private func markReaderLoadIssued(for request: URLRequest, reason: String) {
         let now = Date()
         readerLoadIssuedAt = now
-        readerLoadLog(
-            "webViewNavigator.requestIssued",
-            [
-                "currentURL": webView?.url?.absoluteString ?? "nil",
-                "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: readerLoadRequestedAt, now: now),
-                "estimatedProgress": webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil",
-                "hasSuperview": "\(webView?.superview != nil)",
-                "hasWindow": "\(webView?.window != nil)",
-                "isLoading": "\(webView?.isLoading ?? false)",
-                "prewarmCompleted": "false",
-                "prewarmElapsed": "nil",
-                "prewarmState": "idle",
-                "prewarmWebViewID": "nil",
-                "processPoolID": readerLoadObjectIDString(webView?.configuration.processPool),
-                "reason": reason,
-                "requestURL": readerLoadRequestedURL?.absoluteString ?? "nil",
-                "traceID": readerLoadTraceID ?? "nil",
-                "webViewID": readerLoadObjectIDString(webView),
-                "url": request.url?.absoluteString ?? "nil"
-            ]
-        )
     }
 
     @MainActor
     public func forceClearLoadingIndicators(reason: String, pageURL: URL? = nil) {
-        readerLoadLog(
-            "webViewNavigator.forceClearLoadingIndicators.requested",
-            [
-                "currentURL": webView?.url?.absoluteString ?? "nil",
-                "hasHandler": "\(forceClearLoadingIndicatorsHandler != nil)",
-                "pageURL": pageURL?.absoluteString ?? "nil",
-                "reason": reason
-            ]
-        )
         forceClearLoadingIndicatorsHandler?(reason, pageURL)
     }
 
@@ -3985,15 +3615,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         attachFallbackLoadTask?.cancel()
         attachFallbackLoadTask = nil
         if let reason {
-            readerLoadLog(
-                "webViewNavigator.attachFallbackCanceled",
-                [
-                    "reason": reason,
-                    "pendingRequest": pendingRequest?.url?.absoluteString ?? "nil",
-                    "hasPendingHTML": "\(pendingHTML != nil)",
-                    "hasPendingDataLoad": "\(pendingDataLoad != nil)"
-                ]
-            )
         }
     }
 
@@ -4003,13 +3624,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         let generation = attachFallbackLoadGeneration
         let fallbackURL = attachFallbackURL ?? URL(string: "about:blank")!
         let delayNanoseconds = attachFallbackDelayNanoseconds
-        readerLoadLog(
-            "webViewNavigator.attachFallbackScheduled",
-            [
-                "delayMs": "\(delayNanoseconds / 1_000_000)",
-                "url": fallbackURL.absoluteString
-            ]
-        )
         attachFallbackLoadTask = Task { @MainActor [weak self, weak webView] in
             guard let self, let webView else { return }
             try? await Task.sleep(nanoseconds: delayNanoseconds)
@@ -4019,51 +3633,17 @@ public class WebViewNavigator: NSObject, ObservableObject {
                requestedURL.absoluteString != fallbackURL.absoluteString,
                self.readerLoadProvisionalStartedAt == nil,
                (self.readerLoadIssuedAt != nil || webView.isLoading) {
-                readerLoadLog(
-                    "webViewNavigator.attachFallbackSuppressed",
-                    [
-                        "reason": "requestInFlight",
-                        "url": fallbackURL.absoluteString,
-                        "requestURL": requestedURL.absoluteString,
-                        "currentURL": webView.url?.absoluteString ?? "nil",
-                        "elapsedSinceIssued": readerLoadElapsedString(since: self.readerLoadIssuedAt),
-                        "isLoading": "\(webView.isLoading)"
-                    ]
-                )
                 self.attachFallbackLoadTask = nil
                 return
             }
             guard self.pendingRequest == nil, self.pendingHTML == nil, self.pendingDataLoad == nil else {
-                readerLoadLog(
-                    "webViewNavigator.attachFallbackSuppressed",
-                    [
-                        "reason": "pendingContentArrived",
-                        "url": fallbackURL.absoluteString,
-                        "pendingRequest": self.pendingRequest?.url?.absoluteString ?? "nil",
-                        "hasPendingHTML": "\(self.pendingHTML != nil)",
-                        "hasPendingDataLoad": "\(self.pendingDataLoad != nil)"
-                    ]
-                )
                 self.attachFallbackLoadTask = nil
                 return
             }
             guard webView.window != nil || webView.superview != nil else {
-                readerLoadLog(
-                    "webViewNavigator.attachFallbackSuppressed",
-                    [
-                        "reason": "webViewNotAttached",
-                        "url": fallbackURL.absoluteString
-                    ]
-                )
                 self.attachFallbackLoadTask = nil
                 return
             }
-            readerLoadLog(
-                "webViewNavigator.attachFallbackShown",
-                [
-                    "url": fallbackURL.absoluteString
-                ]
-            )
             webView.load(URLRequest(url: fallbackURL))
             self.attachFallbackLoadTask = nil
         }
@@ -4179,14 +3759,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         case .loadFileURL:
             guard let url = request.url else { return }
             markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
-            readerLoadLog(
-                "webViewNavigator.loadFileURLBegin",
-                [
-                    "currentURL": webView.url?.absoluteString ?? "nil",
-                    "reason": diagnosticsReason,
-                    "url": url.absoluteString
-                ]
-            )
             ReaderLoadSignposts.event(
                 .loadFileURL,
                 [
@@ -4196,35 +3768,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 ]
             )
             webView.loadFileURL(url, allowingReadAccessTo: url)
-            readerLoadLog(
-                "webViewNavigator.loadFileURLEnd",
-                [
-                    "currentURL": webView.url?.absoluteString ?? "nil",
-                    "elapsedSinceIssued": readerLoadElapsedString(since: readerLoadIssuedAt),
-                    "reason": diagnosticsReason,
-                    "url": url.absoluteString
-                ]
-            )
         case .loadRequest:
             markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
-            readerLoadLog(
-                "webViewNavigator.loadRequestBegin",
-                [
-                    "currentURL": webView.url?.absoluteString ?? "nil",
-                    "reason": diagnosticsReason,
-                    "url": request.url?.absoluteString ?? "nil"
-                ]
-            )
             webView.load(request)
-            readerLoadLog(
-                "webViewNavigator.loadRequestEnd",
-                [
-                    "currentURL": webView.url?.absoluteString ?? "nil",
-                    "elapsedSinceIssued": readerLoadElapsedString(since: readerLoadIssuedAt),
-                    "reason": diagnosticsReason,
-                    "url": request.url?.absoluteString ?? "nil"
-                ]
-            )
         }
         self.cancelPendingRequestLoadTask()
     }
@@ -4258,31 +3804,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     self.hasAttachedWebView = nextHasAttachedWebView
                 }
             }
-            readerLoadLog(
-                "webView.navigatorBindingChanged",
-                [
-                    "navigatorID": readerLoadObjectIDString(self),
-                    "newProcessPoolID": readerLoadObjectIDString(webView?.configuration.processPool),
-                    "newURL": webView?.url?.absoluteString ?? "nil",
-                    "newWebViewID": readerLoadObjectIDString(webView),
-                    "oldWebViewID": readerLoadObjectIDString(oldValue)
-                ]
-            )
             if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
             }
             guard let webView else { return }
             if let request = pendingRequest {
                 cancelAttachFallbackLoadTask(reason: "pendingRequestFlushedOnAttach")
-                readerLoadLog(
-                    "webViewNavigator.pendingRequestFlush",
-                    [
-                        "url": request.url?.absoluteString ?? "nil",
-                        "elapsedSincePendingSet": readerLoadElapsedString(since: pendingRequestSetAt),
-                        "webViewID": readerLoadObjectIDString(webView),
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)"
-                    ]
-                )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                 }
                 if webView.window == nil || webView.superview == nil {
@@ -4296,17 +3822,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             if let pendingDataLoad {
                 cancelAttachFallbackLoadTask(reason: "pendingDataLoadFlushedOnAttach")
-                readerLoadLog(
-                    "webViewNavigator.pendingDataLoadFlush",
-                    [
-                        "baseURL": pendingDataLoad.baseURL.absoluteString,
-                        "bytes": "\(pendingDataLoad.data.count)",
-                        "elapsedSincePendingSet": readerLoadElapsedString(since: pendingDataLoadSetAt),
-                        "webViewID": readerLoadObjectIDString(webView),
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)"
-                    ]
-                )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                 }
                 webView.load(
@@ -4321,17 +3836,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             if let pendingHTML {
                 cancelAttachFallbackLoadTask(reason: "pendingHTMLFlushedOnAttach")
-                readerLoadLog(
-                    "webViewNavigator.pendingHTMLFlush",
-                    [
-                        "baseURL": pendingHTML.baseURL?.absoluteString ?? "nil",
-                        "htmlLength": "\(pendingHTML.html.count)",
-                        "elapsedSincePendingSet": readerLoadElapsedString(since: pendingHTMLSetAt),
-                        "webViewID": readerLoadObjectIDString(webView),
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)"
-                    ]
-                )
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                 }
                 ReaderLoadSignposts.event(
@@ -4371,14 +3875,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             if webView.window == nil || webView.superview == nil {
                 pendingRequest = request
                 pendingRequestSetAt = Date()
-                readerLoadLog(
-                    "webViewNavigator.requestDeferredUntilAttached",
-                    [
-                        "url": request.url?.absoluteString ?? "nil",
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)"
-                    ]
-                )
                 return
             }
             if recoverFromStaleAboutBlankIfNeeded(for: request, on: webView, reason: "navigator.load") {
@@ -4393,17 +3889,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         "targetURL": url.absoluteString
                     ]
                 )
-                readerLoadLog(
-                    "webViewNavigator.directLoadFileURLBegin",
-                    [
-                        "currentURL": webView.url?.absoluteString ?? "nil",
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)",
-                        "reason": "navigator.loadFileURL",
-                        "sceneState": readerLoadSceneStateString(for: webView),
-                        "url": url.absoluteString
-                    ]
-                )
                 ReaderLoadSignposts.event(
                     .loadFileURL,
                     [
@@ -4413,40 +3898,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     ]
                 )
                 webView.loadFileURL(url, allowingReadAccessTo: url)
-                readerLoadLog(
-                    "webViewNavigator.directLoadFileURLEnd",
-                    [
-                        "currentURL": webView.url?.absoluteString ?? "nil",
-                        "elapsedSinceIssued": readerLoadElapsedString(since: readerLoadIssuedAt),
-                        "reason": "navigator.loadFileURL",
-                        "sceneState": readerLoadSceneStateString(for: webView),
-                        "url": url.absoluteString
-                    ]
-                )
             } else {
                 markReaderLoadIssued(for: request, reason: "navigator.loadRequest")
-                readerLoadLog(
-                    "webViewNavigator.directLoadRequestBegin",
-                    [
-                        "currentURL": webView.url?.absoluteString ?? "nil",
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)",
-                        "reason": "navigator.loadRequest",
-                        "sceneState": readerLoadSceneStateString(for: webView),
-                        "url": request.url?.absoluteString ?? "nil"
-                    ]
-                )
                 webView.load(request)
-                readerLoadLog(
-                    "webViewNavigator.directLoadRequestEnd",
-                    [
-                        "currentURL": webView.url?.absoluteString ?? "nil",
-                        "elapsedSinceIssued": readerLoadElapsedString(since: readerLoadIssuedAt),
-                        "reason": "navigator.loadRequest",
-                        "sceneState": readerLoadSceneStateString(for: webView),
-                        "url": request.url?.absoluteString ?? "nil"
-                    ]
-                )
             }
         } else {
             pendingRequest = request
@@ -4465,16 +3919,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         currentReaderLoadTrace?.directDataIssuedAt = traceRequestedAt
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
-        readerLoadLog(
-            "webViewNavigator.dataLoadIssued",
-            [
-                "baseURL": baseURL.absoluteString,
-                "bytes": "\(data.count)",
-                "hasSuperview": "\(webView?.superview != nil)",
-                "hasWindow": "\(webView?.window != nil)",
-                "mimeType": mimeType
-            ]
-        )
         logCompetingOperationIfNeeded(
             "loadData",
             metadata: [
@@ -4487,17 +3931,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingDataLoadSetAt = Date()
             return
         }
-        readerLoadLog(
-            "webViewNavigator.dataLoadDirect",
-            [
-                "baseURL": baseURL.absoluteString,
-                "bytes": "\(data.count)",
-                "traceID": currentReaderLoadTrace?.id.uuidString ?? "nil",
-                "webViewID": readerLoadObjectIDString(webView),
-                "hasSuperview": "\(webView.superview != nil)",
-                "hasWindow": "\(webView.window != nil)"
-            ]
-        )
         webView.load(
             data,
             mimeType: mimeType,
@@ -4505,15 +3938,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             baseURL: baseURL
         )
         currentReaderLoadTrace?.directDataReturnedAt = Date()
-        readerLoadLog(
-            "webViewNavigator.dataLoadReturned",
-            [
-                "baseURL": baseURL.absoluteString,
-                "elapsedSinceDataLoadIssued": readerLoadDirectDataElapsedString(),
-                "traceID": currentReaderLoadTrace?.id.uuidString ?? "nil",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
     }
 
     @MainActor
@@ -4527,15 +3951,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadIssuedAt = traceRequestedAt
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
-        readerLoadLog(
-            "webViewNavigator.htmlLoadIssued",
-            [
-                "baseURL": baseURL?.absoluteString ?? "nil",
-                "bytes": "\(html.utf8.count)",
-                "hasSuperview": "\(webView?.superview != nil)",
-                "hasWindow": "\(webView?.window != nil)"
-        ]
-        )
         logCompetingOperationIfNeeded(
             "loadHTML",
             metadata: [
@@ -4548,16 +3963,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingHTMLSetAt = Date()
             return
         }
-        readerLoadLog(
-            "webViewNavigator.htmlLoadDirect",
-            [
-                "baseURL": baseURL?.absoluteString ?? "nil",
-                "bytes": "\(html.utf8.count)",
-                "webViewID": readerLoadObjectIDString(webView),
-                "hasSuperview": "\(webView.superview != nil)",
-                "hasWindow": "\(webView.window != nil)"
-            ]
-        )
         ReaderLoadSignposts.event(
             .loadHTMLString,
             [
@@ -4780,7 +4185,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         let line = error.userInfo["WKJavaScriptExceptionLineNumber"] ?? "nil"
         let column = error.userInfo["WKJavaScriptExceptionColumnNumber"] ?? "nil"
         let frameURL = frame?.webView?.url?.absoluteString ?? "nil"
-        ()
     }
 
     //    @MainActor
@@ -6263,7 +5667,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
             if verboseNativeLookupPositionLoggingEnabled,
                now - lastPointInsideMissLogTime > 0.5 {
                 lastPointInsideMissLogTime = now
-                ()
             }
         }
         return false
@@ -6280,7 +5683,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
         let now = CACurrentMediaTime()
         guard now - lastPointInsideHitLogTime > 0.5 else { return }
         lastPointInsideHitLogTime = now
-        ()
     }
 }
 
@@ -7184,7 +6586,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         payload["stage"] = stage
         guard verboseNativeLookupPositionLoggingEnabled else { return }
-        ()
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -7406,7 +6807,6 @@ public class WebViewController: UIViewController {
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
-        ()
         if webViewLayoutShouldLog(webView: webView) {
             var payload = webViewLayoutScrollPayload(webView: webView)
             payload["reason"] = reason
@@ -7430,7 +6830,6 @@ public class WebViewController: UIViewController {
         guard insets.top.isFinite else { return }
 #if DEBUG
         if ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1" {
-            ()
         }
 #endif
         let escapedReason = reason
@@ -7663,15 +7062,6 @@ public class WebViewController: UIViewController {
             view.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(webViewConstraints)
-        readerLoadLog(
-            "webViewController.attachWebView",
-            [
-                "controllerHasWindow": "\(view.window != nil)",
-                "webViewHasSuperview": "\(webView.superview != nil)",
-                "webViewHasWindow": "\(webView.window != nil)",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
     }
 
     @MainActor
@@ -8143,16 +7533,6 @@ extension WebView: UIViewControllerRepresentable {
             web = makeNewWebView(config: config)
         }
         guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
-        readerLoadLog(
-            "webView.instanceSelected",
-            [
-                "coordinatorID": readerLoadObjectIDString(coordinator),
-                "navigatorID": readerLoadObjectIDString(coordinator.navigator),
-                "processPoolID": readerLoadObjectIDString(web.configuration.processPool),
-                "source": source,
-                "webViewID": readerLoadObjectIDString(web)
-            ]
-        )
         
         web.buildMenu = buildMenu
         
@@ -8189,13 +7569,6 @@ extension WebView: UIViewControllerRepresentable {
         }
 
         let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
-        readerLoadLog(
-            "webView.instanceCreated",
-            [
-                "processPoolID": readerLoadObjectIDString(configuration.processPool),
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
@@ -8236,16 +7609,6 @@ extension WebView: UIViewControllerRepresentable {
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         let resolvedDomain = resolvedUserScriptDomain(currentURL: webView.url)
         let resolvedUserScriptsState = resolvedUserScriptsState(forDomain: resolvedDomain, config: config)
-        readerLoadLog(
-            "webView.configure",
-            [
-                "controllerID": readerLoadObjectIDString(controller),
-                "coordinatorID": readerLoadObjectIDString(context.coordinator),
-                "navigatorID": readerLoadObjectIDString(context.coordinator.navigator),
-                "processPoolID": readerLoadObjectIDString(webView.configuration.processPool),
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
         if context.coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
             context.coordinator.lastUserScriptsContentController = webView.configuration.userContentController
             context.coordinator.lastInstalledScriptsSignature = webView.persistedUserScriptsSignature
@@ -8254,14 +7617,6 @@ extension WebView: UIViewControllerRepresentable {
             context.coordinator.lastAppliedContentRules = webView.persistedAppliedContentRules
         }
         if webView.persistedUserScriptsSignature != nil || webView.persistedAppliedContentRules != nil {
-            readerLoadLog(
-                "webView.configure.restorePersistedState",
-                [
-                    "contentRules": webView.persistedAppliedContentRules ?? "nil",
-                    "userScriptsSignaturePresent": "\(webView.persistedUserScriptsSignature != nil)",
-                    "webViewID": readerLoadObjectIDString(webView)
-                ]
-            )
         }
         applyCommonConfiguration(
             webView: webView,
@@ -8408,18 +7763,6 @@ extension WebView: UIViewControllerRepresentable {
         let requestedBeforeProvisional = requestedAt != nil && provisionalStartedAt == nil
         let requestedAfterProvisionalBeforeCommit = requestedAt != nil && provisionalStartedAt != nil && committedAt == nil
         if readerLoadVerboseUIViewControllerLoggingEnabled && (requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit) {
-            readerLoadLog(
-                "webView.host.updateUIViewController",
-                [
-                    "currentURL": controller.webView.url?.absoluteString ?? "nil",
-                    "elapsedSinceIssued": readerLoadElapsedString(since: context.coordinator.navigator.readerLoadIssuedAt),
-                    "elapsedSinceRequested": readerLoadElapsedString(since: context.coordinator.navigator.readerLoadRequestedAt),
-                    "hasSuperview": "\(controller.webView.superview != nil)",
-                    "hasWindow": "\(controller.webView.window != nil)",
-                    "sceneState": readerLoadSceneStateString(for: controller.webView),
-                    "webViewID": readerLoadObjectIDString(controller.webView)
-                ]
-            )
         }
         if let provisionalStartedAt, requestedAfterProvisionalBeforeCommit {
             let waitElapsed = Date().timeIntervalSince(provisionalStartedAt)
@@ -8440,24 +7783,6 @@ extension WebView: UIViewControllerRepresentable {
                 let internalSchemeFinishGap = context.coordinator.navigator.readerLoadInternalLoaderFinishedAt.map {
                     String(format: "%.3fs", Date().timeIntervalSince($0))
                 } ?? "nil"
-                readerLoadLog(
-                    "webView.host.loaderPhase.postProvisionalPreCommit",
-                    [
-                        "currentURL": controller.webView.url?.absoluteString ?? "nil",
-                        "elapsedSinceProvisionalStart": String(format: "%.3fs", waitElapsed),
-                        "estimatedProgress": String(format: "%.3f", controller.webView.estimatedProgress),
-                        "hasSuperview": "\(controller.webView.superview != nil)",
-                        "hasWindow": "\(controller.webView.window != nil)",
-                        "internalSchemeDataGap": internalSchemeDataGap,
-                        "internalSchemeFinishGap": internalSchemeFinishGap,
-                        "internalSchemeResponseGap": internalSchemeResponseGap,
-                        "isLoading": "\(controller.webView.isLoading)",
-                        "requestURL": requestURLString,
-                        "sceneState": readerLoadSceneStateString(for: controller.webView),
-                        "traceID": context.coordinator.navigator.readerLoadTraceID ?? "nil",
-                        "webViewID": readerLoadObjectIDString(controller.webView)
-                    ]
-                )
             }
         }
         updateCoordinatorBindings(context: context)
@@ -8699,19 +8024,6 @@ extension WebView: UIViewControllerRepresentable {
            let requestedAt = context.coordinator.navigator.readerLoadRequestedAt,
            context.coordinator.navigator.readerLoadProvisionalStartedAt == nil {
             let elapsedSinceRequested = Date().timeIntervalSince(requestedAt)
-            readerLoadLog(
-                "webView.host.layoutUpdate",
-                [
-                    "changedAdditionalSafeAreaInsets": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
-                    "changedObscuredInsets": "\(hostLayoutChanges.changedObscuredInsets)",
-                    "elapsedSinceRequested": String(format: "%.3f", elapsedSinceRequested),
-                    "pageTopInset": String(format: "%.1f", additionalSafeAreaInsets.top),
-                    "pageBottomInset": String(format: "%.1f", additionalSafeAreaInsets.bottom),
-                    "obscuredTop": String(format: "%.1f", resolvedObscuredInsets.top),
-                    "obscuredBottom": String(format: "%.1f", resolvedObscuredInsets.bottom),
-                    "webViewID": readerLoadObjectIDString(controller.webView)
-                ]
-            )
         }
 
         // _obscuredInsets ignores sides, probably
@@ -8748,15 +8060,6 @@ extension WebView: UIViewControllerRepresentable {
     }
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
-        readerLoadLog(
-            "webView.dismantleUIViewController",
-            [
-                "controllerID": readerLoadObjectIDString(controller),
-                "coordinatorID": readerLoadObjectIDString(coordinator),
-                "navigatorID": readerLoadObjectIDString(coordinator.navigator),
-                "webViewID": readerLoadObjectIDString(controller.webView)
-            ]
-        )
         controller.clearSnapshotOverlay()
         coordinator.navigator.nativeLookupHitTesting.removeAllTargets()
         coordinator.tearDownBindingsForDetachedWebView(controller.webView)
@@ -8808,9 +8111,7 @@ private func nativeLookupMacPopoverLog(_ stage: String, _ payload: [String: Any]
         .map { "\($0)=\(nativeLookupMacPopoverLogValue(payload[$0] as Any))" }
         .joined(separator: " ")
     if details.isEmpty {
-        ()
     } else {
-        ()
     }
 }
 
@@ -9483,36 +8784,16 @@ extension WebView {
     ) {
         let startedAt = Date()
         let rules = (overrideRules ?? config.contentRules)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        readerLoadLog(
-            "webView.contentRules.refreshBegin",
-            [
-                "hasCachedCompiledRule": "\(rules.flatMap { coordinator.compiledContentRules[$0] } != nil)",
-                "hasRules": "\(rules?.isEmpty == false)",
-                "override": "\(overrideRules != nil)"
-            ]
-        )
         userContentController.removeAllContentRuleLists()
         guard let contentRules = rules, !contentRules.isEmpty else {
             coordinator.lastAppliedContentRules = nil
             (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = nil
-            readerLoadLog(
-                "webView.contentRules.refreshCleared",
-                [
-                    "elapsed": readerLoadElapsedString(since: startedAt)
-                ]
-            )
             return
         }
         if let ruleList = coordinator.compiledContentRules[contentRules] {
             userContentController.add(ruleList)
             coordinator.lastAppliedContentRules = contentRules
             (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = contentRules
-            readerLoadLog(
-                "webView.contentRules.refreshAppliedCached",
-                [
-                    "elapsed": readerLoadElapsedString(since: startedAt)
-                ]
-            )
             return
         }
         WKContentRuleListStore.default().compileContentRuleList(
@@ -9522,28 +8803,14 @@ extension WebView {
             guard let ruleList else {
                 if let error {
 #if DEBUG
-                    ()
 #endif
                 }
-                readerLoadLog(
-                    "webView.contentRules.refreshCompileFailed",
-                    [
-                        "elapsed": readerLoadElapsedString(since: startedAt),
-                        "error": error?.localizedDescription ?? "nil"
-                    ]
-                )
                 return
             }
             userContentController.add(ruleList)
             coordinator.compiledContentRules[contentRules] = ruleList
             coordinator.lastAppliedContentRules = contentRules
             (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = contentRules
-            readerLoadLog(
-                "webView.contentRules.refreshCompiled",
-                [
-                    "elapsed": readerLoadElapsedString(since: startedAt)
-                ]
-            )
         }
     }
     
@@ -9624,13 +8891,6 @@ extension WebView {
             coordinator.lastUserScriptsContentController = userContentController
             coordinator.lastInstalledScriptsSignature = nil
             (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = nil
-            readerLoadLog(
-                "webView.userScripts.refreshCleared",
-                [
-                    "domain": domain?.absoluteString ?? "nil",
-                    "elapsed": readerLoadElapsedString(since: startedAt)
-                ]
-            )
             return
         }
         
@@ -9651,14 +8911,6 @@ extension WebView {
             for var script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
             }
-            readerLoadLog(
-                "webView.userScripts.refreshApplied",
-                [
-                    "count": "\(allScripts.count)",
-                    "domain": domain?.absoluteString ?? "nil",
-                    "elapsed": readerLoadElapsedString(since: startedAt)
-                ]
-            )
         }
         coordinator.lastUserScriptsContentController = userContentController
         if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
@@ -9668,14 +8920,6 @@ extension WebView {
         }
         (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
         if coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
-            readerLoadLog(
-                "webView.userScripts.refreshComplete",
-                [
-                    "count": "\(allScripts.count)",
-                    "domain": domain?.absoluteString ?? "nil",
-                    "elapsed": readerLoadElapsedString(since: startedAt)
-                ]
-            )
         }
     }
     
