@@ -1817,6 +1817,7 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
     public let isForMainFrameOnly: Bool
     public let world: WKContentWorld?
     public let allowedDomains: Set<String>
+    public let configurationSignatureComponent: String
     
     @MainActor
     public lazy var webKitUserScript: WKUserScript = {
@@ -1848,6 +1849,13 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
         self.isForMainFrameOnly = forMainFrameOnly
         self.world = world
         self.allowedDomains = allowedDomains
+        self.configurationSignatureComponent = [
+            "\(source.hashValue)",
+            "\(injectionTime.rawValue)",
+            "\(forMainFrameOnly)",
+            "\(world.map { String(describing: $0) } ?? "nil")",
+            allowedDomains.sorted().joined(separator: ",")
+        ].joined(separator: "|")
     }
     
     public func hash(into hasher: inout Hasher) {
@@ -3105,7 +3113,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     bodyTextLength: bodyText.length,
                     bodyHTMLLength: bodyHTML.length,
                     hasReaderRenderReady:
-                        (html?.dataset?.manabiReaderRenderReady === '1' || body?.dataset?.manabiReaderRenderReady === '1')
+                        (html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
                         && !!document.getElementById("reader-content")
                         && (html?.dataset?.manabiFontPending ?? null) !== '1'
                         && bodyStyle?.visibility !== 'hidden'
@@ -5425,7 +5433,7 @@ fileprivate struct PageIconChangeUserScript {
 }
 
 @MainActor
-fileprivate struct ReaderDocStateUserScript {
+struct ReaderDocStateUserScript {
     let userScript: WebViewUserScript
 
     init() {
@@ -5500,7 +5508,7 @@ fileprivate struct ReaderDocStateUserScript {
                 showKnown: body?.dataset?.manabiShowKnown ?? null,
                 lookupHighlightMode: body?.dataset?.manabiLookupHighlightMode ?? null,
                 furiganaEnabled: body?.dataset?.manabiFuriganaEnabled ?? null,
-                readerRenderReady: body?.dataset?.manabiReaderRenderReady ?? html?.dataset?.manabiReaderRenderReady ?? null,
+                readerRenderReady: body?.dataset?.mnbReaderRenderReady ?? html?.dataset?.mnbReaderRenderReady ?? null,
                 fontPending: html?.dataset?.manabiFontPending ?? null,
                 fontReady: html?.dataset?.manabiFontReady ?? null,
                 layoutComplete: html?.dataset?.manabiLayoutComplete ?? null,
@@ -5630,8 +5638,8 @@ fileprivate struct ReaderDocStateUserScript {
                 hasReaderContent: !!document.getElementById('reader-content'),
                 hasReadabilityGlobal: typeof window.manabi_readability === 'function',
                 hasReaderRenderReady:
-                    (document.documentElement?.dataset?.manabiReaderRenderReady === '1'
-                    || document.body?.dataset?.manabiReaderRenderReady === '1')
+                    (document.documentElement?.dataset?.mnbReaderRenderReady === '1'
+                    || document.body?.dataset?.mnbReaderRenderReady === '1')
                     && !!document.getElementById('reader-content')
                     && (document.documentElement?.dataset?.manabiFontPending ?? null) !== '1'
                     && window.getComputedStyle(document.body).visibility !== 'hidden'
@@ -8372,9 +8380,7 @@ extension WebView {
         }
         let allScripts = Self.systemScripts + scripts
         let installedScriptsSignature = allScripts
-            .map { script in
-                "\(script.source.hashValue)|\(script.injectionTime.rawValue)|\(script.isForMainFrameOnly)"
-            }
+            .map(\.configurationSignatureComponent)
             .joined(separator: "||")
 
         if coordinator.lastUserScriptsContentController === userContentController,
