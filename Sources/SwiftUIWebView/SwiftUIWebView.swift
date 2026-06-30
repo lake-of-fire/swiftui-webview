@@ -17,6 +17,20 @@ private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> 
     return String(format: "%.3fs", now.timeIntervalSince(start))
 }
 
+@inline(__always)
+private func jun30WebViewLog(_ stage: String, _ metadata: [String: Any] = [:]) {
+    if ProcessInfo.processInfo.environment["MANABI_JUN30_VERBOSE_LOGS"] != "1" {
+        return
+    }
+    let payload = metadata
+        .sorted { $0.key < $1.key }
+        .map { key, value in
+            "\(key)=\(String(describing: value))"
+        }
+        .joined(separator: " ")
+    print(payload.isEmpty ? "# JUN30 stage=\(stage)" : "# JUN30 stage=\(stage) \(payload)")
+}
+
 public enum ReaderLoadSignposts {
     public enum Event {
         case navigatorContentBegin
@@ -968,6 +982,7 @@ public struct WebViewNativeLookupHit {
 
 public final class WebViewNativeLookupHitTestStore {
     private static let strictOverlayCaptureDefaultsKey = "NativeLookupStrictOverlayCapture"
+    private static let collapsedTextSelectionPassThroughDuration: TimeInterval = 3.0
 
     private struct Entry {
         let target: WebViewNativeLookupHitTarget
@@ -1001,6 +1016,8 @@ public final class WebViewNativeLookupHitTestStore {
     private var webTextSelectionActive = false
     private var webTextSelectionTextLength = 0
     private var webTextSelectionUpdatedAt: TimeInterval?
+    private var webTextSelectionPassThroughUntil: TimeInterval = 0
+    private var collapsedWebTextSelectionPassThroughPending = false
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
@@ -1011,6 +1028,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var onExternalTouchInteractionCancelled: ((String) -> Void)?
     public var onSegmentSwipe: ((CGFloat, CGFloat) -> Void)?
     public var onCaptureModeChanged: ((Bool) -> Void)?
+    public var onWebTextSelectionActiveChanged: ((Bool) -> Void)?
     public var activeLookupElementID: (() -> String?)?
     public var activeElementID: String?
     public var showsPressedTargetOverlay = false
@@ -1033,9 +1051,24 @@ public final class WebViewNativeLookupHitTestStore {
             "webTextSelectionAgeMs": webTextSelectionUpdatedAt.map {
                 (Date().timeIntervalSinceReferenceDate - $0) * 1_000
             } as Any,
+            "webTextSelectionPassThroughMs": max(
+                0,
+                (webTextSelectionPassThroughUntil - Date().timeIntervalSinceReferenceDate) * 1_000
+            ),
+            "collapsedWebTextSelectionPassThroughPending": collapsedWebTextSelectionPassThroughPending,
         ]
     }
     public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
+    public var shouldPassThroughForWebTextSelection: Bool {
+        let now = Date().timeIntervalSinceReferenceDate
+        return webTextSelectionActive
+            || now < webTextSelectionPassThroughUntil
+    }
+    public var shouldSuppressScrollForWebTextSelection: Bool {
+        let now = Date().timeIntervalSinceReferenceDate
+        return webTextSelectionActive
+            || now < webTextSelectionPassThroughUntil
+    }
     public var capturesSegmentTouchesInOverlay =
         UserDefaults.standard.bool(forKey: WebViewNativeLookupHitTestStore.strictOverlayCaptureDefaultsKey) {
         didSet {
@@ -1059,6 +1092,13 @@ public final class WebViewNativeLookupHitTestStore {
             return
         }
         entries = makeEntries(for: targets)
+        jun30WebViewLog("overlay.store.updateTargets", [
+            "incomingCount": targets.count,
+            "storedCount": entries.count,
+            "firstElementID": targets.first?.elementID as Any,
+            "firstRect": targets.first?.rects.first as Any,
+            "replacementFrameKey": "nil",
+        ])
     }
 
     public func updateTargets(
@@ -1072,9 +1112,25 @@ public final class WebViewNativeLookupHitTestStore {
         let replacementEntries = makeEntries(for: targets)
         entries.removeAll { $0.target.nativeLookupFrameKey == frameKey }
         entries.append(contentsOf: replacementEntries)
+        jun30WebViewLog("overlay.store.updateTargets", [
+            "incomingCount": targets.count,
+            "storedCount": entries.count,
+            "firstElementID": targets.first?.elementID as Any,
+            "firstRect": targets.first?.rects.first as Any,
+            "replacementFrameKey": frameKey,
+        ])
     }
 
     public func removeAllTargets() {
+        guard !entries.isEmpty || nativeTouchElementID != nil || suppressUnhandledTapUntil != 0 else {
+            return
+        }
+        if !entries.isEmpty || nativeTouchElementID != nil {
+            jun30WebViewLog("overlay.store.removeAllTargets", [
+                "previousCount": entries.count,
+                "activeNativeTouchElementID": nativeTouchElementID as Any,
+            ])
+        }
         entries.removeAll()
         nativeTouchElementID = nil
         suppressUnhandledTapUntil = 0
@@ -1085,23 +1141,59 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func updateWebTextSelection(active: Bool, textLength: Int, source: String) {
+        let wasActive = webTextSelectionActive
+        let previousTextLength = webTextSelectionTextLength
         webTextSelectionActive = active
         webTextSelectionTextLength = textLength
-        webTextSelectionUpdatedAt = Date().timeIntervalSinceReferenceDate
+        let now = Date().timeIntervalSinceReferenceDate
+        webTextSelectionUpdatedAt = now
+        if active && textLength > 0 {
+            collapsedWebTextSelectionPassThroughPending = false
+        } else if wasActive && previousTextLength > 0 {
+            collapsedWebTextSelectionPassThroughPending = true
+            webTextSelectionPassThroughUntil = max(
+                webTextSelectionPassThroughUntil,
+                now + Self.collapsedTextSelectionPassThroughDuration
+            )
+        }
+        if active != wasActive {
+            jun30WebViewLog("overlay.webTextSelection.update", [
+                "active": active,
+                "textLength": textLength,
+                "source": source,
+                "targetCount": entries.count,
+                "activeNativeTouchElementID": nativeTouchElementID as Any,
+                "passThroughMs": max(0, (webTextSelectionPassThroughUntil - now) * 1_000),
+            ])
+            onWebTextSelectionActiveChanged?(active)
+        }
     }
 
     public func cancelActiveTouchInteraction(reason: String) {
         onExternalTouchInteractionCancelled?(reason)
     }
 
+    public func consumeCollapsedWebTextSelectionPassThroughIfNeeded() {
+        guard !webTextSelectionActive, collapsedWebTextSelectionPassThroughPending else { return }
+        collapsedWebTextSelectionPassThroughPending = false
+    }
+
     public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
         nativeTouchElementID = target.elementID
         suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+        jun30WebViewLog("overlay.nativeTouch.begin", [
+            "elementID": target.elementID,
+            "surface": target.lookupPayload?["surface"] as Any,
+            "targetCount": entries.count,
+            "webTextSelectionActive": webTextSelectionActive,
+        ])
     }
 
-    public func finishNativeTouchStream(reason: String) {
+    public func finishNativeTouchStream(reason: String, suppressUnhandledTap: Bool = true) {
         if nativeTouchElementID != nil {
-            suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+            suppressUnhandledTapUntil = suppressUnhandledTap
+                ? Date().timeIntervalSinceReferenceDate + 0.5
+                : 0
         }
         nativeTouchElementID = nil
         onNativeTouchStreamFinished?(reason)
@@ -1118,12 +1210,18 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> WebViewNativeLookupHitTarget? {
         guard isEnabled else { return nil }
-        return resolvedCandidate(
+        return bestCandidate(
             at: point,
+            usingInflatedRects: false,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        ).map { target(for: $0) }
+        ).map {
+            target(
+                for: $0,
+                usedInflatedHitRect: false
+            )
+        }
     }
 
     public func exactHitTarget(
@@ -1388,7 +1486,7 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func containsClaimableTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
-        hitTarget(at: point, in: containerSize) != nil
+        containsExactTarget(at: point, in: containerSize)
     }
 
     public func diagnostics(
@@ -1500,6 +1598,7 @@ public final class WebViewNativeLookupHitTestStore {
     ) -> Bool {
         guard let resolvedCandidate = resolvedCandidate(
             at: point,
+            allowingInflatedHitRect: false,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
@@ -5180,30 +5279,50 @@ fileprivate struct TextSelectionUserScript {
         let contents = """
             (function() {
                 let lastSentText = null;
+                let pendingClearTimer = null;
+
+                function clearPendingSelectionClear() {
+                    if (pendingClearTimer !== null) {
+                        clearTimeout(pendingClearTimer);
+                        pendingClearTimer = null;
+                    }
+                }
+
+                function sendSelectionClearIfStillEmpty() {
+                    pendingClearTimer = null;
+                    const selection = window.getSelection();
+                    if (selection && selection.rangeCount > 0 && selection.toString() !== '') {
+                        return;
+                    }
+                    if (lastSentText !== null) {
+                        window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
+                            text: null,
+                        });
+                        lastSentText = null;
+                    }
+                }
+
+                function scheduleSelectionClear() {
+                    if (lastSentText === null || pendingClearTimer !== null) {
+                        return;
+                    }
+                    pendingClearTimer = setTimeout(sendSelectionClearIfStillEmpty, 40);
+                }
             
                 function sendSelectedTextAndHTML() {
                     const selection = window.getSelection();
                     if (!selection || selection.rangeCount === 0) {
-                        if (lastSentText !== null) {
-                            window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
-                                text: null,
-                            });
-                            lastSentText = null;
-                        }
+                        scheduleSelectionClear();
                         return;
                     }
             
                     const selectedText = selection.toString();
                     if (selectedText === '') {
-                        if (lastSentText !== null) {
-                            window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
-                                text: null,
-                            });
-                            lastSentText = null;
-                        }
+                        scheduleSelectionClear();
                         return;
                     }
             
+                    clearPendingSelectionClear();
                     if (selectedText === lastSentText) {
                         return;
                     }
@@ -5533,9 +5652,13 @@ public class EnhancedWKWebView: WKWebView {
 }
 
 #if os(iOS)
-private var verboseNativeLookupPositionLoggingEnabled: Bool {
+private let verboseNativeLookupPositionLoggingEnabled: Bool = {
+#if DEBUG
     ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1"
-}
+#else
+    false
+#endif
+}()
 
 private final class NativeLookupHitTestOverlayView: UIView {
     private enum PressedSegmentStyle {
@@ -5550,8 +5673,6 @@ private final class NativeLookupHitTestOverlayView: UIView {
     private let pressedSegmentLayer = CAShapeLayer()
     private var clearPressedSegmentWorkItem: DispatchWorkItem?
     private var pressedSegmentElementID: String?
-    private var lastPointInsideMissLogTime: TimeInterval = 0
-    private var lastPointInsideHitLogTime: TimeInterval = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -5584,20 +5705,13 @@ private final class NativeLookupHitTestOverlayView: UIView {
         clearPressedSegmentWorkItem = nil
         pressedSegmentElementID = target.elementID
         let path = CGMutablePath()
-        var visualRects: [CGRect] = []
-        var strokeRects: [CGRect] = []
         for visualRect in target.projectedRectsForCurrentHitTestOverlay(
             topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion
         ) {
             let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
-            visualRects.append(visualRect)
-            strokeRects.append(strokeRect)
             let radius = min(PressedSegmentStyle.cornerRadius, strokeRect.width / 2, strokeRect.height / 2)
             path.addRoundedRect(in: strokeRect, cornerWidth: radius, cornerHeight: radius)
         }
-        let windowFrame = convert(bounds, to: nil)
-        let visualWindowRects = visualRects.map { convert($0, to: nil) }
-        let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.strokeColor = tintColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
@@ -5645,44 +5759,16 @@ private final class NativeLookupHitTestOverlayView: UIView {
         )
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
-            let hasActiveWebTextSelection = store?.hasActiveWebTextSelection == true
-            logPointInsideHit(
-                point: point,
-                target: target,
-                capturesSegmentTouches: capturesSegmentTouches,
-                hasActiveWebTextSelection: hasActiveWebTextSelection,
-                overlayWindowOrigin: overlayWindowOrigin
-            )
-            if hasActiveWebTextSelection {
+            let shouldPassThroughForWebTextSelection = store?.shouldPassThroughForWebTextSelection == true
+            if shouldPassThroughForWebTextSelection {
                 return false
             }
-            //store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
             if capturesSegmentTouches {
                 store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
                 return true
             }
         }
-        if store?.targetCount ?? 0 > 0 {
-            let now = CACurrentMediaTime()
-            if verboseNativeLookupPositionLoggingEnabled,
-               now - lastPointInsideMissLogTime > 0.5 {
-                lastPointInsideMissLogTime = now
-            }
-        }
         return false
-    }
-
-    private func logPointInsideHit(
-        point: CGPoint,
-        target: WebViewNativeLookupHitTarget,
-        capturesSegmentTouches: Bool,
-        hasActiveWebTextSelection: Bool,
-        overlayWindowOrigin: CGPoint
-    ) {
-        guard verboseNativeLookupPositionLoggingEnabled else { return }
-        let now = CACurrentMediaTime()
-        guard now - lastPointInsideHitLogTime > 0.5 else { return }
-        lastPointInsideHitLogTime = now
     }
 }
 
@@ -5778,7 +5864,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
-        if store?.hasActiveWebTextSelection == true {
+        if store?.shouldPassThroughForWebTextSelection == true {
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.textSelectionActivePassThrough",
                 verdict: "passThrough.allowed",
@@ -5928,14 +6014,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
         tapExpirationWorkItem?.cancel()
         tapExpirationWorkItem = nil
-        if store?.capturesSegmentTouchesInOverlay != true {
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self, self.state == .possible else { return }
-                self.failGesture(reason: "timeout")
-            }
-            tapExpirationWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.state == .possible else { return }
+            self.failGesture(reason: "timeout")
         }
+        tapExpirationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -6064,13 +6148,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
-            resetTrackingState()
+            resetTrackingState(finishReason: "missingTrackingState", suppressUnhandledTap: false)
             state = .failed
             return
         }
         let duration = event.timestamp - startedAt
-        if store?.capturesSegmentTouchesInOverlay != true,
-           duration > Self.segmentTapMaximumDuration {
+        if duration > Self.segmentTapMaximumDuration {
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.durationExceeded",
                 verdict: "passThrough.allowedAfterRecognizerFailure",
@@ -6083,7 +6166,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
-            resetTrackingState()
+            resetTrackingState(finishReason: "durationExceeded", suppressUnhandledTap: false)
             state = .failed
             return
         }
@@ -6149,11 +6232,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
             )
-            resetTrackingState()
+            resetTrackingState(finishReason: "endedOutsideStartTarget", suppressUnhandledTap: false)
             state = .failed
             return
         }
-        if store?.hasActiveWebTextSelection == true {
+        if store?.shouldPassThroughForWebTextSelection == true {
             logTouchDeliveryVerdict(
                 stage: "touchesEnded.textSelectionActivePassThrough",
                 verdict: "passThrough.allowedAfterTextSelection",
@@ -6172,7 +6255,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
             )
-            resetTrackingState()
+            resetTrackingState(finishReason: "webTextSelectionActive", suppressUnhandledTap: false)
             state = .failed
             return
         }
@@ -6219,7 +6302,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                         "segmentTargetTouchesReachWebKit": true,
                     ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
                 )
-                resetTrackingState()
+                resetTrackingState(finishReason: "nativeLookupFailed", suppressUnhandledTap: false)
                 state = .failed
                 return
             }
@@ -6261,7 +6344,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "segmentTargetTouchesReachWebKit": true,
             ]
         )
-        resetTrackingState()
+        resetTrackingState(finishReason: "touchesCancelled", suppressUnhandledTap: false)
         state = .failed
     }
 
@@ -6286,105 +6369,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "latestPointIsInsideStartTarget": latestPointIsInsideStartTarget,
                 ]
             )
-            var shouldHoldPressedTargetForHandoff = false
-            if touchStartWasActiveTarget {
-                if touchHasMoved || !touchStartIsInsideTarget || !latestPointIsInsideStartTarget {
-                    touchStartOverlay?.clearPressedTarget()
-                    store?.onTouchDownHitCancelled?(target)
-                    logTouchDeliveryVerdict(
-                        stage: "reset.skipActiveTargetOutsideTarget",
-                        verdict: "pendingLookupDroppedOutsideTarget",
-                        reason: touchHasMoved ? "touchMovedBeforeReset" : "outsideStartTarget",
-                        target: target,
-                        point: latestPoint,
-                        coordinateView: coordinateView,
-                        extra: [
-                            "lookupDispatchedOnReset": false,
-                            "segmentTargetTouchesReachWebKit": true,
-                            "touchHasMoved": touchHasMoved,
-                            "touchStartIsInsideTarget": touchStartIsInsideTarget,
-                            "latestPointIsInsideStartTarget": latestPointIsInsideStartTarget,
-                        ]
-                    )
-                } else if store?.hasActiveWebTextSelection == true {
-                    logTouchDeliveryVerdict(
-                        stage: "reset.skipActiveTargetTextSelectionActive",
-                        verdict: "pendingLookupDroppedForTextSelection",
-                        reason: "webTextSelectionActive",
-                        target: target,
-                        point: point,
-                        coordinateView: coordinateView,
-                        extra: [
-                            "lookupDispatchedOnReset": false,
-                            "segmentTargetTouchesReachWebKit": true,
-                        ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-                    )
-                } else {
-                    store?.onActiveTargetTouchDown?(target)
-                }
-            } else {
-                if touchHasMoved || !touchStartIsInsideTarget || !latestPointIsInsideStartTarget {
-                    touchStartOverlay?.clearPressedTarget()
-                    store?.onTouchDownHitCancelled?(target)
-                    logTouchDeliveryVerdict(
-                        stage: "reset.skipDispatchOutsideTarget",
-                        verdict: "pendingLookupDroppedOutsideTarget",
-                        reason: touchHasMoved ? "touchMovedBeforeReset" : "outsideStartTarget",
-                        target: target,
-                        point: latestPoint,
-                        coordinateView: coordinateView,
-                        extra: [
-                            "lookupDispatchedOnReset": false,
-                            "segmentTargetTouchesReachWebKit": true,
-                            "touchHasMoved": touchHasMoved,
-                            "touchStartIsInsideTarget": touchStartIsInsideTarget,
-                            "latestPointIsInsideStartTarget": latestPointIsInsideStartTarget,
-                        ]
-                    )
-                } else if store?.hasActiveWebTextSelection == true {
-                    logTouchDeliveryVerdict(
-                        stage: "reset.skipDispatchTextSelectionActive",
-                        verdict: "pendingLookupDroppedForTextSelection",
-                        reason: "webTextSelectionActive",
-                        target: target,
-                        point: point,
-                        coordinateView: coordinateView,
-                        extra: [
-                            "lookupDispatchedOnReset": false,
-                            "segmentTargetTouchesReachWebKit": true,
-                        ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-                    )
-                } else {
-                    let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
-                    let didDispatchLookup = store?.handleTap(
-                        on: target,
-                        at: latestPoint,
-                        in: coordinateView.bounds.size,
-                        coordinateViewWindowOrigin: coordinateViewWindowOrigin
-                    ) == true
-                    logTouchDeliveryVerdict(
-                        stage: "reset.dispatchPendingNativeLookup",
-                        verdict: didDispatchLookup
-                            ? "pendingLookupDispatchedDuringRecognizerReset"
-                            : "pendingLookupDispatchFailedDuringRecognizerReset",
-                        reason: "unexpectedRecognizerReset",
-                        target: target,
-                        point: latestPoint,
-                        coordinateView: coordinateView,
-                        extra: [
-                            "lookupDispatchedOnReset": didDispatchLookup,
-                            "segmentTargetTouchesReachWebKit": false,
-                            "touchHasMoved": touchHasMoved,
-                            "latestPointIsInsideStartTarget": latestPointIsInsideStartTarget,
-                        ]
-                    )
-                    shouldHoldPressedTargetForHandoff = didDispatchLookup
-                    if didDispatchLookup {
-                        touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedFallbackDuration)
-                    }
-                }
-            }
-            resetTrackingState(clearPressedTarget: !shouldHoldPressedTargetForHandoff)
+            touchStartOverlay?.clearPressedTarget()
+            store?.onTouchDownHitCancelled?(target)
+            resetTrackingState(finishReason: "unexpectedRecognizerReset", suppressUnhandledTap: false)
             return
         }
         resetTrackingState()
@@ -6402,7 +6389,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         ])
     }
 
-    private func resetTrackingState(clearPressedTarget: Bool = true) {
+    private func resetTrackingState(
+        clearPressedTarget: Bool = true,
+        finishReason: String = "resetTrackingState",
+        suppressUnhandledTap: Bool = true
+    ) {
         tapExpirationWorkItem?.cancel()
         tapExpirationWorkItem = nil
         touchStartPoint = nil
@@ -6416,7 +6407,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchLatestPoint = nil
         touchForwardedSegmentSwipe = false
         restoreSuppressedCompetingTapRecognizers(reason: "resetTrackingState")
-        store?.finishNativeTouchStream(reason: "resetTrackingState")
+        store?.finishNativeTouchStream(reason: finishReason, suppressUnhandledTap: suppressUnhandledTap)
         if clearPressedTarget {
             touchStartOverlay?.clearPressedTarget()
         }
@@ -6502,7 +6493,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 extra: payload.merging(["segmentTargetTouchesReachWebKit": true]) { current, _ in current }
             )
         }
-        resetTrackingState()
+        resetTrackingState(finishReason: reason, suppressUnhandledTap: false)
         state = .failed
     }
 
@@ -6515,6 +6506,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         coordinateView: NativeLookupHitTestOverlayView? = nil,
         extra: @autoclosure () -> [String: Any] = [:]
     ) {
+        guard verboseNativeLookupPositionLoggingEnabled else { return }
         let extra = extra()
         let targetCount = extra["targetCount"] as? Int ?? 0
         let shouldLog = Self.touchDeliveryLoggingEnabled
@@ -6585,7 +6577,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
-        guard verboseNativeLookupPositionLoggingEnabled else { return }
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -6611,6 +6602,8 @@ public class WebViewController: UIViewController {
     private var lastAppliedAdditionalSafeAreaInsets = UIEdgeInsets.zero
     private var lastAppliedObscuredInsets = UIEdgeInsets.zero
     private var lastAppliedWebKitObscuredInsets: UIEdgeInsets?
+    private var webTextSelectionBaseScrollEnabled = true
+    private var webTextSelectionIsPaginated = false
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
     var onViewWillDisappear: (() -> Void)?
@@ -6922,6 +6915,16 @@ public class WebViewController: UIViewController {
             self.nativeLookupHitTestOverlayView.clearPressedTarget()
             self.nativeLookupHitTestGestureRecognizer.cancelForExternalPageMotion(reason: reason)
         }
+        store.onWebTextSelectionActiveChanged = { [weak self] active in
+            DispatchQueue.main.async { [weak self] in
+                self?.applyWebTextSelectionScrollSuppression(active: active, reason: "webTextSelectionChanged")
+            }
+            if !active {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.05) { [weak self] in
+                    self?.applyWebTextSelectionScrollSuppression(reason: "webTextSelectionGraceExpired")
+                }
+            }
+        }
         store.onCaptureModeChanged = { [weak self] capturesSegmentTouchesInOverlay in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -6932,6 +6935,31 @@ public class WebViewController: UIViewController {
                 }
             }
         }
+    }
+
+    @MainActor
+    func applyWebTextSelectionScrollSuppression(active: Bool? = nil, reason _: String) {
+        let hasActiveSelection: Bool
+        if active == true {
+            hasActiveSelection = true
+        } else if active == false {
+            hasActiveSelection = nativeLookupHitTestOverlayView.store?.shouldSuppressScrollForWebTextSelection == true
+        } else {
+            hasActiveSelection = nativeLookupHitTestOverlayView.store?.shouldSuppressScrollForWebTextSelection == true
+        }
+        let shouldSuppressScroll = hasActiveSelection && webTextSelectionIsPaginated
+        webView.scrollView.isScrollEnabled = webTextSelectionBaseScrollEnabled && !shouldSuppressScroll
+    }
+
+    @MainActor
+    func configureWebTextSelectionScrollSuppression(
+        isScrollEnabled: Bool,
+        isPaginated: Bool,
+        reason: String
+    ) {
+        webTextSelectionBaseScrollEnabled = isScrollEnabled
+        webTextSelectionIsPaginated = isPaginated
+        applyWebTextSelectionScrollSuppression(reason: reason)
     }
 
     private func suppressCompetingTapRecognizersFromOverlayHitTest(
@@ -7630,6 +7658,11 @@ extension WebView: UIViewControllerRepresentable {
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        controller.configureWebTextSelectionScrollSuppression(
+            isScrollEnabled: config.isScrollEnabled,
+            isPaginated: config.paginationConfiguration.mode.isPaginated,
+            reason: "configureWebView"
+        )
 #if os(iOS)
         webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
         applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView, reason: "configureWebView")
@@ -7820,6 +7853,11 @@ extension WebView: UIViewControllerRepresentable {
             controller.webView.scrollView.alwaysBounceVertical = bounces
             controller.webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
             controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
+            controller.configureWebTextSelectionScrollSuppression(
+                isScrollEnabled: config.isScrollEnabled,
+                isPaginated: config.paginationConfiguration.mode.isPaginated,
+                reason: "updateUIView.configurationChanged"
+            )
 #if os(iOS)
             controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
             applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView, reason: "updateUIView.configurationChanged")
@@ -8153,20 +8191,13 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
         let path = CGMutablePath()
-        var visualRects: [CGRect] = []
-        var strokeRects: [CGRect] = []
         for visualRect in target.projectedRectsForCurrentHitTestOverlay(
             topExpansion: PressedSegmentStyle.lookupAttachmentTopExpansion
         ) {
             let strokeRect = visualRect.insetBy(dx: PressedSegmentStyle.inset, dy: PressedSegmentStyle.inset)
-            visualRects.append(visualRect)
-            strokeRects.append(strokeRect)
             let radius = min(PressedSegmentStyle.cornerRadius, strokeRect.width / 2, strokeRect.height / 2)
             path.addRoundedRect(in: strokeRect, cornerWidth: radius, cornerHeight: radius)
         }
-        let windowFrame = convert(bounds, to: nil)
-        let visualWindowRects = visualRects.map { convert($0, to: nil) }
-        let strokeWindowRects = strokeRects.map { convert($0, to: nil) }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.strokeColor = NSColor.controlAccentColor.withAlphaComponent(PressedSegmentStyle.pressedStrokeAlpha).cgColor
