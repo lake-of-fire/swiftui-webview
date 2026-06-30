@@ -1296,6 +1296,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var shouldSuppressUnhandledTapForNativeLookup: Bool {
         nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
     }
+    public var hasActiveWebTextSelection: Bool { false }
 
     public init(hitSlop: CGFloat = 8) {
         self.hitSlop = hitSlop
@@ -6784,6 +6785,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartOverlay = nil
     }
 
+    private static func point(_ point: CGPoint, isInside target: WebViewNativeLookupHitTarget) -> Bool {
+        target.projectedRectsForCurrentHitTestOverlay.contains { rect in
+            !rect.isNull && !rect.isEmpty && rect.contains(point)
+        }
+    }
+
     private func failGesture(reason: String, payload: [String: Any] = [:]) {
         var mergedPayload = payload
         mergedPayload["stage"] = "failGesture.\(reason)"
@@ -7081,6 +7088,22 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.rightAnchor.constraint(equalTo: webView.rightAnchor)
         ]
         NSLayoutConstraint.activate(nativeLookupHitTestOverlayConstraints)
+    }
+
+    @MainActor
+    func setNativeLookupHitTestingEnabled(_ enabled: Bool, reason _: String) {
+        let wasInstalled = nativeLookupHitTestGestureRecognizer.view != nil
+            || nativeLookupHitTestOverlayView.superview != nil
+        if enabled {
+            if !wasInstalled {
+                attachNativeLookupHitTestOverlay()
+            }
+        } else {
+            nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+            NSLayoutConstraint.deactivate(nativeLookupHitTestOverlayConstraints)
+            nativeLookupHitTestOverlayConstraints.removeAll()
+            nativeLookupHitTestOverlayView.removeFromSuperview()
+        }
     }
 
 }
