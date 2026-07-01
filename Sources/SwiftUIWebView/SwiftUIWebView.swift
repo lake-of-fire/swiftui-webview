@@ -962,7 +962,6 @@ public struct WebViewNativeLookupHit {
 
 public final class WebViewNativeLookupHitTestStore {
     private static let strictOverlayCaptureDefaultsKey = "NativeLookupStrictOverlayCapture"
-    private static let collapsedTextSelectionHandleHandoffDuration: TimeInterval = 0.65
 
     private struct Entry {
         let target: WebViewNativeLookupHitTarget
@@ -988,7 +987,6 @@ public final class WebViewNativeLookupHitTestStore {
     private var webTextSelectionActive = false
     private var webTextSelectionTextLength = 0
     private var webTextSelectionUpdatedAt: TimeInterval?
-    private var webTextSelectionPassThroughUntil: TimeInterval = 0
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
@@ -1023,20 +1021,14 @@ public final class WebViewNativeLookupHitTestStore {
             "webTextSelectionAgeMs": webTextSelectionUpdatedAt.map {
                 (Date().timeIntervalSinceReferenceDate - $0) * 1_000
             } as Any,
-            "webTextSelectionPassThroughMs": max(
-                0,
-                (webTextSelectionPassThroughUntil - Date().timeIntervalSinceReferenceDate) * 1_000
-            ),
         ]
     }
     public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
     public var shouldPassThroughForWebTextSelection: Bool {
         webTextSelectionActive
-            || Date().timeIntervalSinceReferenceDate < webTextSelectionPassThroughUntil
     }
     public var shouldSuppressScrollForWebTextSelection: Bool {
         webTextSelectionActive
-            || Date().timeIntervalSinceReferenceDate < webTextSelectionPassThroughUntil
     }
     public var capturesSegmentTouchesInOverlay =
         UserDefaults.standard.bool(forKey: WebViewNativeLookupHitTestStore.strictOverlayCaptureDefaultsKey) {
@@ -1088,19 +1080,9 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func updateWebTextSelection(active: Bool, textLength: Int, source: String) {
         let wasActive = webTextSelectionActive
-        let previousTextLength = webTextSelectionTextLength
         webTextSelectionActive = active
         webTextSelectionTextLength = textLength
-        let now = Date().timeIntervalSinceReferenceDate
-        webTextSelectionUpdatedAt = now
-        if active && textLength > 0 {
-            webTextSelectionPassThroughUntil = 0
-        } else if wasActive && previousTextLength > 0 {
-            webTextSelectionPassThroughUntil = max(
-                webTextSelectionPassThroughUntil,
-                now + Self.collapsedTextSelectionHandleHandoffDuration
-            )
-        }
+        webTextSelectionUpdatedAt = Date().timeIntervalSinceReferenceDate
         if active != wasActive {
             onWebTextSelectionActiveChanged?(active)
         }
@@ -1108,10 +1090,6 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func cancelActiveTouchInteraction(reason: String) {
         onExternalTouchInteractionCancelled?(reason)
-    }
-
-    public func consumeCollapsedWebTextSelectionPassThroughIfNeeded() {
-        webTextSelectionPassThroughUntil = 0
     }
 
     public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
@@ -6752,11 +6730,6 @@ public class WebViewController: UIViewController {
         store.onWebTextSelectionActiveChanged = { [weak self] active in
             DispatchQueue.main.async { [weak self] in
                 self?.applyWebTextSelectionScrollSuppression(active: active, reason: "webTextSelectionChanged")
-            }
-            if !active {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.05) { [weak self] in
-                    self?.applyWebTextSelectionScrollSuppression(reason: "webTextSelectionGraceExpired")
-                }
             }
         }
         store.onCaptureModeChanged = { [weak self] capturesSegmentTouchesInOverlay in
