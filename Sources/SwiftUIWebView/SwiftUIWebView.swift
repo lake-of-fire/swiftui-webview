@@ -5096,21 +5096,8 @@ fileprivate struct TextSelectionUserScript {
         let contents = """
             (function() {
                 let lastSentText = null;
-                let pendingClearTimer = null;
 
-                function clearPendingSelectionClear() {
-                    if (pendingClearTimer !== null) {
-                        clearTimeout(pendingClearTimer);
-                        pendingClearTimer = null;
-                    }
-                }
-
-                function sendSelectionClearIfStillEmpty() {
-                    pendingClearTimer = null;
-                    const selection = window.getSelection();
-                    if (selection && selection.rangeCount > 0 && selection.toString() !== '') {
-                        return;
-                    }
+                function sendSelectionClear() {
                     if (lastSentText !== null) {
                         window.webkit.messageHandlers.swiftUIWebViewTextSelection.postMessage({
                             text: null,
@@ -5118,28 +5105,20 @@ fileprivate struct TextSelectionUserScript {
                         lastSentText = null;
                     }
                 }
-
-                function scheduleSelectionClear() {
-                    if (lastSentText === null || pendingClearTimer !== null) {
-                        return;
-                    }
-                    pendingClearTimer = setTimeout(sendSelectionClearIfStillEmpty, 40);
-                }
             
                 function sendSelectedTextAndHTML() {
                     const selection = window.getSelection();
                     if (!selection || selection.rangeCount === 0) {
-                        scheduleSelectionClear();
+                        sendSelectionClear();
                         return;
                     }
             
                     const selectedText = selection.toString();
                     if (selectedText === '') {
-                        scheduleSelectionClear();
+                        sendSelectionClear();
                         return;
                     }
             
-                    clearPendingSelectionClear();
                     if (selectedText === lastSentText) {
                         return;
                     }
