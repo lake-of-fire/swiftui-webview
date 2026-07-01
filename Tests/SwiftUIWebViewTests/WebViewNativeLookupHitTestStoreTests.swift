@@ -12,7 +12,7 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertTrue(store.shouldSuppressScrollForWebTextSelection)
     }
 
-    func testCollapsedTextSelectionPassThroughRemainsOpenForSelectionHandleTouches() {
+    func testCollapsedTextSelectionBrieflyPassesSelectionHandleTouchesThrough() {
         let store = WebViewNativeLookupHitTestStore()
 
         store.updateWebTextSelection(active: true, textLength: 4, source: "test")
@@ -24,11 +24,11 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertTrue(store.shouldSuppressScrollForWebTextSelection)
 
         store.consumeCollapsedWebTextSelectionPassThroughIfNeeded()
-        XCTAssertTrue(store.shouldPassThroughForWebTextSelection)
-        XCTAssertTrue(store.shouldSuppressScrollForWebTextSelection)
+        XCTAssertFalse(store.shouldPassThroughForWebTextSelection)
+        XCTAssertFalse(store.shouldSuppressScrollForWebTextSelection)
     }
 
-    func testCollapsedTextSelectionPassThroughIsOnlyArmedAfterARealSelection() {
+    func testInactiveTextSelectionDoesNotPassNativeLookupTouchesThrough() {
         let store = WebViewNativeLookupHitTestStore()
 
         store.updateWebTextSelection(active: false, textLength: 0, source: "test")
