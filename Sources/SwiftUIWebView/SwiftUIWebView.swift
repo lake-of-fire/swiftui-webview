@@ -5617,14 +5617,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchLatestPoint: CGPoint?
     private var touchForwardedSegmentSwipe = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
-    private var tapExpirationWorkItem: DispatchWorkItem?
     private var suppressedCompetingTapRecognizers: [(recognizer: UIGestureRecognizer, wasEnabled: Bool)] = []
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
         cancelsTouchesInView = true
-        delaysTouchesBegan = true
-        delaysTouchesEnded = true
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -5829,14 +5828,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 ]
             )
         }
-        tapExpirationWorkItem?.cancel()
-        tapExpirationWorkItem = nil
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self, self.state == .possible else { return }
-            self.failGesture(reason: "timeout")
-        }
-        tapExpirationWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -6207,8 +6198,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         finishReason: String = "resetTrackingState",
         suppressUnhandledTap: Bool = true
     ) {
-        tapExpirationWorkItem?.cancel()
-        tapExpirationWorkItem = nil
         touchStartPoint = nil
         touchStartWindowPoint = nil
         touchStartTime = nil
