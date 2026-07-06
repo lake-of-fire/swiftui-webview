@@ -42,6 +42,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        publishScrollBottomState(for: scrollView, reason: "beginDragging")
         lastContentOffset = scrollView.contentOffset
         accumulatedScrollOffset = 0
         refreshNavigationScrollSemantics(scrollView)
@@ -49,6 +50,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        publishScrollBottomState(for: scrollView, reason: "endDragging")
         logLayoutScroll(decelerate ? "scroll.endDrag.decelerating" : "scroll.endDrag", scrollView: scrollView, force: true)
         guard !decelerate else { return }
         accumulatedScrollOffset = 0
@@ -57,6 +59,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        publishScrollBottomState(for: scrollView, reason: "endDecelerating")
         logLayoutScroll("scroll.endDecelerating", scrollView: scrollView, force: true)
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
@@ -64,6 +67,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        publishScrollBottomState(for: scrollView, reason: "scroll")
         logLayoutScroll("scroll.pageChanged", scrollView: scrollView)
         guard scrollView.isTracking || scrollView.isDragging else { return }
 
@@ -88,8 +92,71 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        publishScrollBottomState(for: scrollView, reason: "endAnimation")
         logLayoutScroll("scroll.endAnimation", scrollView: scrollView, force: true)
         refreshPaginationReadback(reason: "scroll.endAnimation")
+    }
+
+    @MainActor
+    internal func installScrollBottomStateObservations(for scrollView: UIScrollView) {
+        guard scrollBottomObservedScrollView !== scrollView else {
+            publishScrollBottomState(for: scrollView, reason: "reuse")
+            return
+        }
+        scrollBottomObservedScrollView = scrollView
+        lastPublishedScrollBottomState = nil
+        scrollBottomContentSizeObservation = scrollView.observe(\.contentSize, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
+            Task { @MainActor in
+                guard let scrollView else { return }
+                self?.publishScrollBottomState(for: scrollView, reason: "contentSize")
+            }
+        }
+        scrollBottomBoundsObservation = scrollView.observe(\.bounds, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
+            Task { @MainActor in
+                guard let scrollView else { return }
+                self?.publishScrollBottomState(for: scrollView, reason: "bounds")
+            }
+        }
+        scrollBottomContentInsetObservation = scrollView.observe(\.contentInset, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
+            Task { @MainActor in
+                guard let scrollView else { return }
+                self?.publishScrollBottomState(for: scrollView, reason: "contentInset")
+            }
+        }
+    }
+
+    @MainActor
+    internal func publishScrollBottomState(for scrollView: UIScrollView, reason: String) {
+        guard navigator.webView?.scrollView === scrollView else { return }
+        guard onScrollBottomStateChanged != nil else { return }
+        let isAtEnd: Bool
+        switch navigationScrollAxis {
+        case .vertical:
+            let minOffsetY = -scrollView.adjustedContentInset.top
+            let maxOffsetY = max(
+                minOffsetY,
+                scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+            )
+            let canScroll = maxOffsetY - minOffsetY > 1
+            isAtEnd = !canScroll || scrollView.contentOffset.y >= maxOffsetY - 2
+        case .horizontal:
+            let minOffsetX = -scrollView.adjustedContentInset.left
+            let maxOffsetX = max(
+                minOffsetX,
+                scrollView.contentSize.width - scrollView.bounds.width + scrollView.adjustedContentInset.right
+            )
+            let canScroll = maxOffsetX - minOffsetX > 1
+            if !canScroll {
+                isAtEnd = true
+            } else if horizontalForwardSign < 0 {
+                isAtEnd = scrollView.contentOffset.x <= minOffsetX + 2
+            } else {
+                isAtEnd = scrollView.contentOffset.x >= maxOffsetX - 2
+            }
+        }
+        guard lastPublishedScrollBottomState != isAtEnd else { return }
+        lastPublishedScrollBottomState = isAtEnd
+        onScrollBottomStateChanged?(isAtEnd)
     }
 
     private func resolvedScrollDifference(deltaX: CGFloat, deltaY: CGFloat) -> CGFloat {

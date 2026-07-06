@@ -1828,6 +1828,11 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
     private weak var snapshotHostController: WebViewController?
     weak var hostLayoutController: WebViewController?
+    internal weak var scrollBottomObservedScrollView: UIScrollView?
+    internal var scrollBottomContentSizeObservation: NSKeyValueObservation?
+    internal var scrollBottomBoundsObservation: NSKeyValueObservation?
+    internal var scrollBottomContentInsetObservation: NSKeyValueObservation?
+    internal var lastPublishedScrollBottomState: Bool?
     private var awaitingSnapshotReload = false
     private var snapshotReloadCommitted = false
     private var snapshotReloadDocumentReady = false
@@ -1862,6 +1867,7 @@ public class WebViewCoordinator: NSObject {
     var onNavigationFailed: ((WebViewState) -> Void)?
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
+    var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
@@ -2007,6 +2013,7 @@ public class WebViewCoordinator: NSObject {
         onNavigationFailed: ((WebViewState) -> Void)?,
         onURLChanged: ((WebViewState) -> Void)? = nil,
         onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
+        onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
         hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
@@ -2020,6 +2027,7 @@ public class WebViewCoordinator: NSObject {
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
+        self.onScrollBottomStateChanged = onScrollBottomStateChanged
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.mirroredHideNavigationDueToScroll = hideNavigationDueToScroll.wrappedValue
         self.textSelection = textSelection
@@ -3052,6 +3060,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
         let startedAt = Date()
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
 #if DEBUG
 #endif
         let requestURL = navigationAction.request.url
@@ -4069,40 +4078,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    private func compactJavaScriptDiagnosticString(_ string: String, limit: Int = 360) -> String {
-        let escaped = string
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-            .replacingOccurrences(of: "\t", with: "\\t")
-        guard escaped.count > limit else { return escaped }
-        let headLength = max(0, limit / 2)
-        let tailLength = max(0, limit - headLength)
-        return "\(escaped.prefix(headLength))...\(escaped.suffix(tailLength))"
-    }
-
-    private func diagnosticJavaScriptHash(_ js: String) -> String {
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in js.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 1_099_511_628_211
-        }
-        let raw = String(hash, radix: 16)
-        return String(repeating: "0", count: max(0, 16 - raw.count)) + raw
-    }
-
-    private func logJavaScriptEvaluationException(_ error: NSError, js: String, frame: WKFrameInfo?) {
-        guard error.domain == WKError.errorDomain,
-              error.code == WKError.javaScriptExceptionOccurred.rawValue else {
-            return
-        }
-        let message = error.userInfo["WKJavaScriptExceptionMessage"] as? String ?? ""
-        let isSyntaxFailure = message.contains("SyntaxError") || message.contains("Unexpected end of script")
-        guard isSyntaxFailure else { return }
-        let line = error.userInfo["WKJavaScriptExceptionLineNumber"] ?? "nil"
-        let column = error.userInfo["WKJavaScriptExceptionColumnNumber"] ?? "nil"
-        let frameURL = frame?.webView?.url?.absoluteString ?? "nil"
-    }
-
     //    @MainActor
     @discardableResult
     public func evaluateJavaScript(
@@ -4200,9 +4175,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 handled = true
             }
             if !handled {
-#if DEBUG
-#endif
-                logJavaScriptEvaluationException(nsError, js: js, frame: frame)
                 throw primaryError
             }
         }
@@ -5585,6 +5557,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     weak var store: WebViewNativeLookupHitTestStore?
     weak var coordinateView: NativeLookupHitTestOverlayView?
     weak var clientCoordinateView: UIView?
+    var capturesTouchesInHostView = true {
+        didSet {
+            cancelsTouchesInView = capturesTouchesInHostView
+        }
+    }
     private var touchStartPoint: CGPoint?
     private var touchStartWindowPoint: CGPoint?
     private var touchStartTime: TimeInterval?
@@ -5597,6 +5574,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchForwardedSegmentSwipe = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
     private var suppressedCompetingTapRecognizers: [(recognizer: UIGestureRecognizer, wasEnabled: Bool)] = []
+    private var longPressFailureWorkItem: DispatchWorkItem?
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
@@ -5715,6 +5693,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartIsInsideTarget = true
         touchHasMoved = false
         touchLatestPoint = point
+        scheduleLongPressFailure(target: target)
         let activeLookupElementID = store?.activeLookupElementID?()
         let activeHighlightElementID = store?.activeElementID
         let hadActiveLookup = activeLookupElementID != nil
@@ -6046,6 +6025,31 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
+        if touchStartWasActiveTarget {
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.activeLookupDismiss",
+                verdict: "activeLookupDismissed",
+                reason: "sameActiveTargetRetap",
+                target: target,
+                point: point,
+                coordinateView: coordinateView,
+                extra: [
+                    "movement": movement,
+                    "duration": duration,
+                    "startTargetID": target.elementID,
+                    "endTargetID": endTarget?.elementID as Any,
+                    "hitPoint": Self.debugPointString(hitPoint),
+                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                    "hitBasis": "overlay",
+                    "segmentTargetTouchesReachWebKit": "blockedForDismiss",
+                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
+            )
+            store?.onActiveTargetTouchDown?(target)
+            touchStartOverlay?.clearPressedTarget()
+            resetTrackingState(clearPressedTarget: false, finishReason: "sameActiveTargetRetap")
+            state = .recognized
+            return
+        }
         logTouchDeliveryVerdict(
             stage: "touchesEnded.beforeNativeLookupDispatch",
             verdict: "nativeLookupDispatchPending",
@@ -6177,6 +6181,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         finishReason: String = "resetTrackingState",
         suppressUnhandledTap: Bool = true
     ) {
+        longPressFailureWorkItem?.cancel()
+        longPressFailureWorkItem = nil
         touchStartPoint = nil
         touchStartWindowPoint = nil
         touchStartTime = nil
@@ -6193,6 +6199,21 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             touchStartOverlay?.clearPressedTarget()
         }
         touchStartOverlay = nil
+    }
+
+    private func scheduleLongPressFailure(target: WebViewNativeLookupHitTarget) {
+        longPressFailureWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.state == .possible,
+                  self.touchStartTarget?.elementID == target.elementID else {
+                return
+            }
+            self.resetTrackingState(finishReason: "longPressThreshold", suppressUnhandledTap: false)
+            self.state = .failed
+        }
+        longPressFailureWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
     }
 
     private func suppressCompetingWebKitTapRecognizers(
@@ -6877,6 +6898,7 @@ public class WebViewController: UIViewController {
         let recognizerHostView: UIView = capturesSegmentTouchesInOverlay
             ? nativeLookupHitTestOverlayView
             : webView
+        nativeLookupHitTestGestureRecognizer.capturesTouchesInHostView = capturesSegmentTouchesInOverlay
         if nativeLookupHitTestGestureRecognizer.view !== recognizerHostView {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             recognizerHostView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
@@ -7201,6 +7223,7 @@ public struct WebView {
     let onNavigationFailed: ((WebViewState) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
     let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
+    let onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
     let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
@@ -7231,6 +7254,7 @@ public struct WebView {
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
+                onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
@@ -7253,6 +7277,7 @@ public struct WebView {
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
+        self.onScrollBottomStateChanged = onScrollBottomStateChanged
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
@@ -7274,6 +7299,7 @@ public struct WebView {
             onNavigationFailed: onNavigationFailed,
             onURLChanged: onURLChanged,
             onNavigationAction: onNavigationAction,
+            onScrollBottomStateChanged: onScrollBottomStateChanged,
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
@@ -7340,6 +7366,7 @@ extension WebView: UIViewControllerRepresentable {
         web.buildMenu = buildMenu
         
         web.scrollView.delegate = coordinator
+        coordinator.installScrollBottomStateObservations(for: web.scrollView)
         
         return web
     }
@@ -7429,6 +7456,7 @@ extension WebView: UIViewControllerRepresentable {
         webView.allowsLinkPreview = true
         webView.uiDelegate = context.coordinator
         webView.scrollView.delegate = context.coordinator
+        context.coordinator.installScrollBottomStateObservations(for: webView.scrollView)
         webView.buildMenu = buildMenu
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
@@ -8517,6 +8545,7 @@ extension WebView {
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
+        context.coordinator.onScrollBottomStateChanged = onScrollBottomStateChanged
         context.coordinator.webViewPool = resolvedWebViewPool
         context.coordinator.lifecycleConfig = lifecycleConfig
         context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
@@ -8700,19 +8729,12 @@ extension WebView {
             return
         }
         
-        var matchedExistingScripts = [WKUserScript]()
-        if !allScripts.allSatisfy({ newScript in
-            return userContentController.userScripts.contains(where: { existingScript in
-                if newScript.source == existingScript.source
-                    && newScript.injectionTime == existingScript.injectionTime
-                    && newScript.isForMainFrameOnly == existingScript.isForMainFrameOnly {
-                    //                    && newScript.world == existingScript.world { // TODO: Track associated worlds...
-                    matchedExistingScripts.append(existingScript)
-                    return true
-                }
-                return false
-            })
-        }) || userContentController.userScripts.contains(where: { !matchedExistingScripts.contains($0) }) {
+        let persistedScriptsSignature = (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature
+        let shouldReinstallScripts = coordinator.lastUserScriptsContentController !== userContentController
+            || coordinator.lastInstalledScriptsSignature != installedScriptsSignature
+            || persistedScriptsSignature != installedScriptsSignature
+            || userContentController.userScripts.count != allScripts.count
+        if shouldReinstallScripts {
             userContentController.removeAllUserScripts()
             for var script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
