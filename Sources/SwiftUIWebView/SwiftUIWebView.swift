@@ -7803,6 +7803,23 @@ extension WebView: UIViewControllerRepresentable {
             additionalSafeAreaInsets: additionalSafeAreaInsets,
             obscuredInsets: resolvedObscuredInsets
         )
+        print(
+            "# JUL6 webView.updateInsets",
+            "stateURL=\(state.pageURL.absoluteString)",
+            "webViewURL=\(controller.webView.url?.absoluteString ?? "nil")",
+            "incomingBottom=\((Double(obscuredInsets.bottom) * 10).rounded() / 10)",
+            "windowSafeBottom=\((Double(bottomSafeAreaInset) * 10).rounded() / 10)",
+            "bottomPolicy=\(treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured")",
+            "resolvedAdditionalBottom=\((Double(additionalSafeAreaInsets.bottom) * 10).rounded() / 10)",
+            "resolvedObscuredBottom=\((Double(resolvedObscuredInsets.bottom) * 10).rounded() / 10)",
+            "changedAdditional=\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
+            "changedObscured=\(hostLayoutChanges.changedObscuredInsets)",
+            "controllerAdditionalBottom=\((Double(controller.additionalSafeAreaInsets.bottom) * 10).rounded() / 10)",
+            "controllerObscuredBottom=\((Double(controller.obscuredInsets.bottom) * 10).rounded() / 10)",
+            "scrollContentBottom=\((Double(controller.webView.scrollView.contentInset.bottom) * 10).rounded() / 10)",
+            "scrollAdjustedBottom=\((Double(controller.webView.scrollView.adjustedContentInset.bottom) * 10).rounded() / 10)",
+            "webViewID=\(readerLoadObjectIDString(controller.webView))"
+        )
         if isBookWebViewUpdate {
             let shouldForcePopoverInsetLog =
                 hostLayoutChanges.changedAdditionalSafeAreaInsets
