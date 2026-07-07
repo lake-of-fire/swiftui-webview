@@ -6114,6 +6114,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         )
         if touchStartWasActiveTarget {
             touchStartOverlay?.clearPressedTarget()
+        } else if store?.activeElementID == target.elementID {
+            touchStartOverlay?.clearPressedTarget()
         } else {
             touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedFallbackDuration)
         }
