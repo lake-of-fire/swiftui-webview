@@ -11,7 +11,6 @@
 		0E0093EC8AACF04A5335025A /* OrderedCollections.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */; };
 		296A5C9B83011F286947821E /* WebViewPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */; };
 		2A875882342499CCD28D95B4 /* LRUCache.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */; };
-		2B617AB00F5A4067BA9F8A58 /* InternalCollectionsUtilities.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FF93CF6372F535513339F0A8 /* InternalCollectionsUtilities.framework */; };
 		946046018ED22AB00D3E397C /* WebViewCoordinator+UIScrollViewDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7EA0A7C68D5B7948DEDFE82 /* WebViewCoordinator+UIScrollViewDelegate.swift */; };
 		C290627DFD15ABE9B09E2FCA /* ZIPFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 22D3F6892D80089B3615787D /* ZIPFoundation.framework */; };
 		D100DDEDB12F576F423CD44A /* URLSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */; };
@@ -44,7 +43,6 @@
 		B46E4BE7B7C13DA35336B207 /* SwiftUIWebView-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "SwiftUIWebView-Info.plist"; sourceTree = "<group>"; };
 		C9A1922746100196C740DDA9 /* PDFJS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFJS.swift; sourceTree = "<group>"; };
 		DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSchemeHandler.swift; sourceTree = "<group>"; };
-		FF93CF6372F535513339F0A8 /* InternalCollectionsUtilities.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = InternalCollectionsUtilities.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,7 +50,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2B617AB00F5A4067BA9F8A58 /* InternalCollectionsUtilities.framework in Frameworks */,
 				2A875882342499CCD28D95B4 /* LRUCache.framework in Frameworks */,
 				0E0093EC8AACF04A5335025A /* OrderedCollections.framework in Frameworks */,
 				C290627DFD15ABE9B09E2FCA /* ZIPFoundation.framework in Frameworks */,
@@ -81,7 +78,6 @@
 		9ED38EF8E678B31B2DC38E67 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				FF93CF6372F535513339F0A8 /* InternalCollectionsUtilities.framework */,
 				1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */,
 				B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */,
 				4EFDA511EF8EDB9F5158E0E7 /* SwiftUIWebView.framework */,
