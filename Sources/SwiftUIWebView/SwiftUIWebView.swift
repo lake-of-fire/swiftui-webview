@@ -983,7 +983,7 @@ public final class WebViewNativeLookupHitTestStore {
 
     private var entries: [Entry] = []
     private var nativeTouchElementID: String?
-    private var suppressUnhandledTapUntil: TimeInterval = 0
+    private var suppressNextUnhandledTapAfterNativeTouch = false
     private var webTextSelectionActive = false
     private var webTextSelectionTextLength = 0
     private var webTextSelectionUpdatedAt: TimeInterval?
@@ -1013,7 +1013,17 @@ public final class WebViewNativeLookupHitTestStore {
     public var targetCount: Int { entries.count }
     public var activeNativeTouchElementID: String? { nativeTouchElementID }
     public var shouldSuppressUnhandledTapForNativeLookup: Bool {
-        nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
+        nativeTouchElementID != nil || suppressNextUnhandledTapAfterNativeTouch
+    }
+    public func consumeUnhandledTapSuppressionForNativeLookup() -> Bool {
+        if nativeTouchElementID != nil {
+            return true
+        }
+        guard suppressNextUnhandledTapAfterNativeTouch else {
+            return false
+        }
+        suppressNextUnhandledTapAfterNativeTouch = false
+        return true
     }
     public var webTextSelectionDiagnostics: [String: Any] {
         [
@@ -1071,12 +1081,12 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func removeAllTargets() {
-        guard !entries.isEmpty || nativeTouchElementID != nil || suppressUnhandledTapUntil != 0 else {
+        guard !entries.isEmpty || nativeTouchElementID != nil || suppressNextUnhandledTapAfterNativeTouch else {
             return
         }
         entries.removeAll()
         nativeTouchElementID = nil
-        suppressUnhandledTapUntil = 0
+        suppressNextUnhandledTapAfterNativeTouch = false
         onTargetsChanged?()
     }
 
@@ -1134,14 +1144,12 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
         nativeTouchElementID = target.elementID
-        suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+        suppressNextUnhandledTapAfterNativeTouch = false
     }
 
     public func finishNativeTouchStream(reason: String, suppressUnhandledTap: Bool = true) {
         if nativeTouchElementID != nil {
-            suppressUnhandledTapUntil = suppressUnhandledTap
-                ? Date().timeIntervalSinceReferenceDate + 0.5
-                : 0
+            suppressNextUnhandledTapAfterNativeTouch = suppressUnhandledTap
         }
         nativeTouchElementID = nil
         onNativeTouchStreamFinished?(reason)
@@ -2621,7 +2629,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 }
             }
         } else if message.name == "swiftUIWebViewUnhandledTap" {
-            let suppressForNativeLookup = navigator.nativeLookupHitTesting.shouldSuppressUnhandledTapForNativeLookup
+            let suppressForNativeLookup = navigator.nativeLookupHitTesting.consumeUnhandledTapSuppressionForNativeLookup()
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
             let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
             let messageReason = (message.body as? [String: Any])?["reason"] as? String
