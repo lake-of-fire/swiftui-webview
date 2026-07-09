@@ -1944,22 +1944,22 @@ public class WebViewCoordinator: NSObject {
     }
     var hideNavigationDueToScroll: Binding<Bool>
     internal var mirroredHideNavigationDueToScroll: Bool?
-    internal var lastNativeHideNavigationSetAt: TimeInterval?
-    internal var lastScrollHideNavigationMessageAt: TimeInterval?
+    internal var pendingNativeHideNavigationHostEchoValue: Bool?
+    internal var suppressNextUntargetedTapAfterNavigationStateMessage = false
     internal var currentHideNavigationDueToScroll: Bool {
         mirroredHideNavigationDueToScroll ?? hideNavigationDueToScroll.wrappedValue
     }
     internal func setHideNavigationDueToScroll(_ value: Bool) {
         mirroredHideNavigationDueToScroll = value
-        lastNativeHideNavigationSetAt = Date.timeIntervalSinceReferenceDate
+        pendingNativeHideNavigationHostEchoValue = value
         hideNavigationDueToScroll.wrappedValue = value
     }
     internal func syncHideNavigationDueToScrollFromHost(_ value: Bool) {
-        if let mirroredHideNavigationDueToScroll,
-           mirroredHideNavigationDueToScroll != value,
-           let lastNativeHideNavigationSetAt,
-           Date.timeIntervalSinceReferenceDate - lastNativeHideNavigationSetAt < 0.5 {
-            return
+        if let pendingNativeHideNavigationHostEchoValue {
+            self.pendingNativeHideNavigationHostEchoValue = nil
+            guard value == pendingNativeHideNavigationHostEchoValue || value == hideNavigationDueToScroll.wrappedValue else {
+                return
+            }
         }
         mirroredHideNavigationDueToScroll = value
     }
@@ -2635,7 +2635,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let messageReason = (message.body as? [String: Any])?["reason"] as? String
             let isNavigationStateMessage = requestedHideNavigation != nil
             if isNavigationStateMessage {
-                lastScrollHideNavigationMessageAt = Date.timeIntervalSinceReferenceDate
+                suppressNextUntargetedTapAfterNavigationStateMessage = true
             }
             let currentHideNavigation = currentHideNavigationDueToScroll
             if let requestedHideNavigation,
@@ -2643,6 +2643,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 return
             }
             if suppressForNativeLookup {
+                suppressNextUntargetedTapAfterNavigationStateMessage = false
                 print(
                     "# JUL7 stage=webViewUnhandledTap.skip",
                     "reason=nativeLookupSuppressed",
@@ -2668,9 +2669,11 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                let body = message.body as? [String: Any],
                let targetClosestSegment = body["targetClosestSegment"] as? String,
                !targetClosestSegment.isEmpty {
+                suppressNextUntargetedTapAfterNavigationStateMessage = false
                 return
             }
             if hasActiveLookup, !isNavigationStateMessage {
+                suppressNextUntargetedTapAfterNavigationStateMessage = false
                 navigator.nativeLookupHitTesting.closeActiveLookupFromBlankTap()
                 return
             }
@@ -2680,8 +2683,8 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     setHideNavigationDueToScroll(requestedHideNavigation)
                 }
             } else {
-                if let lastScrollHideNavigationMessageAt,
-                   Date.timeIntervalSinceReferenceDate - lastScrollHideNavigationMessageAt < 0.7 {
+                if suppressNextUntargetedTapAfterNavigationStateMessage {
+                    suppressNextUntargetedTapAfterNavigationStateMessage = false
                     return
                 }
                 let nextHideNavigation = !currentHideNavigationDueToScroll
