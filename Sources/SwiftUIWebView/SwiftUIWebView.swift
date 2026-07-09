@@ -1505,6 +1505,19 @@ public final class WebViewNativeLookupHitTestStore {
             + " rebased=\(Self.debugPointString(rebased.point))"
             + " targetCount=\(targetCount)"
         )
+        let diagnosticSurface = (target.lookupPayload?["surface"] as? String) ?? ""
+        print(
+            "# JUL8 stage=nativeLookup.handleTapRects"
+            + " elementID=\(target.elementID)"
+            + " surface=\(diagnosticSurface)"
+            + " point=\(Self.debugPointString(point))"
+            + " rebased=\(Self.debugPointString(rebased.point))"
+            + " rectCount=\(target.rects.count)"
+            + " hitRectCount=\(target.debugHitRects.count)"
+            + " firstRect=\(Self.debugRectStrings(target.rects.prefix(1)).first ?? "nil")"
+            + " hitRects=\(Self.debugRectStrings(target.debugHitRects))"
+            + " nearest=\(diagnostics(at: point, limit: 3, in: containerSize, coordinateViewWindowMinY: coordinateViewWindowMinY, coordinateViewWindowOrigin: coordinateViewWindowOrigin))"
+        )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
             point: point,
