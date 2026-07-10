@@ -100,7 +100,13 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     @MainActor
     internal func installScrollBottomStateObservations(for scrollView: UIScrollView) {
         guard scrollBottomObservedScrollView !== scrollView else {
-            publishScrollBottomState(for: scrollView, reason: "reuse")
+            // Reuse is reached from UIViewControllerRepresentable.updateUIViewController.
+            // Publishing synchronously there mutates observable host state during a SwiftUI
+            // update. Match the KVO paths below and publish after the update transaction exits.
+            Task { @MainActor [weak self, weak scrollView] in
+                guard let scrollView else { return }
+                self?.publishScrollBottomState(for: scrollView, reason: "reuse")
+            }
             return
         }
         scrollBottomObservedScrollView = scrollView

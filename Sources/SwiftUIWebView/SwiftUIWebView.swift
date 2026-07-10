@@ -1119,6 +1119,16 @@ public final class WebViewNativeLookupHitTestStore {
         onActiveLookupBlankTap?()
     }
 
+    @discardableResult
+    public func closeActiveLookupFromBlankTapIfNeeded() -> Bool {
+        guard activeLookupElementID?() != nil,
+              !shouldPassThroughForWebTextSelection else {
+            return false
+        }
+        closeActiveLookupFromBlankTap()
+        return true
+    }
+
     public func updateWebTextSelection(active: Bool, textLength: Int, source: String) {
         let wasActive = webTextSelectionActive
         webTextSelectionActive = active
@@ -5660,6 +5670,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchStartTime: TimeInterval?
     private var touchStartTarget: WebViewNativeLookupHitTarget?
     private var touchStartWasActiveTarget = false
+    private var touchStartIsBlankLookupDismissal = false
     private var touchStartPressedVisualCleared = false
     private var touchStartIsInsideTarget = false
     private var touchHasMoved = false
@@ -5706,6 +5717,30 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             in: hitTestView.bounds.size,
             coordinateViewWindowOrigin: hitTestViewWindowOrigin
         ) else {
+            if store?.activeLookupElementID?() != nil,
+               store?.shouldPassThroughForWebTextSelection != true {
+                touchStartPoint = point
+                touchStartWindowPoint = windowPoint
+                touchStartTime = event.timestamp
+                touchStartTarget = nil
+                touchStartIsBlankLookupDismissal = true
+                touchHasMoved = false
+                touchLatestPoint = point
+                logTouchDeliveryVerdict(
+                    stage: "touchesBegan.activeLookupBlankTapCandidate",
+                    verdict: "popover.dismissPendingTouchEnd",
+                    reason: "activeLookupBlankSpace",
+                    point: point,
+                    coordinateView: coordinateView,
+                    extra: [
+                        "hitPoint": Self.debugPointString(hitPoint),
+                        "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
+                        "targetCount": store?.targetCount as Any,
+                        "segmentTargetTouchesReachWebKit": "pendingTapDecision",
+                    ]
+                )
+                return
+            }
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.noSegmentTarget",
                 verdict: "passThrough.allowed",
@@ -5929,6 +5964,15 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 "isInsideStartTarget": isInsideStartTarget,
             ]
         )
+        if touchStartIsBlankLookupDismissal, exceededTapMovement {
+            failGesture(reason: "blankLookupDismissalMovement", payload: [
+                "movement": movement,
+                "dx": dx,
+                "dy": dy,
+                "tapMovementLimit": Self.segmentTapMovementTolerance,
+            ])
+            return
+        }
         if isInsideStartTarget != touchStartIsInsideTarget {
             touchStartIsInsideTarget = isInsideStartTarget
             if isInsideStartTarget, let target = touchStartTarget, store?.showsPressedTargetOverlay == true {
@@ -5993,6 +6037,38 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        if touchStartIsBlankLookupDismissal {
+            guard let windowStart = touchStartWindowPoint,
+                  let startedAt = touchStartTime,
+                  let touch = touches.first else {
+                resetTrackingState(finishReason: "blankTapMissingTrackingState", suppressUnhandledTap: false)
+                state = .failed
+                return
+            }
+            let windowPoint = touch.location(in: nil)
+            let movement = hypot(windowPoint.x - windowStart.x, windowPoint.y - windowStart.y)
+            let duration = event.timestamp - startedAt
+            guard movement <= Self.segmentTapMovementTolerance,
+                  duration <= Self.segmentTapMaximumDuration,
+                  store?.closeActiveLookupFromBlankTapIfNeeded() == true else {
+                resetTrackingState(finishReason: "blankTapNotRecognized", suppressUnhandledTap: false)
+                state = .failed
+                return
+            }
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.activeLookupBlankTapDismiss",
+                verdict: "activeLookupDismissed",
+                reason: "activeLookupBlankSpace",
+                extra: [
+                    "movement": movement,
+                    "duration": duration,
+                    "segmentTargetTouchesReachWebKit": "blockedForDismiss",
+                ]
+            )
+            resetTrackingState(finishReason: "activeLookupBlankTapDismiss")
+            state = .recognized
+            return
+        }
         guard let start = touchStartPoint,
               let windowStart = touchStartWindowPoint,
               let startedAt = touchStartTime,
@@ -6283,6 +6359,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartTime = nil
         touchStartTarget = nil
         touchStartWasActiveTarget = false
+        touchStartIsBlankLookupDismissal = false
         touchStartPressedVisualCleared = false
         touchStartIsInsideTarget = false
         touchHasMoved = false
