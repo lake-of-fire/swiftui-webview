@@ -1134,15 +1134,6 @@ public final class WebViewNativeLookupHitTestStore {
         webTextSelectionActive = active
         webTextSelectionTextLength = textLength
         webTextSelectionUpdatedAt = Date().timeIntervalSinceReferenceDate
-        if active != wasActive || active || source.contains("nativeLookup") {
-            print(
-                "# JUL7 stage=nativeLookup.webTextSelection"
-                + " active=\(active)"
-                + " wasActive=\(wasActive)"
-                + " textLength=\(textLength)"
-                + " source=\(source)"
-            )
-        }
         if active != wasActive {
             onWebTextSelectionActiveChanged?(active)
         }
@@ -1513,28 +1504,6 @@ public final class WebViewNativeLookupHitTestStore {
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin,
             targetCoordinateOriginInWindow: target.coordinateOriginInWindow
-        )
-        print(
-            "# JUL7 stage=nativeLookup.handleTap"
-            + " elementID=\(target.elementID)"
-            + " hasPayload=\(target.lookupPayload != nil)"
-            + " hasFrame=\(target.frameInfo != nil)"
-            + " point=\(Self.debugPointString(point))"
-            + " rebased=\(Self.debugPointString(rebased.point))"
-            + " targetCount=\(targetCount)"
-        )
-        let diagnosticSurface = (target.lookupPayload?["surface"] as? String) ?? ""
-        print(
-            "# JUL8 stage=nativeLookup.handleTapRects"
-            + " elementID=\(target.elementID)"
-            + " surface=\(diagnosticSurface)"
-            + " point=\(Self.debugPointString(point))"
-            + " rebased=\(Self.debugPointString(rebased.point))"
-            + " rectCount=\(target.rects.count)"
-            + " hitRectCount=\(target.debugHitRects.count)"
-            + " firstRect=\(Self.debugRectStrings(target.rects.prefix(1)).first ?? "nil")"
-            + " hitRects=\(Self.debugRectStrings(target.debugHitRects))"
-            + " nearest=\(diagnostics(at: point, limit: 3, in: containerSize, coordinateViewWindowMinY: coordinateViewWindowMinY, coordinateViewWindowOrigin: coordinateViewWindowOrigin))"
         )
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
@@ -2654,25 +2623,9 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
             if suppressForNativeLookup {
                 suppressNextUntargetedTapAfterNavigationStateMessage = false
-                print(
-                    "# JUL7 stage=webViewUnhandledTap.skip",
-                    "reason=nativeLookupSuppressed",
-                    "messageReason=\(messageReason ?? "nil")",
-                    "requestedHide=\(requestedHideNavigation.map(String.init) ?? "nil")",
-                    "currentHide=\(currentHideNavigation)",
-                    "hasActiveLookup=\(hasActiveLookup)"
-                )
                 return
             }
             if hasActiveLookup, isNavigationStateMessage {
-                print(
-                    "# JUL7 stage=webViewUnhandledTap.skip",
-                    "reason=activeLookupNavigationState",
-                    "messageReason=\(messageReason ?? "nil")",
-                    "requestedHide=\(requestedHideNavigation.map(String.init) ?? "nil")",
-                    "currentHide=\(currentHideNavigation)",
-                    "hasActiveLookup=\(hasActiveLookup)"
-                )
                 return
             }
             if !isNavigationStateMessage,
@@ -6550,23 +6503,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             payload[key] = value
         }
         payload["stage"] = stage
-        if stage.contains("nativeLookup")
-            || stage.contains("touchesBegan")
-            || stage.contains("touchesEnded")
-            || stage.contains("noSegmentTarget")
-            || target != nil {
-            print(
-                "# JUL7 stage=nativeLookup.touch"
-                + " recognizerStage=\(stage)"
-                + " verdict=\(verdict)"
-                + " reason=\(reason)"
-                + " id=\(target?.elementID ?? "nil")"
-                + " targetCount=\(payload["targetCount"] ?? "nil")"
-                + " webSelectionActive=\(extra["webTextSelectionActive"] ?? "nil")"
-                + " payload=\(target?.lookupPayload != nil)"
-                + " frame=\(target?.frameInfo != nil)"
-            )
-        }
     }
 
     private static func debugPointString(_ point: CGPoint) -> String {
@@ -7992,25 +7928,6 @@ extension WebView: UIViewControllerRepresentable {
         let hostLayoutChanges = controller.applyHostLayout(
             additionalSafeAreaInsets: additionalSafeAreaInsets,
             obscuredInsets: resolvedObscuredInsets
-        )
-        print(
-            "# JUL7 webView.updateInsets",
-            "stateURL=\(state.pageURL.absoluteString)",
-            "webViewURL=\(controller.webView.url?.absoluteString ?? "nil")",
-            "rawIncomingBottom=\((Double(rawIncomingBottomObscuredInset) * 10).rounded() / 10)",
-            "effectiveIncomingBottom=\((Double(incomingBottomObscuredInset) * 10).rounded() / 10)",
-            "windowSafeBottom=\((Double(bottomSafeAreaInset) * 10).rounded() / 10)",
-            "bottomPolicy=\(treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured")",
-            "isBook=\(isBookWebViewUpdate)",
-            "resolvedAdditionalBottom=\((Double(additionalSafeAreaInsets.bottom) * 10).rounded() / 10)",
-            "resolvedObscuredBottom=\((Double(resolvedObscuredInsets.bottom) * 10).rounded() / 10)",
-            "changedAdditional=\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
-            "changedObscured=\(hostLayoutChanges.changedObscuredInsets)",
-            "controllerAdditionalBottom=\((Double(controller.additionalSafeAreaInsets.bottom) * 10).rounded() / 10)",
-            "controllerObscuredBottom=\((Double(controller.obscuredInsets.bottom) * 10).rounded() / 10)",
-            "scrollContentBottom=\((Double(controller.webView.scrollView.contentInset.bottom) * 10).rounded() / 10)",
-            "scrollAdjustedBottom=\((Double(controller.webView.scrollView.adjustedContentInset.bottom) * 10).rounded() / 10)",
-            "webViewID=\(readerLoadObjectIDString(controller.webView))"
         )
         if isBookWebViewUpdate {
             let shouldForcePopoverInsetLog =
