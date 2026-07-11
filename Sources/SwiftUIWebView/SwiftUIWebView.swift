@@ -18,6 +18,11 @@ private func readerLoadElapsedString(since start: Date?, now: Date = Date()) -> 
 }
 
 public enum ReaderLoadSignposts {
+    public struct Interval: Sendable {
+        fileprivate let id: OSSignpostID
+        fileprivate let name: StaticString
+    }
+
     public enum Event {
         case navigatorContentBegin
         case navigatorContentResolved
@@ -36,11 +41,48 @@ public enum ReaderLoadSignposts {
         category: .pointsOfInterest
     )
 
+    public static func beginInterval(
+        named name: StaticString,
+        metadata: [String: String] = [:]
+    ) -> Interval {
+        let id = OSSignpostID(log: log)
+        os_signpost(
+            .begin,
+            log: log,
+            name: name,
+            signpostID: id,
+            "%{public}@",
+            payloadString(metadata)
+        )
+        return Interval(id: id, name: name)
+    }
+
+    public static func endInterval(
+        _ interval: Interval,
+        metadata: [String: String] = [:]
+    ) {
+        os_signpost(
+            .end,
+            log: log,
+            name: interval.name,
+            signpostID: interval.id,
+            "%{public}@",
+            payloadString(metadata)
+        )
+    }
+
+    public static func measureView<Content: View>(
+        named name: StaticString,
+        metadata: [String: String] = [:],
+        @ViewBuilder content: () -> Content
+    ) -> Content {
+        let interval = beginInterval(named: name, metadata: metadata)
+        defer { endInterval(interval) }
+        return content()
+    }
+
     public static func event(_ event: Event, _ metadata: [String: String] = [:]) {
-        let payload = metadata
-            .sorted { $0.key < $1.key }
-            .map { "\($0.key)=\($0.value)" }
-            .joined(separator: " ")
+        let payload = payloadString(metadata)
         switch event {
         case .navigatorContentBegin:
             os_signpost(.event, log: log, name: "navigator.content.begin", "%{public}@", payload)
@@ -63,6 +105,13 @@ public enum ReaderLoadSignposts {
         case let .custom(stage):
             os_signpost(.event, log: log, name: "readerLoad.custom", "%{public}@", [payload, "stage=\(stage)"].filter { !$0.isEmpty }.joined(separator: " "))
         }
+    }
+
+    private static func payloadString(_ metadata: [String: String]) -> String {
+        metadata
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: " ")
     }
 
     public static func event(named stage: String, metadata: [String: String] = [:]) {
@@ -5591,8 +5640,22 @@ extension WebView: UIViewControllerRepresentable {
         config: WebViewConfig,
         coordinator: WebViewCoordinator
     ) -> EnhancedWKWebView {
+        let createInterval = ReaderLoadSignposts.beginInterval(
+            named: "swiftui.webview.create",
+            metadata: [
+                "poolAvailable": resolvedWebViewPool == nil ? "0" : "1",
+                "schemeHandlers": "\(schemeHandlers.count)",
+                "javaScript": config.javaScriptEnabled ? "1" : "0",
+            ]
+        )
         var web: EnhancedWKWebView?
         var source = "new"
+        defer {
+            ReaderLoadSignposts.endInterval(
+                createInterval,
+                metadata: ["source": source]
+            )
+        }
         if web == nil, let resolvedWebViewPool {
             web = resolvedWebViewPool.dequeue {
                 makeNewWebView(config: config)
@@ -5675,6 +5738,15 @@ extension WebView: UIViewControllerRepresentable {
         controller: WebViewController,
         context: Context
     ) {
+        let configureInterval = ReaderLoadSignposts.beginInterval(
+            named: "swiftui.webview.configure",
+            metadata: [
+                "urlScheme": webView.url?.scheme ?? "nil",
+                "persistedScripts": webView.persistedUserScriptsSignature == nil ? "0" : "1",
+                "persistedRules": webView.persistedAppliedContentRules == nil ? "0" : "1",
+            ]
+        )
+        defer { ReaderLoadSignposts.endInterval(configureInterval) }
 #if os(iOS)
         context.coordinator.hostLayoutController = controller
 #endif
