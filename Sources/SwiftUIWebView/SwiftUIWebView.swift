@@ -5634,7 +5634,6 @@ extension WebView: UIViewControllerRepresentable {
             configuration.dataDetectorTypes = []
         }
         configuration.defaultWebpagePreferences = preferences
-        configuration.processPool = webViewProcessPool
         configuration.websiteDataStore = WKWebsiteDataStore.default()
 
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
