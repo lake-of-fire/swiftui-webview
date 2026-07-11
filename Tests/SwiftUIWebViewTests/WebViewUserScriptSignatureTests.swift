@@ -5,7 +5,7 @@ import XCTest
 final class WebViewUserScriptSignatureTests: XCTestCase {
     func testConfigurationSignatureChangesForInstalledScriptConfiguration() {
         let base = WebViewUserScript(
-            source: "window.manabiValue = 1",
+            source: "window.exampleValue = 1",
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         )
@@ -13,7 +13,7 @@ final class WebViewUserScriptSignatureTests: XCTestCase {
         XCTAssertNotEqual(
             base.configurationSignatureComponent,
             WebViewUserScript(
-                source: "window.manabiValue = 2",
+                source: "window.exampleValue = 2",
                 injectionTime: .atDocumentEnd,
                 forMainFrameOnly: true
             ).configurationSignatureComponent
@@ -21,7 +21,7 @@ final class WebViewUserScriptSignatureTests: XCTestCase {
         XCTAssertNotEqual(
             base.configurationSignatureComponent,
             WebViewUserScript(
-                source: "window.manabiValue = 1",
+                source: "window.exampleValue = 1",
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             ).configurationSignatureComponent
@@ -29,7 +29,7 @@ final class WebViewUserScriptSignatureTests: XCTestCase {
         XCTAssertNotEqual(
             base.configurationSignatureComponent,
             WebViewUserScript(
-                source: "window.manabiValue = 1",
+                source: "window.exampleValue = 1",
                 injectionTime: .atDocumentEnd,
                 forMainFrameOnly: false
             ).configurationSignatureComponent
@@ -37,7 +37,7 @@ final class WebViewUserScriptSignatureTests: XCTestCase {
         XCTAssertNotEqual(
             base.configurationSignatureComponent,
             WebViewUserScript(
-                source: "window.manabiValue = 1",
+                source: "window.exampleValue = 1",
                 injectionTime: .atDocumentEnd,
                 forMainFrameOnly: true,
                 in: .page
@@ -47,12 +47,12 @@ final class WebViewUserScriptSignatureTests: XCTestCase {
 
     func testConfigurationSignatureIncludesDomainFilterMetadata() {
         let unrestricted = WebViewUserScript(
-            source: "window.manabiValue = 1",
+            source: "window.exampleValue = 1",
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
         )
         let restricted = WebViewUserScript(
-            source: "window.manabiValue = 1",
+            source: "window.exampleValue = 1",
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true,
             allowedDomains: ["example.com"]

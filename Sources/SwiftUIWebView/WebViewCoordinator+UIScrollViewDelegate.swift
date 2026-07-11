@@ -4,60 +4,15 @@ import UIKit
 import WebKit
 
 extension WebViewCoordinator: UIScrollViewDelegate {
-    private func layoutScrollContext(for scrollView: UIScrollView) -> (WKWebView, WebViewPaginationConfiguration)? {
-        guard let webView = navigator.webView, webView.scrollView === scrollView else { return nil }
-        let configuration = paginationController.lastAppliedConfiguration ?? config.paginationConfiguration
-        return (webView, configuration)
-    }
-
-    private func layoutPageSignature(scrollView: UIScrollView, configuration: WebViewPaginationConfiguration) -> String {
-        let fallbackPageLength = scrollView.contentSize.width > scrollView.bounds.width + 1
-            ? scrollView.bounds.width
-            : scrollView.bounds.height
-        let pageLength = max(configuration.effectivePageLength > 0 ? configuration.effectivePageLength : fallbackPageLength, 1)
-        let horizontalPage = Int((scrollView.contentOffset.x / pageLength).rounded())
-        let verticalPage = Int((scrollView.contentOffset.y / pageLength).rounded())
-        return [
-            "\(configuration.mode.rawValue)",
-            "\(horizontalPage)",
-            "\(verticalPage)",
-            "\(Int(scrollView.bounds.width.rounded()))x\(Int(scrollView.bounds.height.rounded()))",
-            "\(Int(scrollView.contentSize.width.rounded()))x\(Int(scrollView.contentSize.height.rounded()))"
-        ].joined(separator: "|")
-    }
-
-    private func logLayoutScroll(
-        _ stage: @autoclosure () -> String,
-        scrollView: UIScrollView,
-        force: Bool = false
-    ) {
-        guard let (webView, configuration) = layoutScrollContext(for: scrollView) else { return }
-        guard let signature = webViewLayoutDiagnosticValue(
-            webViewLayoutShouldLog(webView: webView, configuration: configuration),
-            layoutPageSignature(scrollView: scrollView, configuration: configuration)
-        ) else { return }
-        if !force && signature == lastLayoutScrollPageSignature {
-            return
-        }
-        lastLayoutScrollPageSignature = signature
-
-        var payload = webViewLayoutScrollPayload(webView: webView, configuration: configuration)
-        payload["pageSignature"] = signature
-        payload["pageCount"] = paginationController.lastPageCount ?? -1
-        webViewLayoutDebugLog(stage(), payload)
-    }
-
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         publishScrollBottomState(for: scrollView, reason: "beginDragging")
         lastContentOffset = scrollView.contentOffset
         accumulatedScrollOffset = 0
         refreshNavigationScrollSemantics(scrollView)
-        logLayoutScroll("scroll.beginDrag", scrollView: scrollView, force: true)
     }
 
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         publishScrollBottomState(for: scrollView, reason: "endDragging")
-        logLayoutScroll(decelerate ? "scroll.endDrag.decelerating" : "scroll.endDrag", scrollView: scrollView, force: true)
         guard !decelerate else { return }
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
@@ -66,7 +21,6 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         publishScrollBottomState(for: scrollView, reason: "endDecelerating")
-        logLayoutScroll("scroll.endDecelerating", scrollView: scrollView, force: true)
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
         refreshPaginationReadback(reason: "scroll.endDecelerating")
@@ -74,7 +28,6 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
         publishScrollBottomState(for: scrollView, reason: "scroll")
-        logLayoutScroll("scroll.pageChanged", scrollView: scrollView)
         guard scrollView.isTracking || scrollView.isDragging else { return }
 
         let currentOffset = scrollView.contentOffset
@@ -99,7 +52,6 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
         publishScrollBottomState(for: scrollView, reason: "endAnimation")
-        logLayoutScroll("scroll.endAnimation", scrollView: scrollView, force: true)
         refreshPaginationReadback(reason: "scroll.endAnimation")
     }
 
@@ -190,23 +142,24 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
         let script = """
         (() => {
-          const body = document.body;
-          if (!body) {
-            return { axis: 'vertical', horizontalForwardSign: 1 };
+          const supplied = window.__swiftUIWebViewNavigationScrollSemantics;
+          if (typeof supplied === 'function') {
+            const value = supplied();
+            if (value && (value.axis === 'horizontal' || value.axis === 'vertical')) {
+              return value;
+            }
           }
-          const content = document.getElementById('reader-content') || body;
-          const computed = getComputedStyle(content);
-          const writingMode = String(computed?.writingMode || '').toLowerCase();
-          const resolved = typeof window.manabiResolveReaderWritingDirection === 'function'
-            ? window.manabiResolveReaderWritingDirection()
-            : null;
-          const isReaderMode = body.classList.contains('readability-mode');
-          const vertical = Boolean(resolved?.vertical) || writingMode.startsWith('vertical');
-          const verticalRTL = Boolean(resolved?.verticalRTL) || writingMode.startsWith('vertical-rl');
-          if (isReaderMode && vertical) {
+          if (supplied && (supplied.axis === 'horizontal' || supplied.axis === 'vertical')) {
+            return supplied;
+          }
+          const roots = [document.scrollingElement, document.body, document.documentElement];
+          for (const root of roots) {
+            if (!root) continue;
+            const writingMode = String(getComputedStyle(root)?.writingMode || '').toLowerCase();
+            if (!writingMode.startsWith('vertical')) continue;
             return {
               axis: 'horizontal',
-              horizontalForwardSign: verticalRTL ? -1 : 1
+              horizontalForwardSign: writingMode.startsWith('vertical-rl') ? -1 : 1
             };
           }
           return {

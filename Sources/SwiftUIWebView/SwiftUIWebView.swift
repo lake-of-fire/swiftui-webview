@@ -28,15 +28,11 @@ public enum ReaderLoadSignposts {
         case webKitDidCommit
         case webKitDidFinish
         case jsDOMContentLoaded
-        case installManabiReaderStart
-        case installManabiReaderEnd
-        case manabiReaderInitialized
-        case manabiSegmentsReady
         case custom(String)
     }
 
     private static let log = OSLog(
-        subsystem: Bundle.main.bundleIdentifier ?? "ManabiReader",
+        subsystem: Bundle.main.bundleIdentifier ?? "SwiftUIWebView",
         category: .pointsOfInterest
     )
 
@@ -64,14 +60,6 @@ public enum ReaderLoadSignposts {
             os_signpost(.event, log: log, name: "WebKit.didFinish", "%{public}@", payload)
         case .jsDOMContentLoaded:
             os_signpost(.event, log: log, name: "JS.DOMContentLoaded", "%{public}@", payload)
-        case .installManabiReaderStart:
-            os_signpost(.event, log: log, name: "installManabiReader.start", "%{public}@", payload)
-        case .installManabiReaderEnd:
-            os_signpost(.event, log: log, name: "installManabiReader.end", "%{public}@", payload)
-        case .manabiReaderInitialized:
-            os_signpost(.event, log: log, name: "manabiReaderInitialized", "%{public}@", payload)
-        case .manabiSegmentsReady:
-            os_signpost(.event, log: log, name: "manabiSegmentsReady", "%{public}@", payload)
         case let .custom(stage):
             os_signpost(.event, log: log, name: "readerLoad.custom", "%{public}@", [payload, "stage=\(stage)"].filter { !$0.isEmpty }.joined(separator: " "))
         }
@@ -97,69 +85,10 @@ public enum ReaderLoadSignposts {
             event(.webKitDidFinish, metadata)
         case "JS.DOMContentLoaded":
             event(.jsDOMContentLoaded, metadata)
-        case "installManabiReader.start":
-            event(.installManabiReaderStart, metadata)
-        case "installManabiReader.end":
-            event(.installManabiReaderEnd, metadata)
-        case "manabiReaderInitialized":
-            event(.manabiReaderInitialized, metadata)
-        case "manabiSegmentsReady":
-            event(.manabiSegmentsReady, metadata)
         default:
             event(.custom(stage), metadata)
         }
     }
-}
-
-@inline(__always)
-private func safeAreaLog(_: String, _: [String: String] = [:]) {}
-
-@inline(__always)
-private func bookLog(_: String, _: [String: String] = [:]) {}
-
-@inline(__always)
-private func popoverWebViewInsetLog(_: [String: String], force _: Bool = false) {}
-
-private func popoverLogValue(_ value: Any) -> String {
-    let mirror = Mirror(reflecting: value)
-    if mirror.displayStyle == .optional {
-        guard let child = mirror.children.first else { return "nil" }
-        return popoverLogValue(child.value)
-    }
-    switch value {
-    case let value as String:
-        return value.replacingOccurrences(of: "\n", with: "\\n")
-    case let value as CGFloat:
-        return String(format: "%.2f", Double(value))
-    case let value as Double:
-        return value.isFinite ? String(format: "%.2f", value) : "\(value)"
-    case let value as Float:
-        return value.isFinite ? String(format: "%.2f", Double(value)) : "\(value)"
-    case let value as CGRect:
-        return "{{\(String(format: "%.2f", value.origin.x)),\(String(format: "%.2f", value.origin.y))},{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}}"
-    case let value as CGPoint:
-        return "{\(String(format: "%.2f", value.x)),\(String(format: "%.2f", value.y))}"
-    case let value as CGSize:
-        return "{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}"
-    case let value as [String: Any]:
-        return "{" + value.keys.sorted()
-            .filter { !popoverShouldRedactLogKey($0) }
-            .map { "\($0):\(popoverLogValue(value[$0] as Any))" }
-            .joined(separator: ",") + "}"
-    case let value as [Any]:
-        return "[" + value.prefix(5).map { popoverLogValue($0) }.joined(separator: ",") + (value.count > 5 ? ",..." : "") + "]"
-    default:
-        return String(describing: value).replacingOccurrences(of: "\n", with: "\\n")
-    }
-}
-
-private func popoverShouldRedactLogKey(_ key: String) -> Bool {
-    let lowercased = key.lowercased()
-    return lowercased == "url"
-        || lowercased.hasSuffix("url")
-        || lowercased.contains("framekey")
-        || lowercased == "nativelookupframekey"
-        || lowercased == "locationhref"
 }
 
 #if os(iOS)
@@ -231,9 +160,8 @@ private let internalReaderLoaderFinishedAtKeyPrefix = "InternalURLSchemeHandler.
 private let activeInternalReaderLoaderTraceIDKey = "SwiftUIWebView.activeInternalReaderLoader.traceID"
 private let activeInternalReaderLoaderURLKey = "SwiftUIWebView.activeInternalReaderLoader.url"
 private let readerLoadVerboseUIViewControllerLoggingEnabled =
-    ProcessInfo.processInfo.environment["MANABI_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
+    ProcessInfo.processInfo.environment["SWIFTUIWEBVIEW_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
 private let readerLoadCorrelationMaxAge: TimeInterval = 30
-private let readerLoadPreProvisionalWarningThreshold: TimeInterval = 2.0
 
 @inline(__always)
 private func readerLoadCorrelationTimestamp(
@@ -307,14 +235,6 @@ private func isInternalReaderLoaderURL(_ url: URL?) -> Bool {
         && url.host?.lowercased() == "local"
         && url.path == "/load/reader"
 }
-
-@inline(__always)
-private func readerLoadObjectIDString(_ value: AnyObject?) -> String {
-    guard let value else { return "nil" }
-    return String(describing: ObjectIdentifier(value))
-}
-
-@MainActor private let webViewProcessPool = WKProcessPool()
 
 @globalActor
 public actor WebViewActor {
@@ -699,91 +619,6 @@ public enum WebViewPaginationError: Error, LocalizedError {
     }
 }
 
-@inline(__always)
-private func webViewPaginationDebugLog(_: String, _: [String: Any] = [:]) {}
-
-@inline(__always)
-func webViewLayoutDebugLog(_: String, _: [String: Any] = [:]) {}
-
-@inline(__always)
-func webViewLayoutDiagnosticValue<T>(
-    _ enabled: Bool,
-    _ value: @autoclosure () -> T
-) -> T? {
-    guard enabled else { return nil }
-    return value()
-}
-
-func webViewLayoutRounded(_ value: CGFloat) -> Double {
-    Double((value * 100).rounded() / 100)
-}
-
-func webViewLayoutSizeString(_ size: CGSize) -> String {
-    "\(webViewLayoutRounded(size.width))x\(webViewLayoutRounded(size.height))"
-}
-
-func webViewLayoutPointString(_ point: CGPoint) -> String {
-    "\(webViewLayoutRounded(point.x)),\(webViewLayoutRounded(point.y))"
-}
-
-func webViewLayoutPaginationPayload(
-    configuration: WebViewPaginationConfiguration,
-    reason: String
-) -> [String: Any] {
-    [
-        "reason": reason,
-        "mode": configuration.mode.rawValue,
-        "storedPageLength": webViewLayoutRounded(configuration.storedPageLength),
-        "effectivePageLength": webViewLayoutRounded(configuration.effectivePageLength),
-        "gapBetweenPages": webViewLayoutRounded(configuration.gapBetweenPages),
-        "behavesLikeColumns": configuration.behavesLikeColumns,
-        "layoutSize": webViewLayoutSizeString(configuration.layoutSize),
-        "usesViewLength": configuration.usesViewLength
-    ]
-}
-
-#if os(iOS)
-@MainActor
-func webViewLayoutInsetsString(_ insets: UIEdgeInsets) -> String {
-    "t:\(webViewLayoutRounded(insets.top)) l:\(webViewLayoutRounded(insets.left)) b:\(webViewLayoutRounded(insets.bottom)) r:\(webViewLayoutRounded(insets.right))"
-}
-
-@MainActor
-func webViewLayoutScrollPayload(webView: WKWebView, configuration: WebViewPaginationConfiguration? = nil) -> [String: Any] {
-    let scrollView = webView.scrollView
-    var payload: [String: Any] = [
-        "host": WebViewPaginationController.hostIdentifier(for: webView),
-        "url": webView.url?.absoluteString ?? "nil",
-        "webBounds": webViewLayoutSizeString(webView.bounds.size),
-        "scrollBounds": webViewLayoutSizeString(scrollView.bounds.size),
-        "contentSize": webViewLayoutSizeString(scrollView.contentSize),
-        "contentOffset": webViewLayoutPointString(scrollView.contentOffset),
-        "contentInset": webViewLayoutInsetsString(scrollView.contentInset),
-        "adjustedInset": webViewLayoutInsetsString(scrollView.adjustedContentInset),
-        "zoomScale": webViewLayoutRounded(scrollView.zoomScale),
-        "isDragging": scrollView.isDragging,
-        "isDecelerating": scrollView.isDecelerating,
-        "isTracking": scrollView.isTracking
-    ]
-    if let configuration {
-        payload.merge(
-            webViewLayoutPaginationPayload(configuration: configuration, reason: "state"),
-            uniquingKeysWith: { lhs, _ in lhs }
-        )
-    }
-    return payload
-}
-
-@MainActor
-func webViewLayoutShouldLog(webView: WKWebView, configuration: WebViewPaginationConfiguration? = nil) -> Bool {
-    if configuration?.mode.isPaginated == true {
-        return true
-    }
-    let urlString = webView.url?.absoluteString ?? ""
-    return urlString.hasPrefix("ebook://") || urlString.contains("ebook/")
-}
-#endif
-
 public struct WebViewState: Equatable, Sendable {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -793,7 +628,7 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var pageImageURL: URL?
     public internal(set) var pageIconURL: URL?
     public internal(set) var pageHTML: String?
-    public internal(set) var hasReaderRenderReady: Bool
+    public var hasReaderRenderReady: Bool
     public internal(set) var mainFrameHTTPStatusCode: Int?
     public internal(set) var error: Error?
     public internal(set) var canGoBack: Bool
@@ -1662,54 +1497,13 @@ public final class WebViewPaginationController {
         let resolved = configuration.resolvingEffectivePageLength(using: webView.bounds.size)
         let identity = resolved.structuralIdentity(using: webView.bounds.size)
         let shouldApply = identity != lastAppliedIdentity || hostIdentifier != lastAppliedHostIdentifier
-        #if os(iOS)
-        if webViewLayoutShouldLog(webView: webView, configuration: resolved) {
-            var layoutPayload = webViewLayoutPaginationPayload(configuration: resolved, reason: reason)
-            layoutPayload["host"] = hostIdentifier
-            layoutPayload["willApply"] = shouldApply
-            layoutPayload.merge(webViewLayoutScrollPayload(webView: webView), uniquingKeysWith: { lhs, _ in lhs })
-            webViewLayoutDebugLog("pagination.apply.begin", layoutPayload)
-        }
-        #endif
         if shouldApply {
             try applySelectors(resolved, to: webView)
             lastAppliedConfiguration = resolved
             lastAppliedIdentity = identity
             lastAppliedHostIdentifier = hostIdentifier
-            webViewPaginationDebugLog(
-                "apply",
-                [
-                    "host": hostIdentifier,
-                    "reason": reason,
-                    "mode": resolved.mode.rawValue,
-                    "storedPageLength": resolved.storedPageLength,
-                    "effectivePageLength": resolved.effectivePageLength,
-                    "gapBetweenPages": resolved.gapBetweenPages,
-                    "behavesLikeColumns": resolved.behavesLikeColumns,
-                    "layoutSize": "\(resolved.layoutSize.width)x\(resolved.layoutSize.height)"
-                ]
-            )
-        } else {
-            webViewPaginationDebugLog(
-                "apply.skipped",
-                [
-                    "host": hostIdentifier,
-                    "reason": reason,
-                    "mode": resolved.mode.rawValue
-                ]
-            )
         }
         lastPageCount = try queryPageCount(on: webView)
-        #if os(iOS)
-        if webViewLayoutShouldLog(webView: webView, configuration: resolved) {
-            var layoutPayload = webViewLayoutPaginationPayload(configuration: resolved, reason: reason)
-            layoutPayload["host"] = hostIdentifier
-            layoutPayload["applied"] = shouldApply
-            layoutPayload["pageCount"] = lastPageCount ?? -1
-            layoutPayload.merge(webViewLayoutScrollPayload(webView: webView), uniquingKeysWith: { lhs, _ in lhs })
-            webViewLayoutDebugLog("pagination.apply.end", layoutPayload)
-        }
-        #endif
         return currentState(reason: reason)
     }
 
@@ -1718,16 +1512,6 @@ public final class WebViewPaginationController {
         lastUpdatedAt = Date()
         if let webView {
             lastPageCount = try queryPageCount(on: webView)
-            #if os(iOS)
-            let configuration = lastAppliedConfiguration ?? desiredConfiguration
-            if webViewLayoutShouldLog(webView: webView, configuration: configuration) {
-                var layoutPayload = webViewLayoutPaginationPayload(configuration: configuration, reason: reason)
-                layoutPayload["host"] = Self.hostIdentifier(for: webView)
-                layoutPayload["pageCount"] = lastPageCount ?? -1
-                layoutPayload.merge(webViewLayoutScrollPayload(webView: webView), uniquingKeysWith: { lhs, _ in lhs })
-                webViewLayoutDebugLog("pagination.readback", layoutPayload)
-            }
-            #endif
         } else {
             lastPageCount = nil
         }
@@ -1915,7 +1699,6 @@ public class WebViewCoordinator: NSObject {
     internal var navigationScrollAxis: NavigationScrollAxis = .vertical
     internal var horizontalForwardSign: CGFloat = 1
 #if os(iOS)
-    internal var lastLayoutScrollPageSignature: String?
 #endif
     internal var lastEnvHandlerNames: OrderedSet<String>? = nil
     public let paginationController = WebViewPaginationController()
@@ -2217,12 +2000,10 @@ public class WebViewCoordinator: NSObject {
     
     @MainActor
     func setWebView(_ webView: WKWebView) {
-        navigator.logAttachmentEvent("coordinator.setWebView.beforeAssign", webView: webView)
         navigator.webView = webView
         (webView as? EnhancedWKWebView)?.onDidMoveToWindow = { [weak navigator, weak webView] isAttached in
             guard let navigator, let webView else { return }
             Task { @MainActor in
-                navigator.logAttachmentEvent("enhancedWKWebView.didMove attached=\(isAttached)", webView: webView)
                 navigator.handleWindowAttachmentChanged(isAttached: isAttached, webView: webView)
             }
         }
@@ -2275,7 +2056,7 @@ public class WebViewCoordinator: NSObject {
 
 #if os(iOS)
         if config.usesSampledPageTopColorForUnderPageBackground,
-           manabiCanUseSampledPageTopColorBackground() {
+           webViewCanUseSampledPageTopColorBackground() {
             sampledPageTopColorObservation = WebViewStringKeyPathObserver(
                 object: webView,
                 keyPath: "_sampl\("edPageTopC")olor"
@@ -2284,7 +2065,6 @@ public class WebViewCoordinator: NSObject {
                 Task { @MainActor [weak self, weak webView] in
                     guard let self, let webView else { return }
                     let sampledColor = webView.sampledPageTopColor
-                    webView.logManabiSampledPageTopDOMProbe(reason: "sampledPageTopColor.changed")
                     if #available(iOS 15.0, *) {
                         self.applySampledPageTopColorChange(
                             webView: webView,
@@ -2331,27 +2111,7 @@ public class WebViewCoordinator: NSObject {
         do {
             let paginationState = try paginationController.apply(config.paginationConfiguration, reason: reason)
             schedulePaginationStateUpdate(paginationState)
-        } catch {
-            webViewPaginationDebugLog(
-                "apply.error",
-                [
-                    "reason": reason,
-                    "error": error.localizedDescription,
-                    "host": paginationController.currentState().mountedHostIdentifier ?? "nil"
-                ]
-            )
-            #if os(iOS)
-            if let webView = navigator.webView {
-                var payload = webViewLayoutScrollPayload(
-                    webView: webView,
-                    configuration: paginationController.currentState().appliedConfiguration ?? config.paginationConfiguration
-                )
-                payload["reason"] = reason
-                payload["error"] = error.localizedDescription
-                webViewLayoutDebugLog("pagination.apply.error", payload)
-            }
-            #endif
-        }
+        } catch {}
     }
 
     @MainActor
@@ -2359,44 +2119,9 @@ public class WebViewCoordinator: NSObject {
         do {
             let paginationState = try paginationController.refreshReadback(reason: reason)
             schedulePaginationStateUpdate(paginationState)
-        } catch {
-            webViewPaginationDebugLog(
-                "readback.error",
-                [
-                    "reason": reason,
-                    "error": error.localizedDescription,
-                    "host": paginationController.currentState().mountedHostIdentifier ?? "nil"
-                ]
-            )
-            #if os(iOS)
-            if let webView = navigator.webView {
-                var payload = webViewLayoutScrollPayload(
-                    webView: webView,
-                    configuration: paginationController.currentState().appliedConfiguration ?? config.paginationConfiguration
-                )
-                payload["reason"] = reason
-                payload["error"] = error.localizedDescription
-                webViewLayoutDebugLog("pagination.readback.error", payload)
-            }
-            #endif
-        }
+        } catch {}
     }
 
-    @MainActor
-    private func logEpubNavigationTransition(_ stage: String, webView: WKWebView, requestURL: URL? = nil) {
-#if DEBUG
-        let currentURL = webView.url
-        let targetURL = requestURL ?? lastMainFrameNavigationRequestURL ?? navigator.activeReaderLoadRequestURL(for: currentURL)
-        let sourceURL = lastMainFrameNavigationSourceURL ?? self.webView.state.pageURL
-        let isRelevant = isEpubLikeURL(targetURL) || isEpubLikeURL(currentURL) || isEpubLikeURL(sourceURL)
-        guard isRelevant else { return }
-
-        let backList = webView.backForwardList.backList
-        let forwardList = webView.backForwardList.forwardList
-        let navigationType = lastMainFrameNavigationType.map(navigationTypeDescription) ?? "nil"
-#endif
-    }
-    
     @discardableResult func setLoading(
         _ isLoading: Bool,
         pageURL: URL? = nil,
@@ -2454,8 +2179,6 @@ public class WebViewCoordinator: NSObject {
     private func updateLoadingProgress(isLoading: Bool?, estimatedProgress: Double?, source: String) {
         loadingProgressUpdateGeneration &+= 1
         let generation = loadingProgressUpdateGeneration
-        let previousLatestIsLoading = latestIsLoading
-        let previousLatestEstimatedProgress = latestEstimatedProgress
         if let isLoading {
             latestIsLoading = isLoading
         }
@@ -2521,8 +2244,6 @@ public class WebViewCoordinator: NSObject {
         pendingProgressUpdateTask = nil
 
         guard webView.state.loadingProgress != progress else { return }
-        let previousProgress = webView.state.loadingProgress
-
         lastProgressUpdateTime = now
         lastEmittedProgress = progress
 
@@ -2583,7 +2304,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                   let wk = navigator.webView else { return }
             
             Task { @MainActor in
-                let newState = setLoading(
+                setLoading(
                     webView.state.isLoading,
                     pageURL: newURL,
                     canGoBack: wk.canGoBack,
@@ -2620,7 +2341,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let suppressForNativeLookup = navigator.nativeLookupHitTesting.consumeUnhandledTapSuppressionForNativeLookup()
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
             let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
-            let messageReason = (message.body as? [String: Any])?["reason"] as? String
             let isNavigationStateMessage = requestedHideNavigation != nil
             if isNavigationStateMessage {
                 suppressNextUntargetedTapAfterNavigationStateMessage = true
@@ -2666,34 +2386,10 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             }
             return
         } else if message.name == "swiftUIWebViewTextSelection" {
-            guard let body = message.body as? [String: String], let text = body["text"] as? String else {
+            guard let body = message.body as? [String: String], let text = body["text"] else {
                 return
             }
             textSelection.wrappedValue = text
-        } else if message.name == "readerDocState" {
-            guard let body = message.body as? [String: Any] else { return }
-            let href = body["href"] as? String ?? "nil"
-            let reason = body["reason"] as? String ?? "unknown"
-            let readyState = body["readyState"] as? String ?? "unknown"
-            let elapsedMs = body["elapsedMs"].map { String(describing: $0) } ?? "nil"
-            let hasReaderRenderReady = body["hasReaderRenderReady"] as? Bool
-            if reason == "domcontentloaded" {
-                ReaderLoadSignposts.event(
-                    .jsDOMContentLoaded,
-                    [
-                        "currentURL": webView.state.pageURL.absoluteString,
-                        "elapsedMs": elapsedMs,
-                        "href": href,
-                        "readyState": readyState
-                    ]
-                )
-            }
-            if let hasReaderRenderReady,
-               webView.state.hasReaderRenderReady != hasReaderRenderReady {
-                var newState = webView.state
-                newState.hasReaderRenderReady = hasReaderRenderReady
-                webView.state = newState
-            }
         } else if message.name == "readerLoadSignpost" {
             guard let body = message.body as? [String: Any],
                   let stage = body["stage"] as? String else { return }
@@ -2778,7 +2474,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #endif
 #if DEBUG
 #endif
-        logEpubNavigationTransition("finish", webView: webView)
         let finishNow = Date()
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
         ReaderLoadSignposts.event(
@@ -2792,22 +2487,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             ]
         )
         if isInternalReaderLoaderURL(activeRequestURL) {
-            let issueGap = navigator.readerLoadIssuedAt.map { finishNow.timeIntervalSince($0) } ?? 0
-            let provisionalGap: TimeInterval
-            if let issuedAt = navigator.readerLoadIssuedAt,
-               let provisionalStartedAt = navigator.readerLoadProvisionalStartedAt {
-                provisionalGap = provisionalStartedAt.timeIntervalSince(issuedAt)
-            } else {
-                provisionalGap = 0
-            }
-            let commitGap: TimeInterval
-            if let provisionalStartedAt = navigator.readerLoadProvisionalStartedAt,
-               let committedAt = navigator.readerLoadCommittedAt {
-                commitGap = committedAt.timeIntervalSince(provisionalStartedAt)
-            } else {
-                commitGap = 0
-            }
-            let finishGap = navigator.readerLoadCommittedAt.map { finishNow.timeIntervalSince($0) } ?? 0
             if let requestURL = activeRequestURL?.absoluteString {
                 clearReaderLoaderCorrelationTimestamps(for: requestURL)
             }
@@ -2843,7 +2522,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
 #if os(iOS)
         if #available(iOS 15.0, *) {
-            webView.logManabiSampledPageTopDOMProbe(reason: "navigation.finish")
             webView.applyUnderPageFallbackBackgroundColor(config: config, reason: "navigation.finish")
             webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.finish")
         }
@@ -2873,7 +2551,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
             if let url = response as? String, let newURL = URL(string: url), self.webView.state.pageURL != newURL {
-                let now = Date()
                 var newState = self.webView.state
                 newState.pageURL = newURL
                 self.webView.state = newState
@@ -2890,73 +2567,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
 
-        webView.evaluateJavaScript(
-            """
-            (function() {
-                const body = document.body;
-                const html = document.documentElement;
-                const bodyStyle = body ? window.getComputedStyle(body) : null;
-                const readerContent = document.getElementById("reader-content");
-                const readerContentRect = readerContent?.getBoundingClientRect?.() ?? null;
-                const readerContentStyle = readerContent ? window.getComputedStyle(readerContent) : null;
-                const readerStage = document.getElementById("reader-stage");
-                const foliateView = readerStage?.querySelector?.("foliate-view") ?? document.querySelector("foliate-view");
-                const foliateViewStyle = foliateView ? window.getComputedStyle(foliateView) : null;
-                const foliateViewRect = foliateView?.getBoundingClientRect?.() ?? null;
-                const bodyText = (body?.innerText || "").trim();
-                const bodyHTML = body?.innerHTML || "";
-                const readerContentText = (readerContent?.textContent || "").trim();
-                const hasReaderModeContent = !!readerContent;
-                const hasVisibleReaderModeContent = !!readerContent
-                    && !!readerContentRect
-                    && readerContentRect.width > 1
-                    && readerContentRect.height > 1
-                    && readerContentStyle?.visibility !== 'hidden'
-                    && readerContentStyle?.display !== 'none'
-                    && Number.parseFloat(readerContentStyle?.opacity || "1") > 0.01
-                    && readerContentText.length > 0;
-                const hasVisibleFoliateView = !!foliateView
-                    && !!foliateViewRect
-                    && foliateViewRect.width > 1
-                    && foliateViewRect.height > 1
-                    && foliateViewStyle?.visibility !== 'hidden'
-                    && foliateViewStyle?.display !== 'none'
-                    && Number.parseFloat(foliateViewStyle?.opacity || "1") > 0.01;
-                return {
-                    documentURL: document.URL.toString(),
-                    readyState: document.readyState,
-                    bodyChildElementCount: body?.childElementCount || 0,
-                    bodyTextLength: bodyText.length,
-                    bodyHTMLLength: bodyHTML.length,
-                    hasReaderRenderReady:
-                        ((((html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
-                        && hasReaderModeContent)
-                        || hasVisibleReaderModeContent)
-                        || hasVisibleFoliateView)
-                        && (html?.dataset?.manabiFontPending ?? null) !== '1'
-                        && bodyStyle?.visibility !== 'hidden'
-                        && bodyStyle?.display !== 'none'
-                        && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
-                    hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
-                    titleLength: (document.title || "").length
-                };
-            })();
-            """
-        ) { response, error in
-            guard error == nil, let summary = response as? [String: Any] else { return }
-            let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
-                partialResult[entry.key] = String(describing: entry.value)
-            }
-            let hasMeaningfulBodyContent = summary["hasMeaningfulBodyContent"] as? Bool ?? false
-            if let hasReaderRenderReady = summary["hasReaderRenderReady"] as? Bool,
-               self.webView.state.hasReaderRenderReady != hasReaderRenderReady {
-                var newState = self.webView.state
-                newState.hasReaderRenderReady = hasReaderRenderReady
-                self.webView.state = newState
-            }
-            _ = hasMeaningfulBodyContent
-            _ = mapped
-        }
     }
     
     @MainActor
@@ -2974,7 +2584,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             forwardList: webView.backForwardList.forwardList,
             error: error
         )
-        let now = Date()
         navigator.clearReaderLoadTrace()
 #if os(iOS)
         if awaitingSnapshotReload {
@@ -2994,7 +2603,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             scriptCaller?.removeAllMultiTargetFrames()
         }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
-        let now = Date()
         if let requestURL = navigator.activeReaderLoadRequestURL(for: webView.url)?.absoluteString,
            isInternalReaderLoaderURL(navigator.activeReaderLoadRequestURL(for: webView.url)) {
             clearReaderLoaderCorrelationTimestamps(for: requestURL)
@@ -3021,7 +2629,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
 #if DEBUG
 #endif
-        logEpubNavigationTransition("commit", webView: webView)
         let commitNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
         navigator.readerLoadCommittedAt = commitNow
@@ -3052,7 +2659,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #if os(iOS)
         webView.applyUnderPageFallbackBackgroundColor(config: config, reason: "navigation.commit")
         if #available(iOS 15.0, *) {
-            webView.logManabiSampledPageTopDOMProbe(reason: "navigation.commit")
             webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.commit")
         }
 #endif
@@ -3071,9 +2677,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #if os(iOS)
         reapplyHostObscuredInsetsForNavigation("navigationStart")
 #endif
-#if DEBUG
-#endif
-        logEpubNavigationTransition("start", webView: webView)
         let provisionalNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
         navigator.readerLoadProvisionalStartedAt = provisionalNow
@@ -3089,20 +2692,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "traceID": navigator.readerLoadTraceID ?? "nil"
             ]
         )
-        if let currentURL = webView.url?.absoluteString, isInternalReaderLoaderURL(URL(string: currentURL)) {
-            if let loaderStartTimestamp = navigator.readerLoadInternalLoaderStartedAt {
-                if let loaderResponseTimestamp = navigator.readerLoadInternalLoaderResponseAt {
-                }
-                if let loaderDataTimestamp = navigator.readerLoadInternalLoaderDataAt {
-                }
-                if let loaderFinishTimestamp = navigator.readerLoadInternalLoaderFinishedAt {
-                }
-            } else {
-            }
-        }
         if navigator.pendingRequest?.url == webView.url {
-            if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
-            }
             navigator.pendingRequest = nil
             navigator.cancelPendingRequestLoadTask()
         }
@@ -3124,21 +2714,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
-        let startedAt = Date()
         preferences.allowsContentJavaScript = config.javaScriptEnabled
-#if DEBUG
-#endif
         let requestURL = navigationAction.request.url
         if navigationAction.targetFrame?.isMainFrame == true {
             lastMainFrameNavigationSourceURL = webView.url ?? self.webView.state.pageURL
             lastMainFrameNavigationRequestURL = requestURL
             lastMainFrameNavigationMainDocumentURL = navigationAction.request.mainDocumentURL
             lastMainFrameNavigationType = navigationAction.navigationType
-            logEpubNavigationTransition("decide", webView: webView, requestURL: requestURL)
-        }
-        let isInternalLocalRequest = requestURL?.scheme?.lowercased() == "internal"
-            && requestURL?.host?.lowercased() == "local"
-        if let requestURL, isInternalLocalRequest {
         }
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
         let isInternalReaderLoaderNavigation = isMainDocumentNavigation && isInternalReaderLoaderURL(requestURL)
@@ -3151,15 +2733,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return (.cancel, preferences)
         }
         if let decision = await onNavigationAction?(navigationAction) {
-            if isInternalReaderLoaderNavigation {
-            }
             return (decision, preferences)
         }
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)
-                if isInternalReaderLoaderNavigation {
-                }
                 return (.cancel, preferences)
             }
         }
@@ -3206,16 +2784,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 )
             }
         }
-        if isInternalReaderLoaderNavigation {
-        }
         return (.allow, preferences)
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         if let response = navigationResponse.response as? HTTPURLResponse {
-#if DEBUG
-#endif
             if navigationResponse.isForMainFrame {
                 var newState = self.webView.state
                 newState.mainFrameHTTPStatusCode = response.statusCode
@@ -3261,8 +2835,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
-    @MainActor private var preProvisionalWarningGeneration: Int = 0
-    @MainActor private var preProvisionalWarningTask: Task<Void, Never>?
     @MainActor private var currentReaderLoadTrace: ReaderLoadTrace?
     public var attachFallbackURL: URL?
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
@@ -3298,10 +2870,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         return webView.window != nil && webView.superview != nil
     }
 
-    @MainActor
-    fileprivate func logAttachmentEvent(_ source: String, webView: WKWebView?) {
-    }
-
     @MainActor fileprivate var readerLoadTraceID: String? {
         currentReaderLoadTrace?.id.uuidString
     }
@@ -3319,7 +2887,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         set {
             currentReaderLoadTrace?.issuedAt = newValue
             syncActiveInternalReaderLoaderSignal()
-            schedulePreProvisionalWarningIfNeeded()
         }
     }
 
@@ -3328,9 +2895,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         set {
             currentReaderLoadTrace?.provisionalStartedAt = newValue
             syncActiveInternalReaderLoaderSignal()
-            if newValue != nil {
-                cancelPreProvisionalWarningTask()
-            }
         }
     }
 
@@ -3388,62 +2952,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    private func cancelPreProvisionalWarningTask() {
-        preProvisionalWarningGeneration &+= 1
-        preProvisionalWarningTask?.cancel()
-        preProvisionalWarningTask = nil
-    }
-
-    @MainActor
-    private func schedulePreProvisionalWarningIfNeeded() {
-        cancelPreProvisionalWarningTask()
-        guard let trace = currentReaderLoadTrace,
-              let requestURL = trace.requestURL,
-              isInternalReaderLoaderURL(requestURL),
-              trace.issuedAt != nil,
-              trace.provisionalStartedAt == nil else {
-            syncActiveInternalReaderLoaderSignal()
-            return
-        }
-        syncActiveInternalReaderLoaderSignal()
-        let generation = preProvisionalWarningGeneration
-        preProvisionalWarningTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(readerLoadPreProvisionalWarningThreshold * 1_000_000_000))
-            guard let self,
-                  !Task.isCancelled,
-                  self.preProvisionalWarningGeneration == generation,
-                  let currentTrace = self.currentReaderLoadTrace,
-                  currentTrace.id == trace.id,
-                  currentTrace.provisionalStartedAt == nil,
-                  let issuedAt = currentTrace.issuedAt else { return }
-            let now = Date()
-        }
-    }
-
-    @MainActor
-    fileprivate func logCompetingOperationIfNeeded(_ operation: String, metadata: [String: String] = [:]) {
-        guard let trace = currentReaderLoadTrace,
-              let requestURL = trace.requestURL,
-              isInternalReaderLoaderURL(requestURL),
-              let issuedAt = trace.issuedAt,
-              trace.provisionalStartedAt == nil else { return }
-        var payload = metadata
-        payload["currentURL"] = webView?.url?.absoluteString ?? "nil"
-        payload["elapsedSinceIssued"] = String(format: "%.3fs", Date().timeIntervalSince(issuedAt))
-        payload["estimatedProgress"] = webView.map { String(format: "%.3f", $0.estimatedProgress) } ?? "nil"
-        payload["hasSuperview"] = "\(webView?.superview != nil)"
-        payload["hasWindow"] = "\(webView?.window != nil)"
-        payload["isLoading"] = "\(webView?.isLoading ?? false)"
-        payload["requestURL"] = requestURL.absoluteString
-        payload["sceneState"] = readerLoadSceneStateString(for: webView)
-        payload["traceID"] = trace.id.uuidString
-    }
-
-    @MainActor
     @discardableResult
     private func beginReaderLoadTrace(for requestURL: URL?) -> Date {
         let now = Date()
-        cancelPreProvisionalWarningTask()
         currentReaderLoadTrace = ReaderLoadTrace(
             id: UUID(),
             requestURL: requestURL,
@@ -3464,12 +2975,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func beginReaderLoadTrace(for request: URLRequest) {
-        let traceRequestedAt = beginReaderLoadTrace(for: request.url)
+        beginReaderLoadTrace(for: request.url)
     }
 
     @MainActor
     fileprivate func clearReaderLoadTrace() {
-        cancelPreProvisionalWarningTask()
         currentReaderLoadTrace = nil
         syncActiveInternalReaderLoaderSignal()
     }
@@ -3540,20 +3050,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    private func logPreIssueLoadState(for request: URLRequest, reason: String) {
-        guard let webView else { return }
-        let estimatedProgress = webView.estimatedProgress
-        let isLoading = webView.isLoading
-        let hasPotentialStaleLoad = isLoading
-            || (estimatedProgress > readerLoadStaleLoadingStateThreshold && estimatedProgress < 0.999)
-        guard hasPotentialStaleLoad else { return }
-    }
-
-    @MainActor
     private func recoverFromStaleAboutBlankIfNeeded(
         for request: URLRequest,
-        on webView: WKWebView,
-        reason: String
+        on webView: WKWebView
     ) -> Bool {
         guard isInternalReaderLoaderURL(request.url),
               webView.url?.absoluteString == "about:blank"
@@ -3570,21 +3069,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
         }
 
 
-        logCompetingOperationIfNeeded(
-            "stopLoading",
-            metadata: [
-                "reason": reason,
-                "targetURL": request.url?.absoluteString ?? "nil"
-            ]
-        )
         webView.stopLoading()
         return false
     }
 
     @MainActor
-    private func markReaderLoadIssued(for request: URLRequest, reason: String) {
-        let now = Date()
-        readerLoadIssuedAt = now
+    private func markReaderLoadIssued() {
+        readerLoadIssuedAt = Date()
     }
 
     @MainActor
@@ -3600,12 +3091,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    private func cancelAttachFallbackLoadTask(reason: String? = nil) {
+    private func cancelAttachFallbackLoadTask() {
         attachFallbackLoadGeneration &+= 1
         attachFallbackLoadTask?.cancel()
         attachFallbackLoadTask = nil
-        if let reason {
-        }
     }
 
     @MainActor
@@ -3654,12 +3143,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 guard !Task.isCancelled else { return }
                 guard self.pendingRequestLoadGeneration == generation else { return }
-                if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                }
                 guard self.pendingRequest?.url == request.url else { return }
                 if webView.window != nil && webView.superview != nil {
-                    if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-                    }
                     if let url = request.url, url.isFileURL {
                         ReaderLoadSignposts.event(
                             .loadFileURL,
@@ -3678,19 +3163,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 }
                 currentAttempt += 1
             }
-            if self.shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            }
             self.pendingRequestLoadTask = nil
         }
     }
 
     @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
-        logPreIssueLoadState(for: request, reason: "issuePendingRequestLoad:\(diagnosticsReason)")
         if recoverFromStaleAboutBlankIfNeeded(
             for: request,
-            on: webView,
-            reason: "issuePendingRequestLoad:\(diagnosticsReason)"
+            on: webView
         ) {
             return
         }
@@ -3702,31 +3183,16 @@ public class WebViewNavigator: NSObject, ObservableObject {
             isLoading: webView.isLoading,
             restartIfSameURL: restartIfSameURL
         )
-        if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-        }
         switch disposition {
         case .deferUntilAttached:
-            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            }
             return
         case .skipAlreadyLoading:
-            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            }
             let nextGeneration = pendingRequestLoadGeneration
-            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            }
             if webView.url == request.url {
-                markReaderLoadIssued(for: request, reason: "reload:\(diagnosticsReason)")
-                logCompetingOperationIfNeeded(
-                    "reload",
-                    metadata: [
-                        "reason": diagnosticsReason,
-                        "targetURL": request.url?.absoluteString ?? "nil"
-                    ]
-                )
+                markReaderLoadIssued()
                 webView.reload()
             } else if let url = request.url, url.isFileURL {
-                markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
+                markReaderLoadIssued()
                 ReaderLoadSignposts.event(
                     .loadFileURL,
                     [
@@ -3736,7 +3202,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
                 webView.loadFileURL(url, allowingReadAccessTo: url)
             } else {
-                markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
+                markReaderLoadIssued()
                 webView.load(request)
             }
             self.schedulePendingRequestLoadRetry(
@@ -3748,7 +3214,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             return
         case .loadFileURL:
             guard let url = request.url else { return }
-            markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
+            markReaderLoadIssued()
             ReaderLoadSignposts.event(
                 .loadFileURL,
                 [
@@ -3759,7 +3225,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             )
             webView.loadFileURL(url, allowingReadAccessTo: url)
         case .loadRequest:
-            markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
+            markReaderLoadIssued()
             webView.load(request)
         }
         self.cancelPendingRequestLoadTask()
@@ -3767,16 +3233,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     func handleWindowAttachmentChanged(isAttached: Bool, webView: WKWebView) {
-        logAttachmentEvent("handleWindowAttachmentChanged", webView: webView)
-        let isReadyForRequest = webView.window != nil && webView.superview != nil
-        if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-        }
         guard isAttached, let request = pendingRequest else { return }
-        if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-        }
         guard webView.navigationDelegate != nil else {
-            if shouldLoadFallbackOnAttach || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1" {
-            }
             return
         }
         issuePendingRequestLoad(request, on: webView, restartIfSameURL: true, diagnosticsReason: "windowAttachmentChanged")
@@ -3785,8 +3243,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
-            let shouldLogDiagnostics = ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1"
-            || ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_IDENTITY_DIAGNOSTIC"] == "1"
             let nextHasAttachedWebView = webView != nil
             if hasAttachedWebView != nextHasAttachedWebView {
                 DispatchQueue.main.async { [weak self] in
@@ -3794,16 +3250,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     self.hasAttachedWebView = nextHasAttachedWebView
                 }
             }
-            if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-            }
             guard let webView else { return }
             if let request = pendingRequest {
-                cancelAttachFallbackLoadTask(reason: "pendingRequestFlushedOnAttach")
-                if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                }
+                cancelAttachFallbackLoadTask()
                 if webView.window == nil || webView.superview == nil {
-                    if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                    }
                     return
                 }
                 issuePendingRequestLoad(request, on: webView, restartIfSameURL: true, diagnosticsReason: "webViewDidSet.attached")
@@ -3811,9 +3261,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 return
             }
             if let pendingDataLoad {
-                cancelAttachFallbackLoadTask(reason: "pendingDataLoadFlushedOnAttach")
-                if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                }
+                cancelAttachFallbackLoadTask()
                 webView.load(
                     pendingDataLoad.data,
                     mimeType: pendingDataLoad.mimeType,
@@ -3825,9 +3273,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 return
             }
             if let pendingHTML {
-                cancelAttachFallbackLoadTask(reason: "pendingHTMLFlushedOnAttach")
-                if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
-                }
+                cancelAttachFallbackLoadTask()
                 ReaderLoadSignposts.event(
                     .loadHTMLString,
                     [
@@ -3858,27 +3304,19 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedRequest = request
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
-        cancelAttachFallbackLoadTask(reason: "explicitRequestLoad")
+        cancelAttachFallbackLoadTask()
         beginReaderLoadTrace(for: request)
         if let webView = webView {
-            logPreIssueLoadState(for: request, reason: "navigator.load")
             if webView.window == nil || webView.superview == nil {
                 pendingRequest = request
                 pendingRequestSetAt = Date()
                 return
             }
-            if recoverFromStaleAboutBlankIfNeeded(for: request, on: webView, reason: "navigator.load") {
+            if recoverFromStaleAboutBlankIfNeeded(for: request, on: webView) {
                 return
             }
             if let url = request.url, url.isFileURL {
-                markReaderLoadIssued(for: request, reason: "navigator.loadFileURL")
-                logCompetingOperationIfNeeded(
-                    "loadFileURL",
-                    metadata: [
-                        "reason": "navigator.loadFileURL",
-                        "targetURL": url.absoluteString
-                    ]
-                )
+                markReaderLoadIssued()
                 ReaderLoadSignposts.event(
                     .loadFileURL,
                     [
@@ -3889,7 +3327,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
                 webView.loadFileURL(url, allowingReadAccessTo: url)
             } else {
-                markReaderLoadIssued(for: request, reason: "navigator.loadRequest")
+                markReaderLoadIssued()
                 webView.load(request)
             }
         } else {
@@ -3903,19 +3341,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedHTML = nil
-        cancelAttachFallbackLoadTask(reason: "explicitDataLoad")
+        cancelAttachFallbackLoadTask()
         let traceRequestedAt = beginReaderLoadTrace(for: baseURL)
         readerLoadIssuedAt = traceRequestedAt
         currentReaderLoadTrace?.directDataIssuedAt = traceRequestedAt
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
-        logCompetingOperationIfNeeded(
-            "loadData",
-            metadata: [
-                "baseURL": baseURL.absoluteString,
-                "bytes": "\(data.count)"
-            ]
-        )
         guard let webView else {
             pendingDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
             pendingDataLoadSetAt = Date()
@@ -3936,18 +3367,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedDataLoad = nil
-        cancelAttachFallbackLoadTask(reason: "explicitHTMLLoad")
+        cancelAttachFallbackLoadTask()
         let traceRequestedAt = beginReaderLoadTrace(for: baseURL)
         readerLoadIssuedAt = traceRequestedAt
         readerLoadProvisionalStartedAt = nil
         readerLoadCommittedAt = nil
-        logCompetingOperationIfNeeded(
-            "loadHTML",
-            metadata: [
-                "baseURL": baseURL?.absoluteString ?? "nil",
-                "bytes": "\(html.utf8.count)"
-            ]
-        )
         guard let webView else {
             pendingHTML = (html: html, baseURL: baseURL)
             pendingHTMLSetAt = Date()
@@ -3966,7 +3390,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func reload() {
-        logCompetingOperationIfNeeded("reload", metadata: [:])
         webView?.reload()
     }
 
@@ -3994,7 +3417,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     func prepareForReloadAfterReattach() {
-        logCompetingOperationIfNeeded("prepareForReloadAfterReattach", metadata: [:])
         if let lastLoadedHTML {
             pendingHTML = lastLoadedHTML
         } else if let lastLoadedDataLoad {
@@ -4007,7 +3429,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func reloadWithoutContentRules() {
         bypassContentRulesForNextNavigation = true
-        logCompetingOperationIfNeeded("reloadWithoutContentRules", metadata: [:])
         webView?.reload()
     }
 
@@ -4569,563 +3990,6 @@ fileprivate struct PageIconChangeUserScript {
 }
 
 @MainActor
-struct ReaderDocStateUserScript {
-    let userScript: WebViewUserScript
-
-    init() {
-        let contents = """
-(function () {
-    try {
-        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.readerDocState;
-        if (!handler || typeof handler.postMessage !== "function") { return; }
-        const bootstrapNow = (typeof performance !== "undefined" && typeof performance.now === "function")
-            ? performance.now.bind(performance)
-            : () => Date.now();
-        const bootstrapStartedAt = bootstrapNow();
-        const isEbookDocument = window.location.href.startsWith("ebook://");
-        let stateMachine = { stopped: false, attempts: 0 };
-        let rafHandle = { value: 0 };
-        let timeoutHandle = { value: 0 };
-        let observer = isEbookDocument ? null : new MutationObserver(() => {
-            postState("mutation");
-        });
-        function rounded(value) {
-            if (typeof value !== "number" || !Number.isFinite(value)) { return null; }
-            return Math.round(value * 1000) / 1000;
-        }
-        function describeNode(node) {
-            if (!node || typeof node.getBoundingClientRect !== "function") { return null; }
-            const rect = node.getBoundingClientRect();
-            const style = window.getComputedStyle(node);
-            return {
-                tag: node.tagName || null,
-                id: node.id || null,
-                className: typeof node.className === "string" ? node.className : null,
-                textLength: (node.textContent || "").trim().length,
-                display: style.display,
-                visibility: style.visibility,
-                opacity: style.opacity,
-                color: style.color,
-                backgroundColor: style.backgroundColor,
-                rect: {
-                    x: rounded(rect.x),
-                    y: rounded(rect.y),
-                    width: rounded(rect.width),
-                    height: rounded(rect.height)
-                }
-            };
-        }
-        function currentState(reason) {
-            const html = document.documentElement;
-            const body = document.body;
-            const readerContent = document.getElementById("reader-content");
-            const readerStage = document.getElementById("reader-stage");
-            const foliateView = readerStage?.querySelector?.("foliate-view") ?? document.querySelector("foliate-view");
-            const bodyStyle = body ? window.getComputedStyle(body) : null;
-            const htmlStyle = html ? window.getComputedStyle(html) : null;
-            const readerContentStyle = readerContent ? window.getComputedStyle(readerContent) : null;
-            const foliateViewStyle = foliateView ? window.getComputedStyle(foliateView) : null;
-            const bodyRect = body?.getBoundingClientRect?.() ?? null;
-            const readerContentRect = readerContent?.getBoundingClientRect?.() ?? null;
-            const readerStageRect = readerStage?.getBoundingClientRect?.() ?? null;
-            const foliateViewRect = foliateView?.getBoundingClientRect?.() ?? null;
-            const includeDetailedDiagnostics = window.__manabiReaderDocStateDetailed === true;
-            const centerX = includeDetailedDiagnostics ? Math.max(0, Math.round(window.innerWidth / 2)) : 0;
-            const centerY = includeDetailedDiagnostics ? Math.max(0, Math.round(window.innerHeight / 2)) : 0;
-            const elementAtCenter = includeDetailedDiagnostics ? document.elementFromPoint(centerX, centerY) : null;
-            const shouldMeasureReaderContentText = includeDetailedDiagnostics || !foliateView;
-            const readerContentTextLength = shouldMeasureReaderContentText && readerContent
-                ? (readerContent.textContent || "").trim().length
-                : null;
-            const hasReaderModeContent = !!readerContent;
-            const hasVisibleReaderModeContent = !!readerContent
-                && !!readerContentRect
-                && readerContentRect.width > 1
-                && readerContentRect.height > 1
-                && readerContentStyle?.visibility !== 'hidden'
-                && readerContentStyle?.display !== 'none'
-                && Number.parseFloat(readerContentStyle?.opacity || "1") > 0.01
-                && (readerContentTextLength === null || readerContentTextLength > 0);
-            const hasVisibleFoliateView = !!foliateView
-                && !!foliateViewRect
-                && foliateViewRect.width > 1
-                && foliateViewRect.height > 1
-                && foliateViewStyle?.visibility !== 'hidden'
-                && foliateViewStyle?.display !== 'none'
-                && Number.parseFloat(foliateViewStyle?.opacity || "1") > 0.01;
-            return {
-                href: window.location.href,
-                elapsedMs: rounded(bootstrapNow() - bootstrapStartedAt),
-                readyState: document.readyState,
-                hasBody: !!body,
-                hasReaderContent: hasReaderModeContent || hasVisibleFoliateView,
-                hasReadabilityGlobal: typeof window.manabi_readability === 'function',
-                manabiFontPending: html?.dataset?.manabiFontPending ?? null,
-                manabiFontReady: html?.dataset?.manabiFontReady ?? null,
-                bodyLoading: body?.classList?.contains?.("loading") ?? false,
-                hasCustomFontStyle: !!document.getElementById("manabi-custom-fonts-inline"),
-                hasCustomFontGate: !!document.getElementById("manabi-custom-font-gate"),
-                fontsStatus: document.fonts?.status ?? null,
-                bodyClassName: body?.className ?? null,
-                bodyDisplay: bodyStyle?.display ?? null,
-                bodyVisibility: bodyStyle?.visibility ?? null,
-                bodyOpacity: bodyStyle?.opacity ?? null,
-                bodyRect: bodyRect ? {
-                    width: rounded(bodyRect.width),
-                    height: rounded(bodyRect.height)
-                } : null,
-                htmlDisplay: htmlStyle?.display ?? null,
-                htmlVisibility: htmlStyle?.visibility ?? null,
-                htmlOpacity: htmlStyle?.opacity ?? null,
-                readerContentRect: readerContentRect ? {
-                    x: rounded(readerContentRect.x),
-                    y: rounded(readerContentRect.y),
-                    width: rounded(readerContentRect.width),
-                    height: rounded(readerContentRect.height)
-                } : null,
-                readerStageRect: readerStageRect ? {
-                    x: rounded(readerStageRect.x),
-                    y: rounded(readerStageRect.y),
-                    width: rounded(readerStageRect.width),
-                    height: rounded(readerStageRect.height)
-                } : null,
-                foliateViewRect: foliateViewRect ? {
-                    x: rounded(foliateViewRect.x),
-                    y: rounded(foliateViewRect.y),
-                    width: rounded(foliateViewRect.width),
-                    height: rounded(foliateViewRect.height)
-                } : null,
-                hasVisibleFoliateView,
-                readerContentChildCount: readerContent?.childElementCount ?? null,
-                readerContentTextLength,
-                visibleMarkAsReadButtonCount: includeDetailedDiagnostics
-                    ? Array.from(document.querySelectorAll(".mnb-tracking-button")).filter((button) => {
-                        const style = window.getComputedStyle(button);
-                        return style.display !== "none"
-                            && style.visibility !== "hidden"
-                            && Number.parseFloat(style.opacity || "1") > 0.01;
-                    }).length
-                    : null,
-                hasReaderRenderReady:
-                    (((html?.dataset?.mnbReaderRenderReady === '1'
-                    || body?.dataset?.mnbReaderRenderReady === '1')
-                    && (hasReaderModeContent || hasVisibleFoliateView))
-                    || hasVisibleReaderModeContent)
-                    && (html?.dataset?.manabiFontPending ?? null) !== '1'
-                    && bodyStyle?.visibility !== 'hidden'
-                    && bodyStyle?.display !== 'none'
-                    && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
-                viewport: {
-                    innerWidth: window.innerWidth,
-                    innerHeight: window.innerHeight,
-                    scrollX: rounded(window.scrollX),
-                    scrollY: rounded(window.scrollY)
-                },
-                elementAtCenter: describeNode(elementAtCenter),
-                centerClosestReaderContent: describeNode(elementAtCenter?.closest?.("#reader-content") ?? null),
-                reason,
-                attempts: stateMachine.attempts
-            };
-        }
-        function stopPolling() {
-            if (stateMachine.stopped) { return; }
-            stateMachine.stopped = true;
-            try { observer?.disconnect?.(); } catch (_error) {}
-            if (rafHandle.value) { cancelAnimationFrame(rafHandle.value); }
-            if (timeoutHandle.value) { clearTimeout(timeoutHandle.value); }
-        }
-        function postState(reason) {
-            const state = currentState(reason);
-            handler.postMessage(state);
-            if (state.hasReaderRenderReady) {
-                stopPolling();
-                return true;
-            }
-            return false;
-        }
-        window.__manabiPostReaderDocStateEvent = function(reason) {
-            return postState(reason || "event");
-        };
-        if (isEbookDocument) {
-            return;
-        }
-        let attempts = 0;
-        function scheduleNextTick() {
-            if (stateMachine.stopped || stateMachine.attempts >= 80) { return; }
-            stateMachine.attempts += 1;
-            rafHandle.value = requestAnimationFrame(() => {
-                timeoutHandle.value = setTimeout(() => {
-                    if (!postState("poll")) {
-                        scheduleNextTick();
-                    }
-                }, 25);
-            });
-        }
-        if (!isEbookDocument && document.documentElement && observer) {
-            observer.observe(document.documentElement, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ["data-mnb-reader-render-ready", "class", "style"]
-            });
-        }
-        document.addEventListener("readystatechange", () => { postState("readystatechange"); });
-        document.addEventListener("DOMContentLoaded", () => { postState("domcontentloaded"); });
-        window.addEventListener("load", () => { postState("load"); });
-        if (!postState("initial")) {
-            if (!isEbookDocument) {
-                scheduleNextTick();
-            }
-        }
-    } catch (e) { /* noop */ }
-})();
-"""
-        userScript = WebViewUserScript(
-            source: contents,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true,
-            in: .page
-        )
-    }
-}
-
-@MainActor
-fileprivate struct ReaderBootstrapPingUserScript {
-    let userScript: WebViewUserScript
-
-    init() {
-        let contents = """
-(function () {
-    try {
-        const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.readerBootstrapPing;
-        if (!handler || typeof handler.postMessage !== "function") { return; }
-        handler.postMessage({
-            href: window.location.href,
-            readyState: document.readyState
-        });
-    } catch (e) { /* noop */ }
-})();
-"""
-        userScript = WebViewUserScript(
-            source: contents,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true,
-            in: .page
-        )
-    }
-}
-
-@MainActor
-fileprivate struct UnhandledTapUserScript {
-    let userScript: WebViewUserScript
-    
-    init() {
-        let contents = """
-(function() {
-    const handlerName = 'swiftUIWebViewUnhandledTap';
-    if (!window.webkit?.messageHandlers?.[handlerName]) {
-        return;
-    }
-
-    const interactiveSelectors = '#nav-bar,#progress-wrapper,.nav-relocate-button,.nav-section-progress,a[href],button,input,textarea,select,summary,label,[role="button"],[role="link"],[role="menuitem"],[role="tab"],[contenteditable="true"]';
-    const MOVE_THRESHOLD = 8;
-    const LONG_PRESS_THRESHOLD_MS = 450;
-    const activePointers = new Map();
-
-    function logPopover(stage, payload = {}) {
-        void stage;
-        void payload;
-    }
-
-    function isEbookPage() {
-        try {
-            if (window.manabi_isEbook === true) {
-                return true;
-            }
-            if (window.location?.origin?.startsWith('ebook://')) {
-                return true;
-            }
-            return window.top?.location?.origin?.startsWith('ebook://') === true;
-        } catch (_error) {
-            return window.manabi_isEbook === true
-                || window.location?.origin?.startsWith('ebook://') === true;
-        }
-    }
-
-    if (isEbookPage()) {
-        return;
-    }
-
-    function selectionText() {
-        const sel = window.getSelection();
-        if (!sel || sel.rangeCount === 0) {
-            return '';
-        }
-        return sel.toString() || '';
-    }
-
-    function elementLooksInteractive(element) {
-        if (!element || !(element instanceof Element)) {
-            return false;
-        }
-        if (element.matches(interactiveSelectors) || element.closest(interactiveSelectors)) {
-            return true;
-        }
-        if (element.hasAttribute('onclick')) {
-            return true;
-        }
-        if (element.tabIndex >= 0 && element.getAttribute('tabindex') !== '-1') {
-            return true;
-        }
-        return false;
-    }
-
-    function pathContainsInteractive(path) {
-        if (!Array.isArray(path)) return false;
-        return path.some(node => elementLooksInteractive(node));
-    }
-
-    function registerPointer(event) {
-        const path = event.composedPath ? event.composedPath() : [];
-        if (pathContainsInteractive(path)) {
-            logPopover('pointerDown.skipInteractive', {
-                pointerId: event.pointerId,
-                clientX: event.clientX ?? null,
-                clientY: event.clientY ?? null,
-                targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-                targetClosestSegment: event.target?.closest?.('m-m')?.getAttribute?.('id') ?? null,
-            });
-            return;
-        }
-        activePointers.set(event.pointerId, {
-            startX: event.clientX ?? 0,
-            startY: event.clientY ?? 0,
-            moved: false,
-            suppressUnhandledTap: false,
-            startTime: performance.now(),
-            startSelection: selectionText(),
-        });
-        logPopover('pointerDown.track', {
-            pointerId: event.pointerId,
-            clientX: event.clientX ?? null,
-            clientY: event.clientY ?? null,
-            targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-            activePointerCount: activePointers.size,
-        });
-    }
-
-    window.__manabiSuppressCurrentUnhandledTapHideNavigation = function(clientX, clientY) {
-        const x = Number(clientX);
-        const y = Number(clientY);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) {
-            logPopover('suppressCurrent.invalidPoint', {
-                clientX,
-                clientY,
-                activePointerCount: activePointers.size,
-            });
-            return false;
-        }
-        let bestDistance = null;
-        for (const entry of activePointers.values()) {
-            const distance = Math.hypot(x - entry.startX, y - entry.startY);
-            bestDistance = bestDistance === null ? distance : Math.min(bestDistance, distance);
-            if (distance <= MOVE_THRESHOLD) {
-                entry.suppressUnhandledTap = true;
-                logPopover('suppressCurrent.marked', {
-                    clientX: x,
-                    clientY: y,
-                    pointerStartX: entry.startX,
-                    pointerStartY: entry.startY,
-                    distance,
-                    activePointerCount: activePointers.size,
-                });
-                return true;
-            }
-        }
-        logPopover('suppressCurrent.noMatchingPointer', {
-            clientX: x,
-            clientY: y,
-            bestDistance,
-            activePointerCount: activePointers.size,
-        });
-        return false;
-    };
-
-    window.__manabiSuppressActiveUnhandledTapHideNavigation = function(reason, payload = {}) {
-        let markedCount = 0;
-        for (const entry of activePointers.values()) {
-            entry.suppressUnhandledTap = true;
-            markedCount += 1;
-        }
-        logPopover('suppressActive.marked', {
-            reason: reason ?? null,
-            markedCount,
-            activePointerCount: activePointers.size,
-            ...payload,
-        });
-        return markedCount > 0;
-    };
-
-    function handlePointerDown(event) {
-        if (event.defaultPrevented || event.button > 0) {
-            return;
-        }
-        registerPointer(event);
-    }
-
-    function handlePointerMove(event) {
-        const entry = activePointers.get(event.pointerId);
-        if (!entry) return;
-        const dx = (event.clientX ?? 0) - entry.startX;
-        const dy = (event.clientY ?? 0) - entry.startY;
-        if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
-            entry.moved = true;
-        }
-    }
-
-    function handlePointerUp(event) {
-        const entry = activePointers.get(event.pointerId);
-        activePointers.delete(event.pointerId);
-        if (!entry || event.defaultPrevented) {
-            logPopover('pointerUp.skipMissingOrPrevented', {
-                pointerId: event.pointerId,
-                hasEntry: !!entry,
-                defaultPrevented: event.defaultPrevented === true,
-                clientX: event.clientX ?? null,
-                clientY: event.clientY ?? null,
-            });
-            return;
-        }
-        const duration = performance.now() - entry.startTime;
-        const finalDX = (event.clientX ?? entry.startX) - entry.startX;
-        const finalDY = (event.clientY ?? entry.startY) - entry.startY;
-        const finalDistance = Math.hypot(finalDX, finalDY);
-        if (finalDistance > MOVE_THRESHOLD) {
-            entry.moved = true;
-        }
-        const newSelection = selectionText();
-        const selectionChanged = newSelection.length > 0 && newSelection !== entry.startSelection;
-        if (entry.moved || duration > LONG_PRESS_THRESHOLD_MS || selectionChanged) {
-            logPopover('pointerUp.skipGesture', {
-                pointerId: event.pointerId,
-                moved: entry.moved === true,
-                finalDistance,
-                duration,
-                longPressThreshold: LONG_PRESS_THRESHOLD_MS,
-                selectionChanged,
-                suppressUnhandledTap: entry.suppressUnhandledTap === true,
-            });
-            return;
-        }
-        if (entry.suppressUnhandledTap === true) {
-            logPopover('pointerUp.suppressedByLookupBlankDismiss', {
-                pointerId: event.pointerId,
-                duration,
-                clientX: event.clientX ?? null,
-                clientY: event.clientY ?? null,
-                targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-                targetClosestSegment: event.target?.closest?.('m-m')?.getAttribute?.('id') ?? null,
-            });
-            return;
-        }
-        const targetClosestSegment = event.target?.closest?.('m-m')?.getAttribute?.('id') ?? null;
-        if (targetClosestSegment) {
-            logPopover('pointerUp.skipSegmentTarget', {
-                pointerId: event.pointerId,
-                duration,
-                clientX: event.clientX ?? null,
-                clientY: event.clientY ?? null,
-                targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-                targetClosestSegment,
-            });
-            return;
-        }
-        logPopover('pointerUp.postUnhandledTap', {
-            pointerId: event.pointerId,
-            duration,
-            clientX: event.clientX ?? null,
-            clientY: event.clientY ?? null,
-            targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-            targetClosestSegment,
-        });
-        window.webkit.messageHandlers[handlerName].postMessage({
-            frame: window === window.top ? 'top' : 'child',
-            targetTag: event.target?.tagName?.toLowerCase?.() ?? null,
-            targetClosestSegment,
-            clientX: event.clientX ?? null,
-            clientY: event.clientY ?? null,
-            reason: 'pointerUpBlankTap'
-        });
-    }
-
-    function handlePointerCancel(event) {
-        activePointers.delete(event.pointerId);
-    }
-
-    let lastScrollPosition = { x: window.scrollX || 0, y: window.scrollY || 0 };
-    let accumulatedScroll = { value: 0 };
-    let lastPostedScrollHidden = { value: null };
-    const SCROLL_THRESHOLD = 24;
-    function postHideNavigationForScroll(hidden, reason) {
-        if (lastPostedScrollHidden.value === hidden) {
-            return;
-        }
-        lastPostedScrollHidden.value = hidden;
-        try {
-            window.webkit.messageHandlers[handlerName].postMessage({
-                frame: window === window.top ? 'top' : 'child',
-                targetTag: null,
-                targetClosestSegment: null,
-                clientX: null,
-                clientY: null,
-                hideNavigationDueToScroll: hidden,
-                reason
-            });
-        } catch (_error) {}
-    }
-
-    function handleDocumentScroll() {
-        const currentX = window.scrollX || 0;
-        const currentY = window.scrollY || 0;
-        const dx = currentX - lastScrollPosition.x;
-        const dy = currentY - lastScrollPosition.y;
-        lastScrollPosition.x = currentX;
-        lastScrollPosition.y = currentY;
-        if (Math.abs(dx) > Math.abs(dy)) {
-            return;
-        }
-
-        const delta = Math.abs(dy) >= Math.abs(dx) ? dy : dx;
-        if (Math.abs(delta) < 0.5) {
-            return;
-        }
-        accumulatedScroll.value += delta;
-        if (accumulatedScroll.value > SCROLL_THRESHOLD) {
-            postHideNavigationForScroll(true, 'documentScrollDown');
-            accumulatedScroll.value = 0;
-        } else if (accumulatedScroll.value < -SCROLL_THRESHOLD) {
-            postHideNavigationForScroll(false, 'documentScrollUp');
-            accumulatedScroll.value = 0;
-        }
-    }
-
-    window.addEventListener('pointerdown', handlePointerDown, { capture: true, passive: true });
-    window.addEventListener('pointermove', handlePointerMove, { capture: true, passive: true });
-    window.addEventListener('pointerup', handlePointerUp, { capture: true, passive: true });
-    window.addEventListener('pointercancel', handlePointerCancel, { capture: true, passive: true });
-    window.addEventListener('scroll', handleDocumentScroll, { capture: true, passive: true });
-})();
-"""
-        userScript = WebViewUserScript(
-            source: contents,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false,
-            in: .page
-        )
-    }
-}
-
-@MainActor
 fileprivate struct TextSelectionUserScript {
     let userScript: WebViewUserScript
     
@@ -5380,11 +4244,6 @@ public enum WebViewSnapshotCache {
 }
 #endif
 
-fileprivate let kLeftArrowKeyCode:  UInt16  = 123
-fileprivate let kRightArrowKeyCode: UInt16  = 124
-fileprivate let kDownArrowKeyCode:  UInt16  = 125
-fileprivate let kUpArrowKeyCode:    UInt16  = 126
-
 enum PendingRequestLoadDisposition: Equatable {
     case deferUntilAttached
     case loadRequest
@@ -5463,18 +4322,10 @@ public class EnhancedWKWebView: WKWebView {
 #endif
     
 #if os(macOS)
+    var configuredIsOpaque = true
+
     public override var isOpaque: Bool {
-        return true
-    }
-    
-    public override func keyDown(with event: NSEvent) {
-        //                    print(">> key \(event.keyCode)")
-        switch event.keyCode {
-        case kLeftArrowKeyCode, kRightArrowKeyCode, kDownArrowKeyCode, kUpArrowKeyCode:
-            return
-        default:
-            super.keyDown(with: event)
-        }
+        configuredIsOpaque
     }
 #elseif os(iOS)
     override open func buildMenu(with builder: UIMenuBuilder) {
@@ -5485,14 +4336,6 @@ public class EnhancedWKWebView: WKWebView {
 }
 
 #if os(iOS)
-private let verboseNativeLookupPositionLoggingEnabled: Bool = {
-#if DEBUG
-    ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1"
-#else
-    false
-#endif
-}()
-
 private final class NativeLookupHitTestOverlayView: UIView {
     private enum PressedSegmentStyle {
         static let pressedStrokeAlpha: CGFloat = 0.8
@@ -5607,21 +4450,12 @@ private final class NativeLookupHitTestOverlayView: UIView {
 
 private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer {
     private static let segmentTapMovementTolerance: CGFloat = 10
-    private static let segmentLongPressDriftTolerance: CGFloat = 24
     private static let segmentSwipeMovementTolerance: CGFloat = 24
     private static let segmentTapMaximumDuration: TimeInterval = 0.75
     private static let segmentTapPressedFallbackDuration: TimeInterval = 1.0
-    private static let touchDeliveryLoggingEnabled: Bool = {
-#if DEBUG
-        ProcessInfo.processInfo.environment["MANABI_NATIVE_LOOKUP_TOUCH_LOGS"] == "1"
-#else
-        false
-#endif
-    }()
 
     weak var store: WebViewNativeLookupHitTestStore?
     weak var coordinateView: NativeLookupHitTestOverlayView?
-    weak var clientCoordinateView: UIView?
     var capturesTouchesInHostView = true {
         didSet {
             cancelsTouchesInView = capturesTouchesInHostView
@@ -5635,8 +4469,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchStartIsBlankLookupDismissal = false
     private var touchStartPressedVisualCleared = false
     private var touchStartIsInsideTarget = false
-    private var touchHasMoved = false
-    private var touchLatestPoint: CGPoint?
     private var touchForwardedSegmentSwipe = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
     private var suppressedCompetingTapRecognizers: [(recognizer: UIGestureRecognizer, wasEnabled: Bool)] = []
@@ -5655,23 +4487,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
               event.allTouches?.count == 1,
               let touch = touches.first,
               let coordinateView else {
-            logTouchDeliveryVerdict(
-                stage: "touchesBegan.invalidTouchSet",
-                verdict: "passThrough.allowed",
-                reason: "invalidTouchSet",
-                extra: [
-                    "touchCount": touches.count,
-                    "allTouchCount": event.allTouches?.count as Any,
-                    "segmentTargetTouchesReachWebKit": true,
-                ]
-            )
             state = .failed
             return
         }
         let point = touch.location(in: coordinateView)
         let hitTestView = coordinateView
         let hitPoint = point
-        let rawClientPoint = clientCoordinateView.map { touch.location(in: $0) }
         let windowPoint = touch.location(in: nil)
         let hitTestViewWindowOrigin = hitTestView.convert(CGPoint.zero, to: nil)
         guard let target = store?.hitTarget(
@@ -5686,107 +4507,25 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 touchStartTime = event.timestamp
                 touchStartTarget = nil
                 touchStartIsBlankLookupDismissal = true
-                touchHasMoved = false
-                touchLatestPoint = point
-                logTouchDeliveryVerdict(
-                    stage: "touchesBegan.activeLookupBlankTapCandidate",
-                    verdict: "popover.dismissPendingTouchEnd",
-                    reason: "activeLookupBlankSpace",
-                    point: point,
-                    coordinateView: coordinateView,
-                    extra: [
-                        "hitPoint": Self.debugPointString(hitPoint),
-                        "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                        "targetCount": store?.targetCount as Any,
-                        "segmentTargetTouchesReachWebKit": "pendingTapDecision",
-                    ]
-                )
                 return
             }
-            logTouchDeliveryVerdict(
-                stage: "touchesBegan.noSegmentTarget",
-                verdict: "passThrough.allowed",
-                reason: "noSegmentTarget",
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                    "hitBasis": "overlay",
-                    "nearest": store?.diagnostics(
-                        at: hitPoint,
-                        limit: 3,
-                        in: hitTestView.bounds.size,
-                        coordinateViewWindowOrigin: hitTestViewWindowOrigin
-                    ) as Any,
-                    "nativeLookupEnabled": store?.isEnabled as Any,
-                    "targetCount": store?.targetCount as Any,
-                    "segmentTargetTouchesReachWebKit": true,
-                ]
-            )
             state = .failed
             return
         }
         if store?.shouldPassThroughForWebTextSelection == true {
-            logTouchDeliveryVerdict(
-                stage: "touchesBegan.textSelectionActivePassThrough",
-                verdict: "passThrough.allowed",
-                reason: "webTextSelectionActive",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                    "hitBasis": "overlay",
-                    "nativeLookupEnabled": store?.isEnabled as Any,
-                    "targetCount": store?.targetCount as Any,
-                    "segmentTargetTouchesReachWebKit": true,
-                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-            )
             state = .failed
             return
         }
         store?.beginNativeTouchStream(on: target)
-        logTouchDeliveryVerdict(
-            stage: "touchesBegan.nativeCandidate",
-            verdict: "pending.nativeRecognizerHoldingWebKitTouches",
-            reason: "segmentTarget",
-            target: target,
-            point: point,
-            coordinateView: coordinateView,
-            extra: [
-                "hitPoint": Self.debugPointString(hitPoint),
-                "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                "hitBasis": "overlay",
-                "nativeLookupEnabled": store?.isEnabled as Any,
-                "targetCount": store?.targetCount as Any,
-                "nearest": store?.diagnostics(
-                    at: hitPoint,
-                    limit: 3,
-                    in: hitTestView.bounds.size,
-                    coordinateViewWindowOrigin: hitTestViewWindowOrigin
-                ) as Any,
-                "segmentTargetTouchesReachWebKit": "pendingTapDecision",
-            ]
-        )
-        suppressCompetingWebKitTapRecognizers(
-            reason: "segmentTarget",
-            target: target,
-            point: point,
-            coordinateView: coordinateView
-        )
+        suppressCompetingWebKitTapRecognizers()
         touchStartPoint = point
         touchStartWindowPoint = windowPoint
         touchStartTime = event.timestamp
         touchStartTarget = target
         touchStartIsInsideTarget = true
-        touchHasMoved = false
-        touchLatestPoint = point
         scheduleLongPressFailure(target: target)
         let activeLookupElementID = store?.activeLookupElementID?()
         let activeHighlightElementID = store?.activeElementID
-        let hadActiveLookup = activeLookupElementID != nil
         touchStartWasActiveTarget =
             activeLookupElementID == target.elementID
             || activeHighlightElementID == target.elementID
@@ -5797,95 +4536,14 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             touchStartOverlay = nil
             coordinateView.clearPressedTarget()
         }
-        if hadActiveLookup {
-            logTouchDeliveryVerdict(
-                stage: "touchesBegan.activeLookupPendingTapDecision",
-                verdict: touchStartWasActiveTarget
-                    ? "popover.dismissPendingTouchEnd"
-                    : "popover.updatePendingTouchEnd",
-                reason: touchStartWasActiveTarget ? "sameActiveTargetCandidate" : "activeLookupMoveCandidate",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "activeLookupElementID": activeLookupElementID as Any,
-                    "activeHighlightElementID": activeHighlightElementID as Any,
-                ]
-            )
-            if touchStartWasActiveTarget {
-                logTouchDeliveryVerdict(
-                    stage: "touchesBegan.activeLookupDismissPending",
-                    verdict: "popover.dismissPendingTouchEnd",
-                    reason: "sameActiveTargetCandidate",
-                    target: target,
-                    point: point,
-                    coordinateView: coordinateView,
-                    extra: [
-                        "activeLookupElementID": activeLookupElementID as Any,
-                        "activeHighlightElementID": activeHighlightElementID as Any,
-                        "segmentTargetTouchesReachWebKit": "pendingTapDecision",
-                    ]
-                )
-            } else {
-                logTouchDeliveryVerdict(
-                    stage: "touchesBegan.activeLookupDispatchPending",
-                    verdict: "popover.updatePendingTouchEnd",
-                    reason: "activeLookupMoveCandidate",
-                    target: target,
-                    point: point,
-                    coordinateView: coordinateView,
-                    extra: [
-                        "activeLookupElementID": activeLookupElementID as Any,
-                        "activeHighlightElementID": activeHighlightElementID as Any,
-                        "lookupDispatchedOnTouchDown": false,
-                        "completedOnTouchDown": false,
-                        "hitPoint": Self.debugPointString(hitPoint),
-                        "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                        "hitBasis": "overlay",
-                        "nearest": store?.diagnostics(
-                            at: hitPoint,
-                            limit: 3,
-                            in: hitTestView.bounds.size,
-                            coordinateViewWindowOrigin: hitTestViewWindowOrigin
-                        ) as Any,
-                        "segmentTargetTouchesReachWebKit": "pendingTapDecision",
-                    ]
-                )
-            }
-        } else {
-            logTouchDeliveryVerdict(
-                stage: "touchesBegan.nativeLookupPending",
-                verdict: "nativeLookupPendingTouchEnd",
-                reason: "segmentTarget",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "lookupDispatchedOnTouchDown": false,
-                    "completedOnTouchDown": false,
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                    "hitBasis": "overlay",
-                    "nearest": store?.diagnostics(
-                        at: hitPoint,
-                        limit: 3,
-                        in: hitTestView.bounds.size,
-                        coordinateViewWindowOrigin: hitTestViewWindowOrigin
-                    ) as Any,
-                    "segmentTargetTouchesReachWebKit": "pendingTapDecision",
-                ]
-            )
-        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        guard let start = touchStartPoint,
+        guard touchStartPoint != nil,
               let windowStart = touchStartWindowPoint,
               let touch = touches.first,
               let coordinateView else { return }
         let point = touch.location(in: coordinateView)
-        touchLatestPoint = point
-        touchHasMoved = true
         let windowPoint = touch.location(in: nil)
         let dx = windowPoint.x - windowStart.x
         let dy = windowPoint.y - windowStart.y
@@ -5896,43 +4554,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             horizontalMovement > Self.segmentSwipeMovementTolerance
             && horizontalMovement > verticalMovement * 1.2
         let exceededTapMovement = movement > Self.segmentTapMovementTolerance
-        let exceededLongPressDrift = movement > Self.segmentLongPressDriftTolerance
         let isInsideStartTarget = touchStartTarget.map {
             Self.point(point, isInside: $0)
         } ?? false
-        logTouchDeliveryVerdict(
-            stage: "touchesMoved",
-            verdict: isSwipeLikeMovement
-                ? "passThrough.failurePending"
-                : (isInsideStartTarget ? "nativeRecognizerInsideTarget" : "nativeRecognizerOutsideTarget"),
-            reason: isSwipeLikeMovement ? "swipeMovement" : (isInsideStartTarget ? "insideTarget" : "outsideTarget"),
-            target: touchStartTarget,
-            point: point,
-            coordinateView: coordinateView,
-            extra: [
-                "start": Self.debugPointString(start),
-                "point": Self.debugPointString(point),
-                "windowStart": Self.debugPointString(windowStart),
-                "windowPoint": Self.debugPointString(windowPoint),
-                "movement": movement,
-                "dx": dx,
-                "dy": dy,
-                "tapMovementLimit": Self.segmentTapMovementTolerance,
-                "longPressDriftLimit": Self.segmentLongPressDriftTolerance,
-                "swipeMovementLimit": Self.segmentSwipeMovementTolerance,
-                "isSwipeLikeMovement": isSwipeLikeMovement,
-                "exceededTapMovement": exceededTapMovement,
-                "exceededLongPressDrift": exceededLongPressDrift,
-                "isInsideStartTarget": isInsideStartTarget,
-            ]
-        )
         if touchStartIsBlankLookupDismissal, exceededTapMovement {
-            failGesture(reason: "blankLookupDismissalMovement", payload: [
-                "movement": movement,
-                "dx": dx,
-                "dy": dy,
-                "tapMovementLimit": Self.segmentTapMovementTolerance,
-            ])
+            failGesture(reason: "blankLookupDismissalMovement")
             return
         }
         if isInsideStartTarget != touchStartIsInsideTarget {
@@ -5941,60 +4567,16 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 touchStartPressedVisualCleared = false
                 touchStartOverlay?.showPressedTarget(target)
             } else {
-                clearPressedVisualForMovementIfNeeded(payload: [
-                    "reason": "outsideTarget",
-                    "start": Self.debugPointString(start),
-                    "point": Self.debugPointString(point),
-                    "windowStart": Self.debugPointString(windowStart),
-                    "windowPoint": Self.debugPointString(windowPoint),
-                    "movement": movement,
-                    "dx": dx,
-                    "dy": dy,
-                    "tapMovementLimit": Self.segmentTapMovementTolerance,
-                    "swipeMovementLimit": Self.segmentSwipeMovementTolerance,
-                    "isSwipeLikeMovement": isSwipeLikeMovement,
-                    "exceededTapMovement": exceededTapMovement,
-                    "isInsideStartTarget": isInsideStartTarget,
-                ])
+                clearPressedVisualForMovementIfNeeded()
             }
         }
         if isSwipeLikeMovement {
-            let didForwardSwipe = !touchForwardedSegmentSwipe
-            if didForwardSwipe {
+            if !touchForwardedSegmentSwipe {
                 touchForwardedSegmentSwipe = true
                 store?.dispatchSegmentSwipe(dx: dx, dy: dy)
             }
-            clearPressedVisualForMovementIfNeeded(payload: [
-                "start": Self.debugPointString(start),
-                "point": Self.debugPointString(point),
-                "windowStart": Self.debugPointString(windowStart),
-                "windowPoint": Self.debugPointString(windowPoint),
-                "movement": movement,
-                "dx": dx,
-                "dy": dy,
-                "tapMovementLimit": Self.segmentTapMovementTolerance,
-                "swipeMovementLimit": Self.segmentSwipeMovementTolerance,
-                "isSwipeLikeMovement": isSwipeLikeMovement,
-                "exceededTapMovement": exceededTapMovement,
-                "isInsideStartTarget": isInsideStartTarget,
-            ])
-            failGesture(reason: "movement", payload: [
-                "start": Self.debugPointString(start),
-                "point": Self.debugPointString(point),
-                "windowStart": Self.debugPointString(windowStart),
-                "windowPoint": Self.debugPointString(windowPoint),
-                "movement": movement,
-                "dx": dx,
-                "dy": dy,
-                "tapMovementLimit": Self.segmentTapMovementTolerance,
-                "longPressDriftLimit": Self.segmentLongPressDriftTolerance,
-                "swipeMovementLimit": Self.segmentSwipeMovementTolerance,
-                "isSwipeLikeMovement": isSwipeLikeMovement,
-                "exceededTapMovement": exceededTapMovement,
-                "exceededLongPressDrift": exceededLongPressDrift,
-                "isInsideStartTarget": isInsideStartTarget,
-                "segmentSwipeForwarded": didForwardSwipe,
-            ])
+            clearPressedVisualForMovementIfNeeded()
+            failGesture(reason: "movement")
         }
     }
 
@@ -6017,52 +4599,21 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 state = .failed
                 return
             }
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.activeLookupBlankTapDismiss",
-                verdict: "activeLookupDismissed",
-                reason: "activeLookupBlankSpace",
-                extra: [
-                    "movement": movement,
-                    "duration": duration,
-                    "segmentTargetTouchesReachWebKit": "blockedForDismiss",
-                ]
-            )
             resetTrackingState(finishReason: "activeLookupBlankTapDismiss")
             state = .recognized
             return
         }
-        guard let start = touchStartPoint,
-              let windowStart = touchStartWindowPoint,
+        guard touchStartPoint != nil,
               let startedAt = touchStartTime,
               let target = touchStartTarget,
               let touch = touches.first,
               let coordinateView else {
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.missingTrackingState",
-                verdict: "passThrough.allowed",
-                reason: "missingTrackingState",
-                extra: [
-                    "segmentTargetTouchesReachWebKit": true,
-                ]
-            )
             resetTrackingState(finishReason: "missingTrackingState", suppressUnhandledTap: false)
             state = .failed
             return
         }
         let duration = event.timestamp - startedAt
         if duration > Self.segmentTapMaximumDuration {
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.durationExceeded",
-                verdict: "passThrough.allowedAfterRecognizerFailure",
-                reason: "durationExceeded",
-                target: target,
-                coordinateView: coordinateView,
-                extra: [
-                    "duration": duration,
-                    "maximumDuration": Self.segmentTapMaximumDuration,
-                    "segmentTargetTouchesReachWebKit": true,
-                ]
-            )
             resetTrackingState(finishReason: "durationExceeded", suppressUnhandledTap: false)
             state = .failed
             return
@@ -6070,179 +4621,40 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let point = touch.location(in: coordinateView)
         let hitTestView = coordinateView
         let hitPoint = point
-        let rawClientPoint = clientCoordinateView.map { touch.location(in: $0) }
-        let windowPoint = touch.location(in: nil)
         let hitTestViewWindowOrigin = hitTestView.convert(CGPoint.zero, to: nil)
-        let movement = hypot(windowPoint.x - windowStart.x, windowPoint.y - windowStart.y)
         let endTarget = store?.hitTarget(
             at: hitPoint,
             in: hitTestView.bounds.size,
             coordinateViewWindowOrigin: hitTestViewWindowOrigin
         )
         let endedInsideStartTarget = endTarget?.elementID == target.elementID
-        logTouchDeliveryVerdict(
-            stage: "touchesEnded.endTarget",
-            verdict: endTarget?.elementID == target.elementID
-                ? "nativeEndTargetMatchesStart"
-                : "nativeEndTargetChangedOrMissing",
-            reason: "endTargetCheck",
-            target: target,
-            point: point,
-            coordinateView: coordinateView,
-            extra: [
-                "movement": movement,
-                "duration": duration,
-                "startTargetID": target.elementID,
-                "endTargetID": endTarget?.elementID as Any,
-                "endedInsideStartTarget": endedInsideStartTarget,
-                "endTargetRect": endTarget?.rects.first.map {
-                    WebViewNativeLookupHitTestStore.debugRectStrings([$0]).first ?? ""
-                } as Any,
-                "hitPoint": Self.debugPointString(hitPoint),
-                "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                "hitBasis": "overlay",
-                "nearest": store?.diagnostics(
-                    at: hitPoint,
-                    limit: 5,
-                    in: hitTestView.bounds.size,
-                    coordinateViewWindowOrigin: hitTestViewWindowOrigin
-                ) as Any,
-            ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-        )
         guard endedInsideStartTarget else {
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.nativeLookupFailed",
-                verdict: "passThrough.allowedAfterRecognizerFailure",
-                reason: "endedOutsideStartTarget",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "movement": movement,
-                    "duration": duration,
-                    "start": Self.debugPointString(start),
-                    "point": Self.debugPointString(point),
-                    "windowStart": Self.debugPointString(windowStart),
-                    "windowPoint": Self.debugPointString(windowPoint),
-                    "endTargetID": endTarget?.elementID as Any,
-                    "endedInsideStartTarget": endedInsideStartTarget,
-                    "segmentTargetTouchesReachWebKit": true,
-                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-            )
             resetTrackingState(finishReason: "endedOutsideStartTarget", suppressUnhandledTap: false)
             state = .failed
             return
         }
         if store?.shouldPassThroughForWebTextSelection == true {
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.textSelectionActivePassThrough",
-                verdict: "passThrough.allowedAfterTextSelection",
-                reason: "webTextSelectionActive",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "movement": movement,
-                    "duration": duration,
-                    "startTargetID": target.elementID,
-                    "endTargetID": endTarget?.elementID as Any,
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                    "hitBasis": "overlay",
-                    "segmentTargetTouchesReachWebKit": true,
-                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-            )
             resetTrackingState(finishReason: "webTextSelectionActive", suppressUnhandledTap: false)
             state = .failed
             return
         }
         if touchStartWasActiveTarget {
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.activeLookupDismiss",
-                verdict: "activeLookupDismissed",
-                reason: "sameActiveTargetRetap",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "movement": movement,
-                    "duration": duration,
-                    "startTargetID": target.elementID,
-                    "endTargetID": endTarget?.elementID as Any,
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                    "hitBasis": "overlay",
-                    "segmentTargetTouchesReachWebKit": "blockedForDismiss",
-                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-            )
             store?.onActiveTargetTouchDown?(target)
             touchStartOverlay?.clearPressedTarget()
             resetTrackingState(clearPressedTarget: false, finishReason: "sameActiveTargetRetap")
             state = .recognized
             return
         }
-        logTouchDeliveryVerdict(
-            stage: "touchesEnded.beforeNativeLookupDispatch",
-            verdict: "nativeLookupDispatchPending",
-            reason: touchStartWasActiveTarget ? "sameActiveTargetRetap" : "beforeHandleTap",
-            target: target,
-            point: point,
-            coordinateView: coordinateView,
-            extra: [
-                "movement": movement,
-                "duration": duration,
-                "startTargetID": target.elementID,
-                "endTargetID": endTarget?.elementID as Any,
-                "hitPoint": Self.debugPointString(hitPoint),
-                "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                "hitBasis": "overlay",
-            ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-        )
         guard store?.handleTap(
             on: target,
             at: hitPoint,
             in: hitTestView.bounds.size,
             coordinateViewWindowOrigin: hitTestViewWindowOrigin
         ) == true else {
-            logTouchDeliveryVerdict(
-                stage: "touchesEnded.nativeLookupFailed",
-                verdict: "passThrough.allowedAfterRecognizerFailure",
-                reason: "nativeLookupFailed",
-                target: target,
-                point: point,
-                coordinateView: coordinateView,
-                extra: [
-                    "movement": movement,
-                    "duration": duration,
-                    "hitPoint": Self.debugPointString(hitPoint),
-                    "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                    "hitBasis": "overlay",
-                    "endTargetID": endTarget?.elementID as Any,
-                    "segmentTargetTouchesReachWebKit": true,
-                ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-            )
             resetTrackingState(finishReason: "nativeLookupFailed", suppressUnhandledTap: false)
             state = .failed
             return
         }
-        logTouchDeliveryVerdict(
-            stage: "touchesEnded.nativeRecognized",
-            verdict: "passThrough.blockedForTapLookup",
-            reason: touchStartWasActiveTarget ? "sameActiveTargetRetap" : "nativeLookupTap",
-            target: target,
-            point: point,
-            coordinateView: coordinateView,
-            extra: [
-                "movement": movement,
-                "duration": duration,
-                "hitPoint": Self.debugPointString(hitPoint),
-                "rawWebViewPoint": rawClientPoint.map(Self.debugPointString) as Any,
-                "hitBasis": "overlay",
-                "lookupDispatchedOnTouchDown": false,
-                "segmentTargetTouchesReachWebKit": "touchStreamMayArrive_clickRecognizerBlocked",
-                "webkitTapRecognizersRequireNativeLookupFailure": true,
-            ].merging(store?.webTextSelectionDiagnostics ?? [:]) { _, new in new }
-        )
         if touchStartWasActiveTarget {
             touchStartOverlay?.clearPressedTarget()
         } else if store?.activeElementID == target.elementID {
@@ -6255,15 +4667,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        logTouchDeliveryVerdict(
-            stage: "touchesCancelled",
-            verdict: "passThrough.allowedAfterCancellation",
-            reason: "touchesCancelled",
-            extra: [
-                "touchCount": touches.count,
-                "segmentTargetTouchesReachWebKit": true,
-            ]
-        )
         resetTrackingState(finishReason: "touchesCancelled", suppressUnhandledTap: false)
         state = .failed
     }
@@ -6271,24 +4674,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     override func reset() {
         if state == .possible,
            let target = touchStartTarget,
-           let point = touchStartPoint,
-           let coordinateView {
-            let latestPoint = touchLatestPoint ?? point
-            let latestPointIsInsideStartTarget = Self.point(latestPoint, isInside: target)
-            logTouchDeliveryVerdict(
-                stage: "reset.dropPendingNativeLookup",
-                verdict: "pendingLookupDroppedBeforeTapEnd",
-                reason: "unexpectedRecognizerReset",
-                target: target,
-                point: latestPoint,
-                coordinateView: coordinateView,
-                extra: [
-                    "lookupDispatchedOnReset": false,
-                    "segmentTargetTouchesReachWebKit": true,
-                    "touchHasMoved": touchHasMoved,
-                    "latestPointIsInsideStartTarget": latestPointIsInsideStartTarget,
-                ]
-            )
+           touchStartPoint != nil {
             touchStartOverlay?.clearPressedTarget()
             store?.onTouchDownHitCancelled?(target)
             resetTrackingState(finishReason: "unexpectedRecognizerReset", suppressUnhandledTap: false)
@@ -6299,14 +4685,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
 
     func cancelForExternalPageMotion(reason: String) {
         guard touchStartTarget != nil || touchStartOverlay != nil else { return }
-        clearPressedVisualForMovementIfNeeded(payload: [
-            "reason": reason,
-            "movement": "externalPageMotion",
-        ])
-        failGesture(reason: reason, payload: [
-            "reason": reason,
-            "movement": "externalPageMotion",
-        ])
+        clearPressedVisualForMovementIfNeeded()
+        failGesture(reason: reason)
     }
 
     private func resetTrackingState(
@@ -6324,10 +4704,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartIsBlankLookupDismissal = false
         touchStartPressedVisualCleared = false
         touchStartIsInsideTarget = false
-        touchHasMoved = false
-        touchLatestPoint = nil
         touchForwardedSegmentSwipe = false
-        restoreSuppressedCompetingTapRecognizers(reason: "resetTrackingState")
+        restoreSuppressedCompetingTapRecognizers()
         store?.finishNativeTouchStream(reason: finishReason, suppressUnhandledTap: suppressUnhandledTap)
         if clearPressedTarget {
             touchStartOverlay?.clearPressedTarget()
@@ -6350,12 +4728,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.segmentTapMaximumDuration, execute: workItem)
     }
 
-    private func suppressCompetingWebKitTapRecognizers(
-        reason: String,
-        target: WebViewNativeLookupHitTarget,
-        point: CGPoint,
-        coordinateView: NativeLookupHitTestOverlayView
-    ) {
+    private func suppressCompetingWebKitTapRecognizers() {
         guard suppressedCompetingTapRecognizers.isEmpty,
               let rootView = view else { return }
         var recognizers: [UIGestureRecognizer] = []
@@ -6381,22 +4754,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         for recognizer in recognizers {
             recognizer.isEnabled = false
         }
-        logTouchDeliveryVerdict(
-            stage: "recognizer.suppressCompetingTaps",
-            verdict: "webkitTapRecognizersDisabledForNativeCandidate",
-            reason: reason,
-            target: target,
-            point: point,
-            coordinateView: coordinateView,
-            extra: [
-                "suppressedCount": recognizers.count,
-                "suppressedTypes": recognizers.prefix(12).map { String(describing: type(of: $0)) },
-                "segmentTargetTouchesReachWebKit": "tapRecognizersDisabledDuringNativeDecision"
-            ]
-        )
     }
 
-    private func restoreSuppressedCompetingTapRecognizers(reason: String) {
+    private func restoreSuppressedCompetingTapRecognizers() {
         guard !suppressedCompetingTapRecognizers.isEmpty else { return }
         let restored = suppressedCompetingTapRecognizers
         suppressedCompetingTapRecognizers.removeAll()
@@ -6405,7 +4765,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
     }
 
-    private func clearPressedVisualForMovementIfNeeded(payload _: @autoclosure () -> [String: Any]) {
+    private func clearPressedVisualForMovementIfNeeded() {
         guard !touchStartPressedVisualCleared else { return }
         touchStartPressedVisualCleared = true
         touchStartOverlay?.clearPressedTarget()
@@ -6417,109 +4777,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         }
     }
 
-    private func failGesture(reason: String, payload: @autoclosure () -> [String: Any] = [:]) {
-        if Self.touchDeliveryLoggingEnabled {
-            let payload = payload()
-            logTouchDeliveryVerdict(
-                stage: "failGesture.\(reason)",
-                verdict: "passThrough.allowedAfterRecognizerFailure",
-                reason: reason,
-                target: touchStartTarget,
-                coordinateView: coordinateView,
-                extra: payload.merging(["segmentTargetTouchesReachWebKit": true]) { current, _ in current }
-            )
-        }
+    private func failGesture(reason: String) {
         resetTrackingState(finishReason: reason, suppressUnhandledTap: false)
         state = .failed
-    }
-
-    private func logTouchDeliveryVerdict(
-        stage: String,
-        verdict: String,
-        reason: String,
-        target: WebViewNativeLookupHitTarget? = nil,
-        point: CGPoint? = nil,
-        coordinateView: NativeLookupHitTestOverlayView? = nil,
-        extra: @autoclosure () -> [String: Any] = [:]
-    ) {
-        guard verboseNativeLookupPositionLoggingEnabled else { return }
-        let extra = extra()
-        let targetCount = extra["targetCount"] as? Int ?? 0
-        let shouldLog = Self.touchDeliveryLoggingEnabled
-            || target != nil
-            || targetCount > 0
-            || stage.contains("nativeLookup")
-            || stage.contains("noSegmentTarget")
-        guard shouldLog else { return }
-        var payload: [String: Any] = [
-            "verdict": verdict,
-            "reason": reason
-        ]
-        if let movement = extra["movement"] {
-            payload["movement"] = movement
-        }
-        if let duration = extra["duration"] {
-            payload["duration"] = duration
-        }
-        if let targetCount = extra["targetCount"] {
-            payload["targetCount"] = targetCount
-        }
-        if let activeLookupElementID = extra["activeLookupElementID"] {
-            payload["active"] = activeLookupElementID
-        }
-        if let activeHighlightElementID = extra["activeHighlightElementID"] {
-            payload["highlight"] = activeHighlightElementID
-        }
-        if let lookupDispatchedOnTouchDown = extra["lookupDispatchedOnTouchDown"] {
-            payload["downDispatch"] = lookupDispatchedOnTouchDown
-        }
-        if let completedOnTouchDown = extra["completedOnTouchDown"] {
-            payload["downComplete"] = completedOnTouchDown
-        }
-        if let segmentTargetTouchesReachWebKit = extra["segmentTargetTouchesReachWebKit"] {
-            payload["webTouches"] = segmentTargetTouchesReachWebKit
-        }
-        if let nativeLookupEnabled = extra["nativeLookupEnabled"] {
-            payload["enabled"] = nativeLookupEnabled
-        }
-        if let nearest = extra["nearest"] {
-            payload["nearest"] = nearest
-        }
-        if let hitPoint = extra["hitPoint"] {
-            payload["hitPoint"] = hitPoint
-        }
-        if let hitBasis = extra["hitBasis"] {
-            payload["hitBasis"] = hitBasis
-        }
-        if let point {
-            payload["point"] = Self.debugPointString(point)
-        }
-        if let coordinateView {
-            payload["size"] = Self.debugSizeString(coordinateView.bounds.size)
-        }
-        if let target {
-            payload["id"] = target.elementID
-            payload["rect"] = target.rects.first.map {
-                WebViewNativeLookupHitTestStore.debugRectStrings([$0]).first ?? ""
-            } as Any
-            payload["selectedPoint"] = target.debugHitTestPoint.map(Self.debugPointString) as Any
-            payload["rebaseX"] = target.debugHitTestRebaseX as Any
-            payload["rebaseY"] = target.debugHitTestRebaseY as Any
-            payload["payload"] = target.lookupPayload != nil
-            payload["frame"] = target.frameInfo != nil
-        }
-        for (key, value) in extra where payload[key] == nil {
-            payload[key] = value
-        }
-        payload["stage"] = stage
-    }
-
-    private static func debugPointString(_ point: CGPoint) -> String {
-        "{\(point.x), \(point.y)}"
-    }
-
-    private static func debugSizeString(_ size: CGSize) -> String {
-        "{\(size.width), \(size.height)}"
     }
 }
 
@@ -6615,28 +4875,6 @@ public class WebViewController: UIViewController {
             self.obscuredInsets = obscuredInsets
             lastAppliedObscuredInsets = obscuredInsets
         }
-        safeAreaLog(
-            "webViewController.applyHostLayout",
-            [
-                "additionalTop": "\(additionalSafeAreaInsets.top)",
-                "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
-                "changedAdditional": "\(changedAdditionalSafeAreaInsets)",
-                "changedObscured": "\(changedObscuredInsets)",
-                "controllerAdditionalTop": "\(self.additionalSafeAreaInsets.top)",
-                "controllerAdditionalBottom": "\(self.additionalSafeAreaInsets.bottom)",
-                "controllerObscuredTop": "\(self.obscuredInsets.top)",
-                "controllerObscuredBottom": "\(self.obscuredInsets.bottom)",
-                "inputObscuredTop": "\(obscuredInsets.top)",
-                "inputObscuredBottom": "\(obscuredInsets.bottom)",
-                "lastAppliedAdditionalTop": "\(lastAppliedAdditionalSafeAreaInsets.top)",
-                "lastAppliedAdditionalBottom": "\(lastAppliedAdditionalSafeAreaInsets.bottom)",
-                "lastAppliedObscuredTop": "\(lastAppliedObscuredInsets.top)",
-                "lastAppliedObscuredBottom": "\(lastAppliedObscuredInsets.bottom)",
-                "viewWindowSafeAreaTop": "\(view.window?.safeAreaInsets.top ?? 0)",
-                "viewWindowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
         if changedAdditionalSafeAreaInsets || changedObscuredInsets {
             view.setNeedsLayout()
             webView.setNeedsLayout()
@@ -6659,7 +4897,7 @@ public class WebViewController: UIViewController {
             return
         }
         if lastAppliedWebKitObscuredInsets == insets {
-            syncManabiChromeInsetsToPage(webView: webView, insets: insets, reason: reason)
+            syncPageObscuredInsetsState(webView: webView, insets: insets, reason: reason)
             return
         }
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
@@ -6712,54 +4950,23 @@ public class WebViewController: UIViewController {
             }
         }
         lastAppliedWebKitObscuredInsets = insets
-        syncManabiChromeInsetsToPage(webView: webView, insets: insets, reason: reason)
+        syncPageObscuredInsetsState(webView: webView, insets: insets, reason: reason)
 
         // WebKit treats _obscuredInsets as the content inset/visible-content-rect input.
         // Do not also mirror it into minimum/maximum viewport insets; that changes viewport
         // sizing semantics and can move CSS/visual viewport behavior independently.
-        safeAreaLog(
-            "webViewController.applyObscuredInsets",
-            [
-                "appliedTop": "\(insets.top)",
-                "appliedBottom": "\(insets.bottom)",
-                "appliedLeft": "\(insets.left)",
-                "appliedRight": "\(insets.right)",
-                "controllerObscuredTop": "\(obscuredInsets.top)",
-                "controllerObscuredBottom": "\(obscuredInsets.bottom)",
-                "scrollAdjustedContentInsetTop": "\(webView.scrollView.adjustedContentInset.top)",
-                "scrollAdjustedContentInsetBottom": "\(webView.scrollView.adjustedContentInset.bottom)",
-                "scrollContentInsetTop": "\(webView.scrollView.contentInset.top)",
-                "scrollContentInsetBottom": "\(webView.scrollView.contentInset.bottom)",
-                "windowSafeAreaTop": "\(view.window?.safeAreaInsets.top ?? 0)",
-                "windowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
-        )
-        if webViewLayoutShouldLog(webView: webView) {
-            var payload = webViewLayoutScrollPayload(webView: webView)
-            payload["reason"] = reason
-            payload["appliedInsets"] = webViewLayoutInsetsString(insets)
-            payload["controllerInsets"] = webViewLayoutInsetsString(obscuredInsets)
-            payload["windowSafeArea"] = webViewLayoutInsetsString(view.window?.safeAreaInsets ?? .zero)
-            webViewLayoutDebugLog("obscuredInsets.apply", payload)
-        }
-        
         //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
         //            webView.setValue(insets, forKey: "obscuredInsets")
         //        webView.safeAreaInsetsDidChange()
         // TODO: investigate _isChangingObscuredInsetsInteractively
     }
 
-    private func syncManabiChromeInsetsToPage(
+    private func syncPageObscuredInsetsState(
         webView: WKWebView,
         insets: UIEdgeInsets,
         reason: String
     ) {
         guard insets.top.isFinite else { return }
-#if DEBUG
-        if ProcessInfo.processInfo.environment["MANABI_VERBOSE_LOOKUPPOS_NATIVE"] == "1" {
-        }
-#endif
         let escapedReason = reason
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "'", with: "\\'")
@@ -6767,8 +4974,8 @@ public class WebViewController: UIViewController {
             .replacingOccurrences(of: "\r", with: "\\r")
         let script = """
         (() => {
-          const existing = window.__manabiChromeInsets || {};
-          window.__manabiChromeInsets = {
+          const existing = window.__swiftUIWebViewObscuredInsets || {};
+          window.__swiftUIWebViewObscuredInsets = {
             ...existing,
             obscuredTopInset: \(insets.top),
             obscuredTopInsetSource: 'webview-obscured-insets:\(escapedReason)',
@@ -6785,17 +4992,6 @@ public class WebViewController: UIViewController {
             left: obscuredInsets.left,
             bottom: obscuredInsets.bottom,
             right: obscuredInsets.right
-        )
-        safeAreaLog(
-            "webViewController.updateObscuredInsets",
-            [
-                "top": "\(insets.top)",
-                "bottom": "\(insets.bottom)",
-                "reason": reason,
-                "viewWindowSafeAreaTop": "\(view.window?.safeAreaInsets.top ?? 0)",
-                "viewWindowSafeAreaBottom": "\(view.window?.safeAreaInsets.bottom ?? 0)",
-                "webViewID": readerLoadObjectIDString(webView)
-            ]
         )
         applyObscuredInsets(insets, reason: reason)
     }
@@ -7037,7 +5233,6 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             recognizerHostView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
         }
-        nativeLookupHitTestGestureRecognizer.clientCoordinateView = webView
         if capturesSegmentTouchesInOverlay {
         } else {
             configureNativeLookupTapFailureRequirements(reason: "attachNativeLookupHitTestOverlay")
@@ -7109,7 +5304,7 @@ public class WebViewController: UIViewController {
 #endif
 
 #if os(iOS)
-private func manabiCanUseSampledPageTopColorBackground() -> Bool {
+private func webViewCanUseSampledPageTopColorBackground() -> Bool {
     let version = ProcessInfo.processInfo.operatingSystemVersion
     if version.majorVersion > 26 {
         return true
@@ -7153,24 +5348,6 @@ private final class WebViewStringKeyPathObserver<Object: NSObject, Value>: NSObj
 }
 
 extension WKWebView {
-    fileprivate func manabiBGColorDescription(_ color: UIColor?) -> String {
-        guard let color else { return "nil" }
-        var red: CGFloat = 0
-        var green: CGFloat = 0
-        var blue: CGFloat = 0
-        var alpha: CGFloat = 0
-        if color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
-            return String(
-                format: "rgba(%.4f,%.4f,%.4f,%.4f)",
-                Double(red),
-                Double(green),
-                Double(blue),
-                Double(alpha)
-            )
-        }
-        return String(describing: color)
-    }
-
     var sampledPageTopColor: UIColor? {
         let selector = Selector("_sampl\("edPageTopC")olor")
         guard responds(to: selector), let result = perform(selector) else {
@@ -7198,7 +5375,7 @@ extension WKWebView {
 
     @available(iOS 15.0, *)
     func applyUnderPageBackgroundColor(config: WebViewConfig, allowSampledPageTopColor: Bool = true) {
-        let canUseSampledColor = manabiCanUseSampledPageTopColorBackground()
+        let canUseSampledColor = webViewCanUseSampledPageTopColorBackground()
         let sampledColor = sampledPageTopColor
         let fallbackColor = UIColor(config.backgroundColor)
         let systemColor: UIColor = config.isOpaque ? .systemBackground : .clear
@@ -7224,7 +5401,7 @@ extension WKWebView {
         guard allowSampledPageTopColor else {
             return fallbackColor
         }
-        guard manabiCanUseSampledPageTopColorBackground() else {
+        guard webViewCanUseSampledPageTopColorBackground() else {
             return config.isOpaque ? .systemBackground : .clear
         }
         return sampledPageTopColor
@@ -7252,78 +5429,10 @@ extension WKWebView {
         }
     }
 
-    func logManabiSampledPageTopDOMProbe(reason: String) {
-        let escapedReason = reason
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "'", with: "\\'")
-            .replacingOccurrences(of: "\n", with: "\\n")
-        let js = """
-        (function() {
-          const describe = (selector, element) => {
-            if (!element) return null;
-            const style = getComputedStyle(element);
-            const rect = typeof element.getBoundingClientRect === 'function' ? element.getBoundingClientRect() : null;
-            return {
-              selector,
-              tag: element.tagName || null,
-              id: element.id || null,
-              className: typeof element.className === 'string' ? element.className : null,
-              backgroundColor: style.backgroundColor || null,
-              color: style.color || null,
-              display: style.display || null,
-              visibility: style.visibility || null,
-              opacity: style.opacity || null,
-              rect: rect ? {
-                x: Math.round(rect.x * 100) / 100,
-                y: Math.round(rect.y * 100) / 100,
-                width: Math.round(rect.width * 100) / 100,
-                height: Math.round(rect.height * 100) / 100
-              } : null
-            };
-          };
-          const pointElement = (x, y) => describe(`point(${x},${y})`, document.elementFromPoint(x, y));
-          const root = document.documentElement;
-          const body = document.body;
-          const bodyStyle = body ? getComputedStyle(body) : null;
-          const rootStyle = root ? getComputedStyle(root) : null;
-          return JSON.stringify({
-            reason: '\(escapedReason)',
-            href: location.href,
-            readyState: document.readyState,
-            scrollY: window.scrollY,
-            innerWidth: window.innerWidth,
-            innerHeight: window.innerHeight,
-            prefersDark: window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : null,
-            bodyClassName: body?.className ?? null,
-            colorSchemeAttr: body?.getAttribute('data-mnb-color-scheme') ?? null,
-            lightThemeAttr: body?.getAttribute('data-mnb-light-theme') ?? null,
-            darkThemeAttr: body?.getAttribute('data-mnb-dark-theme') ?? null,
-            bodyThemeBackgroundVariable: bodyStyle ? bodyStyle.getPropertyValue('--theme-background-color').trim() : null,
-            rootBackgroundColor: rootStyle?.backgroundColor ?? null,
-            bodyBackgroundColor: bodyStyle?.backgroundColor ?? null,
-            readerHeader: describe('#reader-header', document.querySelector('#reader-header')),
-            readerContent: describe('#reader-content', document.querySelector('#reader-content')),
-            readerPage: describe('#reader-page', document.querySelector('#reader-page')),
-            body: describe('body', body),
-            html: describe('html', root),
-            pointTopCenter: pointElement(Math.floor(window.innerWidth / 2), 1),
-            point8Center: pointElement(Math.floor(window.innerWidth / 2), 8),
-            point32Center: pointElement(Math.floor(window.innerWidth / 2), 32),
-            point80Center: pointElement(Math.floor(window.innerWidth / 2), 80)
-          });
-        })()
-        """
-        evaluateJavaScript(js) { [weak self] result, error in
-            guard let self else { return }
-            if let error {
-                return
-            }
-        }
-    }
 }
 
 extension WKWebViewConfiguration {
-    func enableManabiPageTopColorSampling() {
+    func enablePageTopColorSampling() {
         let selector = Selector("_setSa\("mpledPageTopColorMaxDiff")erence:")
         guard responds(to: selector) else {
             return
@@ -7334,7 +5443,7 @@ extension WKWebViewConfiguration {
 #endif
 
 #if os(macOS)
-private func manabiCanUseSampledPageTopColorBackground() -> Bool {
+private func webViewCanUseSampledPageTopColorBackground() -> Bool {
     let version = ProcessInfo.processInfo.operatingSystemVersion
     if version.majorVersion > 26 {
         return true
@@ -7514,8 +5623,8 @@ extension WebView: UIViewControllerRepresentable {
         configuration.applicationNameForUserAgent = userAgent
 #if os(iOS)
         if config.usesSampledPageTopColorForUnderPageBackground,
-           manabiCanUseSampledPageTopColorBackground() {
-            configuration.enableManabiPageTopColorSampling()
+           webViewCanUseSampledPageTopColorBackground() {
+            configuration.enablePageTopColorSampling()
         }
 #endif
         configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
@@ -7536,7 +5645,7 @@ extension WebView: UIViewControllerRepresentable {
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
+                && !webViewCanUseSampledPageTopColorBackground()
                 ? (config.isOpaque ? .systemBackground : .clear)
                 : UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedBackgroundColor
@@ -7607,7 +5716,7 @@ extension WebView: UIViewControllerRepresentable {
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
             let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
+                && !webViewCanUseSampledPageTopColorBackground()
                 ? (config.isOpaque ? .systemBackground : .clear)
                 : UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedBackgroundColor
@@ -7683,15 +5792,6 @@ extension WebView: UIViewControllerRepresentable {
         configureWebView(webView, controller: controller, context: context)
         context.coordinator.markSnapshotRestoreIfNeeded()
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
-        controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
-            coordinator?.navigator.logCompetingOperationIfNeeded(
-                "replaceWebView",
-                metadata: [
-                    "newWebViewID": readerLoadObjectIDString(newWebView),
-                    "oldWebViewID": readerLoadObjectIDString(oldWebView)
-                ]
-            )
-        }
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
             if coordinator.lifecycleConfig.autoUnloadOnDisappear, controller.isWebViewUnloaded {
@@ -7862,156 +5962,11 @@ extension WebView: UIViewControllerRepresentable {
             bottom: resolvedObscuredBottomInset,
             right: max(0, obscuredInsets.trailing)
         )
-        if isBookWebViewUpdate {
-            bookLog(
-                "swiftUIWebView.updateInsets",
-                [
-                    "stateURL": state.pageURL.absoluteString,
-                    "webViewURL": controller.webView.url?.absoluteString ?? "nil",
-                    "incomingTop": "\(obscuredInsets.top)",
-                    "incomingLeading": "\(obscuredInsets.leading)",
-                    "incomingBottom": "\(obscuredInsets.bottom)",
-                    "effectiveIncomingBottom": "\(effectiveIncomingBottomObscuredInset)",
-                    "incomingTrailing": "\(obscuredInsets.trailing)",
-                    "windowSafeAreaTop": "\(topSafeAreaInset)",
-                    "windowSafeAreaBottom": "\(bottomSafeAreaInset)",
-                    "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
-                    "topPolicy": isBookWebViewUpdate
-                        ? "ebookMaxIncomingWindowSafeArea"
-                        : "incomingAsTotalObscured",
-                    "proposedTop": "\(proposedTopObscuredInset)",
-                    "proposedBottom": "\(proposedObscuredBottomInset)",
-                    "resolvedTop": "\(resolvedObscuredInsets.top)",
-                    "resolvedBottom": "\(resolvedObscuredInsets.bottom)",
-                    "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
-                    "scrollContentInsetTopBefore": "\(controller.webView.scrollView.contentInset.top)",
-                    "scrollContentInsetBottomBefore": "\(controller.webView.scrollView.contentInset.bottom)",
-                    "scrollAdjustedContentInsetTopBefore": "\(controller.webView.scrollView.adjustedContentInset.top)",
-                    "scrollAdjustedContentInsetBottomBefore": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
-                    "webViewID": readerLoadObjectIDString(controller.webView)
-                ]
-            )
-        }
-        safeAreaLog(
-            "swiftUIWebView.updateBottom",
-            [
-                "incomingObscuredTop": "\(obscuredInsets.top)",
-                "incomingObscuredLeading": "\(obscuredInsets.leading)",
-                "incomingObscuredBottom": "\(obscuredInsets.bottom)",
-                "incomingObscuredTrailing": "\(obscuredInsets.trailing)",
-                "windowSafeAreaTop": "\(topSafeAreaInset)",
-                "windowSafeAreaLeft": "\(controller.view.window?.safeAreaInsets.left ?? 0)",
-                "windowSafeAreaBottom": "\(bottomSafeAreaInset)",
-                "windowSafeAreaRight": "\(controller.view.window?.safeAreaInsets.right ?? 0)",
-                "bottomPolicy": treatsIncomingBottomAsAdditionalClearance ? "incomingAsAdditionalClearance" : "incomingAsTotalObscured",
-                "additionalTop": "\(additionalSafeAreaInsets.top)",
-                "additionalLeft": "\(additionalSafeAreaInsets.left)",
-                "additionalBottom": "\(additionalSafeAreaInsets.bottom)",
-                "additionalRight": "\(additionalSafeAreaInsets.right)",
-                "topPolicy": isBookWebViewUpdate
-                    ? "ebookMaxIncomingWindowSafeArea"
-                    : "incomingAsTotalObscured",
-                "resolvedObscuredTop": "\(resolvedObscuredInsets.top)",
-                "resolvedObscuredLeft": "\(resolvedObscuredInsets.left)",
-                "resolvedObscuredBottom": "\(resolvedObscuredInsets.bottom)",
-                "resolvedObscuredRight": "\(resolvedObscuredInsets.right)",
-                "controllerAdditionalTopBefore": "\(controller.additionalSafeAreaInsets.top)",
-                "controllerAdditionalLeftBefore": "\(controller.additionalSafeAreaInsets.left)",
-                "controllerAdditionalBottomBefore": "\(controller.additionalSafeAreaInsets.bottom)",
-                "controllerAdditionalRightBefore": "\(controller.additionalSafeAreaInsets.right)",
-                "controllerObscuredTopBefore": "\(controller.obscuredInsets.top)",
-                "controllerObscuredLeftBefore": "\(controller.obscuredInsets.left)",
-                "controllerObscuredBottomBefore": "\(controller.obscuredInsets.bottom)",
-                "controllerObscuredRightBefore": "\(controller.obscuredInsets.right)",
-                "scrollAdjustedContentInsetTopBefore": "\(controller.webView.scrollView.adjustedContentInset.top)",
-                "scrollAdjustedContentInsetLeftBefore": "\(controller.webView.scrollView.adjustedContentInset.left)",
-                "scrollAdjustedContentInsetBottomBefore": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
-                "scrollAdjustedContentInsetRightBefore": "\(controller.webView.scrollView.adjustedContentInset.right)",
-                "scrollContentInsetTopBefore": "\(controller.webView.scrollView.contentInset.top)",
-                "scrollContentInsetLeftBefore": "\(controller.webView.scrollView.contentInset.left)",
-                "scrollContentInsetBottomBefore": "\(controller.webView.scrollView.contentInset.bottom)",
-                "scrollContentInsetRightBefore": "\(controller.webView.scrollView.contentInset.right)",
-                "webViewID": readerLoadObjectIDString(controller.webView)
-            ]
-        )
-        let hostLayoutChanges = controller.applyHostLayout(
+        controller.applyHostLayout(
             additionalSafeAreaInsets: additionalSafeAreaInsets,
             obscuredInsets: resolvedObscuredInsets
         )
-        if isBookWebViewUpdate {
-            let shouldForcePopoverInsetLog =
-                hostLayoutChanges.changedAdditionalSafeAreaInsets
-                || hostLayoutChanges.changedObscuredInsets
-            popoverWebViewInsetLog(
-                [
-                    "webViewID": readerLoadObjectIDString(controller.webView),
-                    "inTop": "\(obscuredInsets.top)",
-                    "resolvedTop": "\(resolvedObscuredInsets.top)",
-                    "obscuredTop": "\(controller.obscuredInsets.top)",
-                    "scrollTop": "\(controller.webView.scrollView.contentInset.top)",
-                    "adjustedTop": "\(controller.webView.scrollView.adjustedContentInset.top)",
-                    "bottom": "\(controller.obscuredInsets.bottom)",
-                    "changed": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets || hostLayoutChanges.changedObscuredInsets)"
-                ],
-                force: shouldForcePopoverInsetLog
-            )
-            bookLog(
-                "swiftUIWebView.updateInsets.applied",
-                [
-                    "stateURL": state.pageURL.absoluteString,
-                    "webViewURL": controller.webView.url?.absoluteString ?? "nil",
-                    "changedAdditional": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
-                    "changedObscured": "\(hostLayoutChanges.changedObscuredInsets)",
-                    "controllerObscuredTopAfter": "\(controller.obscuredInsets.top)",
-                    "controllerObscuredBottomAfter": "\(controller.obscuredInsets.bottom)",
-                    "scrollContentInsetTopAfter": "\(controller.webView.scrollView.contentInset.top)",
-                    "scrollContentInsetBottomAfter": "\(controller.webView.scrollView.contentInset.bottom)",
-                    "scrollAdjustedContentInsetTopAfter": "\(controller.webView.scrollView.adjustedContentInset.top)",
-                    "scrollAdjustedContentInsetBottomAfter": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
-                    "webViewID": readerLoadObjectIDString(controller.webView)
-                ]
-            )
-        }
-        safeAreaLog(
-            "swiftUIWebView.updateBottom.applied",
-            [
-                "changedAdditional": "\(hostLayoutChanges.changedAdditionalSafeAreaInsets)",
-                "changedObscured": "\(hostLayoutChanges.changedObscuredInsets)",
-                "controllerAdditionalTopAfter": "\(controller.additionalSafeAreaInsets.top)",
-                "controllerAdditionalLeftAfter": "\(controller.additionalSafeAreaInsets.left)",
-                "controllerAdditionalBottomAfter": "\(controller.additionalSafeAreaInsets.bottom)",
-                "controllerAdditionalRightAfter": "\(controller.additionalSafeAreaInsets.right)",
-                "controllerObscuredTopAfter": "\(controller.obscuredInsets.top)",
-                "controllerObscuredLeftAfter": "\(controller.obscuredInsets.left)",
-                "controllerObscuredBottomAfter": "\(controller.obscuredInsets.bottom)",
-                "controllerObscuredRightAfter": "\(controller.obscuredInsets.right)",
-                "scrollAdjustedContentInsetTopAfter": "\(controller.webView.scrollView.adjustedContentInset.top)",
-                "scrollAdjustedContentInsetLeftAfter": "\(controller.webView.scrollView.adjustedContentInset.left)",
-                "scrollAdjustedContentInsetBottomAfter": "\(controller.webView.scrollView.adjustedContentInset.bottom)",
-                "scrollAdjustedContentInsetRightAfter": "\(controller.webView.scrollView.adjustedContentInset.right)",
-                "scrollContentInsetTopAfter": "\(controller.webView.scrollView.contentInset.top)",
-                "scrollContentInsetLeftAfter": "\(controller.webView.scrollView.contentInset.left)",
-                "scrollContentInsetBottomAfter": "\(controller.webView.scrollView.contentInset.bottom)",
-                "scrollContentInsetRightAfter": "\(controller.webView.scrollView.contentInset.right)",
-                "webViewID": readerLoadObjectIDString(controller.webView)
-            ]
-        )
-        if (hostLayoutChanges.changedAdditionalSafeAreaInsets || hostLayoutChanges.changedObscuredInsets),
-           let requestedAt = context.coordinator.navigator.readerLoadRequestedAt,
-           context.coordinator.navigator.readerLoadProvisionalStartedAt == nil {
-            let elapsedSinceRequested = Date().timeIntervalSince(requestedAt)
-        }
-
         // _obscuredInsets ignores sides, probably
-        controller.onReplaceWebView = { [weak coordinator = context.coordinator] oldWebView, newWebView in
-            coordinator?.navigator.logCompetingOperationIfNeeded(
-                "replaceWebView",
-                metadata: [
-                    "newWebViewID": readerLoadObjectIDString(newWebView),
-                    "oldWebViewID": readerLoadObjectIDString(oldWebView)
-                ]
-            )
-        }
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
             if coordinator.lifecycleConfig.autoUnloadOnDisappear, controller.isWebViewUnloaded {
@@ -8052,45 +6007,6 @@ extension WebView: UIViewControllerRepresentable {
 #endif
 
 #if os(macOS)
-private func nativeLookupMacPopoverLogValue(_ value: Any) -> String {
-    let mirror = Mirror(reflecting: value)
-    if mirror.displayStyle == .optional {
-        guard let child = mirror.children.first else { return "nil" }
-        return nativeLookupMacPopoverLogValue(child.value)
-    }
-    switch value {
-    case let value as String:
-        return value.replacingOccurrences(of: "\n", with: "\\n")
-    case let value as Bool:
-        return value ? "true" : "false"
-    case let value as CGFloat:
-        return value.isFinite ? String(format: "%.2f", Double(value)) : "\(value)"
-    case let value as Double:
-        return value.isFinite ? String(format: "%.2f", value) : "\(value)"
-    case let value as CGPoint:
-        return "{\(String(format: "%.2f", value.x)),\(String(format: "%.2f", value.y))}"
-    case let value as CGSize:
-        return "{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}"
-    case let value as CGRect:
-        return "{{\(String(format: "%.2f", value.minX)),\(String(format: "%.2f", value.minY))},{\(String(format: "%.2f", value.width)),\(String(format: "%.2f", value.height))}}"
-    case let value as [String: Any]:
-        return "{" + value.keys.sorted().map { "\($0):\(nativeLookupMacPopoverLogValue(value[$0] as Any))" }.joined(separator: ",") + "}"
-    case let value as [Any]:
-        return "[" + value.prefix(5).map { nativeLookupMacPopoverLogValue($0) }.joined(separator: ",") + (value.count > 5 ? ",..." : "") + "]"
-    default:
-        return String(describing: value).replacingOccurrences(of: "\n", with: "\\n")
-    }
-}
-
-private func nativeLookupMacPopoverLog(_ stage: String, _ payload: [String: Any] = [:]) {
-    let details = payload.keys.sorted()
-        .map { "\($0)=\(nativeLookupMacPopoverLogValue(payload[$0] as Any))" }
-        .joined(separator: " ")
-    if details.isEmpty {
-    } else {
-    }
-}
-
 private final class NativeLookupHitTestOverlayNSView: NSView {
     private enum PressedSegmentStyle {
         static let pressedStrokeAlpha: CGFloat = 0.8
@@ -8191,7 +6107,6 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
 
     override func mouseDown(with event: NSEvent) {
         guard let view else {
-            nativeLookupMacPopoverLog("mac.click.mouseDown.noView")
             state = .failed
             return
         }
@@ -8202,18 +6117,6 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         }
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
-        nativeLookupMacPopoverLog("mac.click.mouseDown.target", [
-            "point": point,
-            "windowPoint": event.locationInWindow,
-            "bounds": view.bounds,
-            "targetID": target.elementID,
-            "targetRects": WebViewNativeLookupHitTestStore.debugRectStrings(target.rects),
-            "hasLookupPayload": target.lookupPayload != nil,
-            "frameInfo": target.frameInfo as Any,
-            "activeElementID": store?.activeElementID as Any,
-            "mouseDownWasActiveTarget": mouseDownWasActiveTarget,
-            "targetCount": store?.targetCount as Any,
-        ])
         store?.onActiveTargetTouchDown?(target)
         if store?.showsPressedTargetOverlay == true {
             pressedOverlay?.showPressedTarget(target)
@@ -8293,25 +6196,11 @@ public final class WebViewHostNSView: NSView {
         guard recognizer.state == .ended else { return }
         let point = recognizer.location(in: nativeLookupHitTestOverlayView)
         if recognizer.mouseDownWasActiveTarget {
-            nativeLookupMacPopoverLog("mac.click.ended.suppressedActiveTarget", [
-                "point": point,
-                "bounds": nativeLookupHitTestOverlayView.bounds,
-                "targetCount": recognizer.store?.targetCount as Any,
-                "enabled": recognizer.store?.isEnabled as Any,
-            ])
             recognizer.clearMouseDownWasActiveTarget()
             return
         }
-        let handled = recognizer.store?.handleTap(at: point, in: nativeLookupHitTestOverlayView.bounds.size) == true
+        _ = recognizer.store?.handleTap(at: point, in: nativeLookupHitTestOverlayView.bounds.size)
         recognizer.clearMouseDownWasActiveTarget()
-        nativeLookupMacPopoverLog("mac.click.ended.dispatch", [
-            "point": point,
-            "bounds": nativeLookupHitTestOverlayView.bounds,
-            "handled": handled,
-            "targetCount": recognizer.store?.targetCount as Any,
-            "enabled": recognizer.store?.isEnabled as Any,
-            "nearest": recognizer.store?.diagnostics(at: point, limit: 5, in: nativeLookupHitTestOverlayView.bounds.size) as Any,
-        ])
     }
 }
 
@@ -8349,10 +6238,11 @@ extension WebView: NSViewRepresentable {
             resolvedState: resolvedUserScriptsState
         )
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+        webView.configuredIsOpaque = config.isOpaque
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
             let resolvedBackgroundColor: NSColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
+                && !webViewCanUseSampledPageTopColorBackground()
                 ? (config.isOpaque ? .windowBackgroundColor : .clear)
                 : NSColor(config.backgroundColor)
             webView.layer?.backgroundColor = resolvedBackgroundColor.cgColor
@@ -8372,33 +6262,13 @@ extension WebView: NSViewRepresentable {
                 throw ScriptCallerError.evaluationTimedOut
             }
             let resolvedWorld = world ?? .page
-#if DEBUG
-            let jsPrefix = js.prefix(120)
-            let frameURL = frame?.request.url?.absoluteString ?? "nil"
-            let isMainFrame = frame?.isMainFrame ?? true
-            let currentURL = webView.url?.absoluteString ?? "nil"
-            let startedAt = Date()
-            let evalTraceID = "eval-\(Int((startedAt.timeIntervalSince1970 * 1000).rounded()))-\(UUID().uuidString.prefix(6))"
-#endif
-            do {
-                let value: Any?
-                if let args {
-                    value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
-                } else {
-                    value = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
-                }
-#if DEBUG
-                let elapsed = Date().timeIntervalSince(startedAt)
-                let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
-                let stringLength = (value as? String)?.count
-#endif
-                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
-            } catch {
-#if DEBUG
-                let elapsed = Date().timeIntervalSince(startedAt)
-#endif
-                throw error
+            let value: Any?
+            if let args {
+                value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
+            } else {
+                value = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
             }
+            return WebViewScriptCaller.JavaScriptEvaluationResult(value)
         }
         
         refreshDarkModeSetting(webView: webView)
@@ -8425,13 +6295,12 @@ extension WebView: NSViewRepresentable {
         configuration.applicationNameForUserAgent = userAgent
 #if os(iOS)
         if config.usesSampledPageTopColorForUnderPageBackground,
-           manabiCanUseSampledPageTopColorBackground() {
-            configuration.enableManabiPageTopColorSampling()
+           webViewCanUseSampledPageTopColorBackground() {
+            configuration.enablePageTopColorSampling()
         }
 #endif
         configuration.defaultWebpagePreferences = preferences
         configuration.websiteDataStore = WKWebsiteDataStore.default()
-        configuration.processPool = webViewProcessPool
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
 
@@ -8490,10 +6359,11 @@ extension WebView: NSViewRepresentable {
             )
             refreshDarkModeSetting(webView: webView)
             let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+            webView.configuredIsOpaque = config.isOpaque
             webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
             if #available(macOS 11.0, *) {
                 let resolvedBackgroundColor: NSColor = config.usesSampledPageTopColorForUnderPageBackground
-                    && !manabiCanUseSampledPageTopColorBackground()
+                    && !webViewCanUseSampledPageTopColorBackground()
                     ? (config.isOpaque ? .windowBackgroundColor : .clear)
                     : NSColor(config.backgroundColor)
                 webView.layer?.backgroundColor = resolvedBackgroundColor.cgColor
@@ -8720,7 +6590,7 @@ extension WebView {
 
         if #available(iOS 14.0, *) {
             let resolvedColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
+                && !webViewCanUseSampledPageTopColorBackground()
                 ? (config.isOpaque ? .systemBackground : .clear)
                 : UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedColor
@@ -8752,7 +6622,6 @@ extension WebView {
         coordinator: WebViewCoordinator,
         overrideRules: String? = nil
     ) {
-        let startedAt = Date()
         let rules = (overrideRules ?? config.contentRules)?.trimmingCharacters(in: .whitespacesAndNewlines)
         userContentController.removeAllContentRuleLists()
         guard let contentRules = rules, !contentRules.isEmpty else {
@@ -8769,12 +6638,8 @@ extension WebView {
         WKContentRuleListStore.default().compileContentRuleList(
             forIdentifier: "ContentBlockingRules",
             encodedContentRuleList: contentRules
-        ) { ruleList, error in
+        ) { ruleList, _ in
             guard let ruleList else {
-                if let error {
-#if DEBUG
-#endif
-                }
                 return
             }
             userContentController.add(ruleList)
@@ -8846,7 +6711,6 @@ extension WebView {
         forDomain domain: URL?,
         resolvedState: (scripts: [WebViewUserScript], signature: String)
     ) {
-        let startedAt = Date()
         let allScripts = resolvedState.scripts
         let installedScriptsSignature = resolvedState.signature
 
@@ -8876,23 +6740,14 @@ extension WebView {
             }
         }
         coordinator.lastUserScriptsContentController = userContentController
-        if coordinator.lastInstalledScriptsSignature != installedScriptsSignature {
-#if DEBUG
-#endif
-            coordinator.lastInstalledScriptsSignature = installedScriptsSignature
-        }
+        coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
-        if coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
-        }
     }
     
     @MainActor fileprivate static let systemScripts = [
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
-        ReaderBootstrapPingUserScript().userScript,
-        ReaderDocStateUserScript().userScript,
-        UnhandledTapUserScript().userScript,
         PageIconChangeUserScript().userScript,
         TextSelectionUserScript().userScript,
     ]
@@ -8903,8 +6758,6 @@ extension WebView {
         "swiftUIWebViewImageUpdated",
         "swiftUIWebViewPageIconUpdated",
         "swiftUIWebViewTextSelection",
-        "readerBootstrapPing",
-        "readerDocState",
         "readerLoadSignpost",
         "swiftUIWebViewUnhandledTap",
     ]
