@@ -4,10 +4,9 @@ import UIKit
 import WebKit
 
 extension WebViewCoordinator: UIScrollViewDelegate {
-    private func shouldLogLayoutScroll(for scrollView: UIScrollView) -> (WKWebView, WebViewPaginationConfiguration)? {
+    private func layoutScrollContext(for scrollView: UIScrollView) -> (WKWebView, WebViewPaginationConfiguration)? {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return nil }
-        let configuration = paginationController.currentState().appliedConfiguration ?? config.paginationConfiguration
-        guard webViewLayoutShouldLog(webView: webView, configuration: configuration) else { return nil }
+        let configuration = paginationController.lastAppliedConfiguration ?? config.paginationConfiguration
         return (webView, configuration)
     }
 
@@ -27,9 +26,16 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         ].joined(separator: "|")
     }
 
-    private func logLayoutScroll(_ stage: String, scrollView: UIScrollView, force: Bool = false) {
-        guard let (webView, configuration) = shouldLogLayoutScroll(for: scrollView) else { return }
-        let signature = layoutPageSignature(scrollView: scrollView, configuration: configuration)
+    private func logLayoutScroll(
+        _ stage: @autoclosure () -> String,
+        scrollView: UIScrollView,
+        force: Bool = false
+    ) {
+        guard let (webView, configuration) = layoutScrollContext(for: scrollView) else { return }
+        guard let signature = webViewLayoutDiagnosticValue(
+            webViewLayoutShouldLog(webView: webView, configuration: configuration),
+            layoutPageSignature(scrollView: scrollView, configuration: configuration)
+        ) else { return }
         if !force && signature == lastLayoutScrollPageSignature {
             return
         }
@@ -37,8 +43,8 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
         var payload = webViewLayoutScrollPayload(webView: webView, configuration: configuration)
         payload["pageSignature"] = signature
-        payload["pageCount"] = paginationController.currentState().pageCount ?? -1
-        webViewLayoutDebugLog(stage, payload)
+        payload["pageCount"] = paginationController.lastPageCount ?? -1
+        webViewLayoutDebugLog(stage(), payload)
     }
 
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {

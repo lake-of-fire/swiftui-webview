@@ -705,6 +705,15 @@ private func webViewPaginationDebugLog(_: String, _: [String: Any] = [:]) {}
 @inline(__always)
 func webViewLayoutDebugLog(_: String, _: [String: Any] = [:]) {}
 
+@inline(__always)
+func webViewLayoutDiagnosticValue<T>(
+    _ enabled: Bool,
+    _ value: @autoclosure () -> T
+) -> T? {
+    guard enabled else { return nil }
+    return value()
+}
+
 func webViewLayoutRounded(_ value: CGFloat) -> Double {
     Double((value * 100).rounded() / 100)
 }
