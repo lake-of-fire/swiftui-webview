@@ -3221,6 +3221,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    private func allowsDetachedLoad(_ request: URLRequest) -> Bool {
+        request.url?.scheme?.caseInsensitiveCompare("ebook") == .orderedSame
+    }
+
+    @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
         if recoverFromStaleAboutBlankIfNeeded(
             for: request,
@@ -3228,10 +3233,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
         ) {
             return
         }
+        let permitsDetachedLoad = allowsDetachedLoad(request)
         let disposition = PendingRequestLoadDisposition.resolve(
             requestURL: request.url,
-            hasWindow: webView.window != nil,
-            hasSuperview: webView.superview != nil,
+            hasWindow: permitsDetachedLoad || webView.window != nil,
+            hasSuperview: permitsDetachedLoad || webView.superview != nil,
             currentURL: webView.url,
             isLoading: webView.isLoading,
             restartIfSameURL: restartIfSameURL
@@ -3277,9 +3283,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 ]
             )
             webView.loadFileURL(url, allowingReadAccessTo: url)
+            pendingRequest = nil
+            pendingRequestSetAt = nil
         case .loadRequest:
             markReaderLoadIssued()
             webView.load(request)
+            pendingRequest = nil
+            pendingRequestSetAt = nil
         }
         self.cancelPendingRequestLoadTask()
     }
@@ -3306,7 +3316,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
             guard let webView else { return }
             if let request = pendingRequest {
                 cancelAttachFallbackLoadTask()
-                if webView.window == nil || webView.superview == nil {
+                let permitsDetachedLoad = allowsDetachedLoad(request)
+                if !permitsDetachedLoad && (webView.window == nil || webView.superview == nil) {
                     return
                 }
                 issuePendingRequestLoad(request, on: webView, restartIfSameURL: true, diagnosticsReason: "webViewDidSet.attached")
@@ -3360,11 +3371,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask()
         beginReaderLoadTrace(for: request)
         if let webView = webView {
-            if webView.window == nil || webView.superview == nil {
+            let permitsDetachedLoad = allowsDetachedLoad(request)
+            if !permitsDetachedLoad && (webView.window == nil || webView.superview == nil) {
                 pendingRequest = request
                 pendingRequestSetAt = Date()
                 return
             }
+            pendingRequest = nil
+            pendingRequestSetAt = nil
             if recoverFromStaleAboutBlankIfNeeded(for: request, on: webView) {
                 return
             }
