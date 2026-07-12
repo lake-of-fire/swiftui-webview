@@ -27,11 +27,35 @@ public final class WebViewPrewarmer: ObservableObject {
 @MainActor
 public final class WebViewPool: ObservableObject {
     public var warmUpCount: Int {
-        didSet { prepareIfPossible() }
+        didSet {
+            if configuredTotalCountTarget == nil {
+                prepareIfPossible()
+            } else {
+                rebalanceRetainedObjects()
+            }
+        }
     }
 
     public var keepAliveCount: Int {
-        didSet { prepareIfPossible() }
+        didSet {
+            if configuredTotalCountTarget == nil {
+                prepareIfPossible()
+            } else {
+                rebalanceRetainedObjects()
+            }
+        }
+    }
+
+    private var configuredTotalCountTarget: Int?
+
+    /// Opts into a total pool size that includes both retained and currently leased web views.
+    /// Set this to `nil` to use the legacy `warmUpCount + keepAliveCount` retained-view target.
+    public var totalCountTarget: Int? {
+        get { configuredTotalCountTarget }
+        set {
+            configuredTotalCountTarget = newValue.map { max(0, $0) }
+            rebalanceRetainedObjects()
+        }
     }
 
     public var onEnqueue: ((EnhancedWKWebView) -> Void)?
@@ -40,12 +64,26 @@ public final class WebViewPool: ObservableObject {
     public var debugLabel: String?
 
     private var warmedUpObjects: [EnhancedWKWebView] = []
+    private var leasedObjectIdentifiers = Set<ObjectIdentifier>()
     private var creationClosure: (() -> EnhancedWKWebView)?
 
-    private var targetCount: Int { warmUpCount + keepAliveCount }
+    private var targetRetainedCount: Int {
+        if let configuredTotalCountTarget {
+            return max(0, configuredTotalCountTarget - leasedObjectIdentifiers.count)
+        }
+        return max(0, warmUpCount) + max(0, keepAliveCount)
+    }
 
     public var retainedCount: Int {
         warmedUpObjects.count
+    }
+
+    public var leasedCount: Int {
+        leasedObjectIdentifiers.count
+    }
+
+    public var totalCount: Int {
+        retainedCount + leasedCount
     }
 
     public init(warmUpCount: Int = 0, keepAliveCount: Int = 0) {
@@ -83,7 +121,7 @@ public final class WebViewPool: ObservableObject {
             return
         }
         log(event: "prepare.begin")
-        while warmedUpObjects.count < targetCount {
+        while warmedUpObjects.count < targetRetainedCount {
             let webView = creationClosure()
             webView.warmUpIfNeeded(resetURL: defaultResetURL)
             warmedUpObjects.append(webView)
@@ -94,6 +132,19 @@ public final class WebViewPool: ObservableObject {
             )
         }
         log(event: "prepare.end")
+    }
+
+    private func rebalanceRetainedObjects() {
+        while warmedUpObjects.count > targetRetainedCount {
+            let webView = warmedUpObjects.removeLast()
+            onDequeue?(webView)
+            webView.resetForReuse(resetURL: defaultResetURL)
+            log(
+                event: "trim.released",
+                extra: ["webView": webViewIdentifier(webView)]
+            )
+        }
+        prepareIfPossible()
     }
 
 #if os(iOS)
@@ -120,6 +171,7 @@ public final class WebViewPool: ObservableObject {
             webView.warmUpIfNeeded(resetURL: defaultResetURL)
             source = "new"
         }
+        leasedObjectIdentifiers.insert(ObjectIdentifier(webView))
         onDequeue?(webView)
         webView.isHidden = false
         log(
@@ -134,7 +186,13 @@ public final class WebViewPool: ObservableObject {
 
     public func enqueue(_ webView: EnhancedWKWebView, resetURL: URL? = nil) {
         let effectiveResetURL = resetURL ?? defaultResetURL
-        if warmedUpObjects.count < targetCount {
+        let webViewID = ObjectIdentifier(webView)
+        leasedObjectIdentifiers.remove(webViewID)
+        guard !warmedUpObjects.contains(where: { $0 === webView }) else {
+            log(event: "enqueue.skip.duplicate", extra: ["webView": String(describing: webViewID)])
+            return
+        }
+        if warmedUpObjects.count < targetRetainedCount {
             webView.resetForReuse(resetURL: effectiveResetURL)
             warmedUpObjects.append(webView)
             onEnqueue?(webView)
@@ -167,10 +225,12 @@ public final class WebViewPool: ObservableObject {
         var payload: [String: Any] = [
             "label": debugLabel,
             "pool": poolIdentifier,
-            "target": targetCount,
+            "targetRetained": targetRetainedCount,
+            "targetTotal": configuredTotalCountTarget as Any,
             "warmUpCount": warmUpCount,
             "keepAliveCount": keepAliveCount,
-            "warmedCount": warmedUpObjects.count
+            "warmedCount": warmedUpObjects.count,
+            "leasedCount": leasedObjectIdentifiers.count
         ]
         for (key, value) in extra {
             payload[key] = value

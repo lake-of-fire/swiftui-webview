@@ -60,4 +60,51 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertFalse(config.nativeLookupHitTestingEnabled)
         XCTAssertEqual(config.paginationConfiguration.mode, .unpaginated)
     }
+
+    func testTotalCountTargetIncludesLeasedViewsAndTrimsIdleViews() {
+        let pool = WebViewPool()
+        pool.totalCountTarget = 3
+        var createdCount = 0
+        pool.setCreationClosureIfNeeded {
+            createdCount += 1
+            return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+
+        XCTAssertEqual(pool.retainedCount, 3)
+        XCTAssertEqual(pool.leasedCount, 0)
+        XCTAssertEqual(pool.totalCount, 3)
+
+        let first = pool.dequeue {
+            XCTFail("Expected a warmed web view")
+            return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+        let second = pool.dequeue {
+            XCTFail("Expected a warmed web view")
+            return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+        XCTAssertEqual(pool.retainedCount, 1)
+        XCTAssertEqual(pool.leasedCount, 2)
+        XCTAssertEqual(pool.totalCount, 3)
+
+        pool.totalCountTarget = 2
+        XCTAssertEqual(pool.retainedCount, 0)
+        XCTAssertEqual(pool.leasedCount, 2)
+        XCTAssertEqual(pool.totalCount, 2)
+
+        pool.enqueue(first)
+        XCTAssertEqual(pool.retainedCount, 1)
+        XCTAssertEqual(pool.leasedCount, 1)
+        XCTAssertEqual(pool.totalCount, 2)
+
+        pool.totalCountTarget = 1
+        XCTAssertEqual(pool.retainedCount, 0)
+        XCTAssertEqual(pool.leasedCount, 1)
+        XCTAssertEqual(pool.totalCount, 1)
+
+        pool.enqueue(second)
+        XCTAssertEqual(pool.retainedCount, 1)
+        XCTAssertEqual(pool.leasedCount, 0)
+        XCTAssertEqual(pool.totalCount, 1)
+        XCTAssertEqual(createdCount, 3)
+    }
 }
