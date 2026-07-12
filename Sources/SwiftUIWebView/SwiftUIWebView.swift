@@ -46,13 +46,15 @@ public enum ReaderLoadSignposts {
         metadata: [String: String] = [:]
     ) -> Interval {
         let id = OSSignpostID(log: log)
+        var intervalMetadata = metadata
+        intervalMetadata["interval"] = String(describing: name)
         os_signpost(
             .begin,
             log: log,
             name: name,
             signpostID: id,
             "%{public}@",
-            payloadString(metadata)
+            payloadString(intervalMetadata)
         )
         return Interval(id: id, name: name)
     }
@@ -61,13 +63,15 @@ public enum ReaderLoadSignposts {
         _ interval: Interval,
         metadata: [String: String] = [:]
     ) {
+        var intervalMetadata = metadata
+        intervalMetadata["interval"] = String(describing: interval.name)
         os_signpost(
             .end,
             log: log,
             name: interval.name,
             signpostID: interval.id,
             "%{public}@",
-            payloadString(metadata)
+            payloadString(intervalMetadata)
         )
     }
 
