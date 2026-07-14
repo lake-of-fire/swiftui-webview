@@ -888,6 +888,8 @@ public final class WebViewNativeLookupHitTestStore {
     public var onActiveTargetTouchDown: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: ((WebViewNativeLookupHitTarget) -> Void)?
     public var onOverlaySegmentHitObserved: ((WebViewNativeLookupHitTarget, CGPoint, CGSize) -> Void)?
+    public var onOverlayPointHitTested: ((CGPoint, CGSize, WebViewNativeLookupHitTarget?) -> Void)?
+    public var onTouchStartHitTested: ((CGPoint, CGSize, WebViewNativeLookupHitTarget?) -> Void)?
     public var onNativeTouchStreamFinished: ((String) -> Void)?
     public var onPressedTargetHandoffCompleted: ((String?) -> Void)?
     public var onActiveLookupBlankTap: (() -> Void)?
@@ -4500,6 +4502,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
             in: bounds.size,
             coordinateViewWindowOrigin: overlayWindowOrigin
         )
+        store?.onOverlayPointHitTested?(point, bounds.size, target)
         if let target {
             let capturesSegmentTouches = store?.capturesSegmentTouchesInOverlay == true
             let shouldPassThroughForWebTextSelection = store?.shouldPassThroughForWebTextSelection == true
@@ -4562,11 +4565,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         let hitPoint = point
         let windowPoint = touch.location(in: nil)
         let hitTestViewWindowOrigin = hitTestView.convert(CGPoint.zero, to: nil)
-        guard let target = store?.hitTarget(
+        let target = store?.hitTarget(
             at: hitPoint,
             in: hitTestView.bounds.size,
             coordinateViewWindowOrigin: hitTestViewWindowOrigin
-        ) else {
+        )
+        store?.onTouchStartHitTested?(hitPoint, hitTestView.bounds.size, target)
+        guard let target else {
             if store?.activeLookupElementID?() != nil,
                store?.shouldPassThroughForWebTextSelection != true {
                 touchStartPoint = point
