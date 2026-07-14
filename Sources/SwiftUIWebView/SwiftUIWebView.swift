@@ -1278,6 +1278,7 @@ public final class WebViewNativeLookupHitTestStore {
     private var entries: [Entry] = []
     private var nativeTouchElementID: String?
     private var suppressUnhandledTapUntil: TimeInterval = 0
+    private var webTextSelectionActive = false
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
@@ -1296,7 +1297,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var shouldSuppressUnhandledTapForNativeLookup: Bool {
         nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
     }
-    public var hasActiveWebTextSelection: Bool { false }
+    public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
 
     public init(hitSlop: CGFloat = 8) {
         self.hitSlop = hitSlop
@@ -1341,11 +1342,17 @@ public final class WebViewNativeLookupHitTestStore {
         entries.removeAll()
         nativeTouchElementID = nil
         suppressUnhandledTapUntil = 0
+        webTextSelectionActive = false
     }
 
     @MainActor
     public func closeActiveLookupFromBlankTap() {
+        guard !webTextSelectionActive else { return }
         onActiveLookupBlankTap?()
+    }
+
+    public func updateWebTextSelection(active: Bool) {
+        webTextSelectionActive = active
     }
 
     public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
@@ -1686,6 +1693,7 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
+        guard !webTextSelectionActive else { return false }
         let exactCandidate = bestCandidate(
             at: point,
             usingInflatedRects: false,
@@ -1759,6 +1767,7 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
+        guard !webTextSelectionActive else { return false }
         let rebased = rebasedHitTestPoint(
             point,
             containerSize: containerSize,
@@ -6664,6 +6673,11 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                     "segmentTargetTouchesReachWebKit": true,
                 ]
             )
+            resetTrackingState()
+            state = .failed
+            return
+        }
+        guard store?.hasActiveWebTextSelection != true else {
             resetTrackingState()
             state = .failed
             return
