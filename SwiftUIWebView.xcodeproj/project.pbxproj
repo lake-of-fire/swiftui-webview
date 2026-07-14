@@ -15,6 +15,7 @@
 		C290627DFD15ABE9B09E2FCA /* ZIPFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 22D3F6892D80089B3615787D /* ZIPFoundation.framework */; };
 		D100DDEDB12F576F423CD44A /* URLSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */; };
 		E78DF249FE340E7FAA50C0DF /* PDFJS.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A1922746100196C740DDA9 /* PDFJS.swift */; };
+		F3844FB495612D33AF7299C6 /* LoadingProgressPublicationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF791FBD9A0E3DC0624346B5 /* LoadingProgressPublicationState.swift */; };
 		FC0C82B773005F81D6E6F7B6 /* SwiftUIWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B50D26B28AAC13E05CE7C2F /* SwiftUIWebView.swift */; };
 /* End PBXBuildFile section */
 
@@ -42,6 +43,7 @@
 		B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OrderedCollections.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B46E4BE7B7C13DA35336B207 /* SwiftUIWebView-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "SwiftUIWebView-Info.plist"; sourceTree = "<group>"; };
 		C9A1922746100196C740DDA9 /* PDFJS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFJS.swift; sourceTree = "<group>"; };
+		CF791FBD9A0E3DC0624346B5 /* LoadingProgressPublicationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingProgressPublicationState.swift; sourceTree = "<group>"; };
 		DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSchemeHandler.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -89,6 +91,7 @@
 		BF86A80589AEE6799A5A7041 /* SwiftUIWebView */ = {
 			isa = PBXGroup;
 			children = (
+				CF791FBD9A0E3DC0624346B5 /* LoadingProgressPublicationState.swift */,
 				C9A1922746100196C740DDA9 /* PDFJS.swift */,
 				3B50D26B28AAC13E05CE7C2F /* SwiftUIWebView.swift */,
 				0D4EA4CD28D693B0668236E4 /* URL+Extensions.swift */,
@@ -191,6 +194,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F3844FB495612D33AF7299C6 /* LoadingProgressPublicationState.swift in Sources */,
 				E78DF249FE340E7FAA50C0DF /* PDFJS.swift in Sources */,
 				FC0C82B773005F81D6E6F7B6 /* SwiftUIWebView.swift in Sources */,
 				0B2392A28EF98970076AF683 /* URL+Extensions.swift in Sources */,
