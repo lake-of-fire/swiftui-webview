@@ -5510,7 +5510,7 @@ struct ReaderDocStateUserScript {
                 colorScheme: body?.dataset?.manabiColorScheme ?? null,
                 lightTheme: body?.dataset?.manabiLightTheme ?? null,
                 darkTheme: body?.dataset?.manabiDarkTheme ?? null,
-                trackingEnabled: body?.dataset?.manabiTrackingEnabled ?? null,
+                trackingEnabled: body?.dataset?.mnbTrackingEnabled ?? null,
                 trackingHighlightsEnabled: body?.dataset?.manabiTrackingHighlightsEnabled ?? null,
                 learningStatusVisibility: body?.dataset?.manabiLearningStatusVisibility ?? null,
                 showFamiliar: body?.dataset?.manabiShowFamiliar ?? null,
