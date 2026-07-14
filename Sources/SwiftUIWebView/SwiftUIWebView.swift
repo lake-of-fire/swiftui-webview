@@ -2209,8 +2209,7 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
     private var sampledPageTopColorObservation: WebViewStringKeyPathObserver<WKWebView, UIColor>?
 #endif
-    private var latestIsLoading = false
-    private var latestEstimatedProgress = 0.0
+    private var loadingProgressPublicationState = LoadingProgressPublicationState()
     private var lastProgressUpdateTime: CFTimeInterval = 0
     private var lastEmittedProgress: Double?
     private var pendingProgressUpdateTask: Task<Void, Never>?
@@ -2716,15 +2715,11 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func updateLoadingProgress(isLoading: Bool?, estimatedProgress: Double?) {
-        if let isLoading {
-            latestIsLoading = isLoading
-        }
-        if let estimatedProgress {
-            latestEstimatedProgress = estimatedProgress
-        }
-
-        let clampedProgress = max(0, min(latestEstimatedProgress, 1))
-        let progress: Double? = latestIsLoading ? clampedProgress : nil
+        let update = loadingProgressPublicationState.update(
+            isLoading: isLoading,
+            estimatedProgress: estimatedProgress
+        )
+        let progress = update.progress
         let now = CFAbsoluteTimeGetCurrent()
 
         let shouldEmitImmediately: Bool
@@ -2742,23 +2737,35 @@ public class WebViewCoordinator: NSObject {
         if shouldEmitImmediately {
             emitLoadingProgress(progress, now: now)
         } else {
-            scheduleLoadingProgressUpdate(progress, now: now)
+            scheduleLoadingProgressUpdate(now: now, generation: update.generation)
         }
     }
 
     @MainActor
-    private func scheduleLoadingProgressUpdate(_ progress: Double?, now: CFTimeInterval) {
+    private func scheduleLoadingProgressUpdate(now: CFTimeInterval, generation: UInt) {
         pendingProgressUpdateTask?.cancel()
         let elapsed = now - lastProgressUpdateTime
         let delay = max(0, progressUpdateMinimumInterval - elapsed)
         guard delay > 0 else {
-            emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            if case .publish(let progress) = loadingProgressPublicationState.resolve(generation: generation) {
+                emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            }
             return
         }
 
         pendingProgressUpdateTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            self?.emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            switch self.loadingProgressPublicationState.resolve(generation: generation) {
+            case .stale:
+                return
+            case .publish(let progress):
+                self.emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            }
         }
     }
 
@@ -2780,13 +2787,14 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     fileprivate func forceClearLoadingIndicators(reason: String, pageURL: URL?) {
         let effectivePageURL = pageURL ?? navigator.webView?.url ?? webView.state.pageURL
-        let hadLoadingState = webView.state.isLoading || webView.state.loadingProgress != nil || latestIsLoading
+        let hadLoadingState = webView.state.isLoading
+            || webView.state.loadingProgress != nil
+            || loadingProgressPublicationState.isLoading
         guard hadLoadingState else { return }
 
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
-        latestIsLoading = false
-        latestEstimatedProgress = 1
+        loadingProgressPublicationState.clear()
         lastEmittedProgress = nil
 
         var newState = webView.state
