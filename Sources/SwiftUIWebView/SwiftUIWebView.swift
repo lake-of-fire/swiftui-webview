@@ -1706,12 +1706,10 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
     private var sampledPageTopColorObservation: WebViewStringKeyPathObserver<WKWebView, UIColor>?
 #endif
-    private var latestIsLoading = false
-    private var latestEstimatedProgress = 0.0
+    private var loadingProgressPublicationState = LoadingProgressPublicationState()
     private var lastProgressUpdateTime: CFTimeInterval = 0
     private var lastEmittedProgress: Double?
     private var pendingProgressUpdateTask: Task<Void, Never>?
-    private var loadingProgressUpdateGeneration: Int = 0
     private var pendingPaginationApplyTask: Task<Void, Never>?
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
@@ -2232,17 +2230,11 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func updateLoadingProgress(isLoading: Bool?, estimatedProgress: Double?, source: String) {
-        loadingProgressUpdateGeneration &+= 1
-        let generation = loadingProgressUpdateGeneration
-        if let isLoading {
-            latestIsLoading = isLoading
-        }
-        if let estimatedProgress {
-            latestEstimatedProgress = estimatedProgress
-        }
-
-        let clampedProgress = max(0, min(latestEstimatedProgress, 1))
-        let progress: Double? = latestIsLoading ? clampedProgress : nil
+        let update = loadingProgressPublicationState.update(
+            isLoading: isLoading,
+            estimatedProgress: estimatedProgress
+        )
+        let progress = update.progress
         let now = CFAbsoluteTimeGetCurrent()
 
         let shouldDeferUntilProvisionalStart = isInternalReaderLoaderURL(navigator.readerLoadRequestedURL)
@@ -2269,27 +2261,32 @@ public class WebViewCoordinator: NSObject {
         if shouldEmitImmediately {
             emitLoadingProgress(progress, now: now)
         } else {
-            scheduleLoadingProgressUpdate(progress, now: now, generation: generation)
+            scheduleLoadingProgressUpdate(now: now, generation: update.generation)
         }
     }
 
     @MainActor
-    private func scheduleLoadingProgressUpdate(_ progress: Double?, now: CFTimeInterval, generation: Int) {
+    private func scheduleLoadingProgressUpdate(now: CFTimeInterval, generation: UInt) {
         pendingProgressUpdateTask?.cancel()
         let elapsed = now - lastProgressUpdateTime
         let delay = max(0, progressUpdateMinimumInterval - elapsed)
         guard delay > 0 else {
-            emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            if case .publish(let progress) = loadingProgressPublicationState.resolve(generation: generation) {
+                emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
+            }
             return
         }
         pendingProgressUpdateTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
             guard let self else { return }
-            guard self.loadingProgressUpdateGeneration == generation else { return }
-            let currentProgress: Double? = self.latestIsLoading
-                ? max(0, min(self.latestEstimatedProgress, 1))
-                : nil
-            self.emitLoadingProgress(currentProgress, now: CFAbsoluteTimeGetCurrent())
+            guard case .publish(let progress) = self.loadingProgressPublicationState.resolve(generation: generation) else {
+                return
+            }
+            self.emitLoadingProgress(progress, now: CFAbsoluteTimeGetCurrent())
         }
     }
 
@@ -2310,15 +2307,16 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     fileprivate func forceClearLoadingIndicators(reason: String, pageURL: URL?) {
         let effectivePageURL = pageURL ?? navigator.webView?.url ?? webView.state.pageURL
-        let hadLoadingState = webView.state.isLoading || webView.state.loadingProgress != nil || latestIsLoading
+        let hadLoadingState = webView.state.isLoading
+            || webView.state.loadingProgress != nil
+            || loadingProgressPublicationState.isLoading
         guard hadLoadingState else {
             return
         }
 
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
-        latestIsLoading = false
-        latestEstimatedProgress = 0
+        loadingProgressPublicationState.clear()
         lastProgressUpdateTime = CFAbsoluteTimeGetCurrent()
         lastEmittedProgress = nil
 
