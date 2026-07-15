@@ -827,6 +827,7 @@ public struct WebViewNativeLookupHit {
     public let debugHitTestRebaseX: CGFloat?
     public let debugHitTestRebaseY: CGFloat?
     public let frameInfo: WKFrameInfo?
+    public let nativeLookupFrameKey: String?
 
     public init(
         elementID: String,
@@ -840,7 +841,8 @@ public struct WebViewNativeLookupHit {
         debugHitTestPoint: CGPoint? = nil,
         debugHitTestRebaseX: CGFloat? = nil,
         debugHitTestRebaseY: CGFloat? = nil,
-        frameInfo: WKFrameInfo? = nil
+        frameInfo: WKFrameInfo? = nil,
+        nativeLookupFrameKey: String? = nil
     ) {
         self.elementID = elementID
         self.point = point
@@ -854,6 +856,7 @@ public struct WebViewNativeLookupHit {
         self.debugHitTestRebaseX = debugHitTestRebaseX
         self.debugHitTestRebaseY = debugHitTestRebaseY
         self.frameInfo = frameInfo
+        self.nativeLookupFrameKey = nativeLookupFrameKey
     }
 }
 
@@ -1385,7 +1388,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestPoint: target.debugHitTestPoint,
             debugHitTestRebaseX: target.debugHitTestRebaseX,
             debugHitTestRebaseY: target.debugHitTestRebaseY,
-            frameInfo: target.frameInfo
+            frameInfo: target.frameInfo,
+            nativeLookupFrameKey: target.nativeLookupFrameKey
         ))
         return true
     }
@@ -1416,7 +1420,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestPoint: rebased.point,
             debugHitTestRebaseX: rebased.rebaseX,
             debugHitTestRebaseY: rebased.rebaseY,
-            frameInfo: target.frameInfo
+            frameInfo: target.frameInfo,
+            nativeLookupFrameKey: target.nativeLookupFrameKey
         ))
         return true
     }
@@ -3808,8 +3813,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     }
 
     @MainActor
+    public func exactFrame(for url: URL?) -> WKFrameInfo? {
+        guard let key = canonicalFrameKey(for: url) else { return nil }
+        return framesByCanonicalURL[key]
+    }
+
+    @MainActor
     public func frame(for url: URL?) -> WKFrameInfo? {
-        if let key = canonicalFrameKey(for: url), let frame = framesByCanonicalURL[key] {
+        if let frame = exactFrame(for: url) {
             return frame
         }
         if let mainFrame = lastKnownMainFrame {
