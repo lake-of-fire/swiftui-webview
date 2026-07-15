@@ -48,6 +48,53 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(dequeuedCount, 3)
     }
 
+    func testTotalCountTargetIncludesCheckedOutAndRetainedWebViews() {
+        let pool = WebViewPool()
+        var createdCount = 0
+        pool.setCreationClosureIfNeeded {
+            createdCount += 1
+            return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+
+        pool.totalCountTarget = 4
+        XCTAssertEqual(createdCount, 4)
+        XCTAssertEqual(pool.totalCount, 4)
+        XCTAssertEqual(pool.retainedCount, 4)
+
+        let first = pool.dequeue {
+            XCTFail("Expected a retained web view")
+            return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+        let second = pool.dequeue {
+            XCTFail("Expected a retained web view")
+            return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+        XCTAssertEqual(pool.totalCount, 4)
+        XCTAssertEqual(pool.retainedCount, 2)
+
+        pool.totalCountTarget = 2
+        XCTAssertEqual(pool.totalCount, 2)
+        XCTAssertEqual(pool.retainedCount, 0)
+
+        pool.enqueue(first)
+        XCTAssertEqual(pool.totalCount, 2)
+        XCTAssertEqual(pool.retainedCount, 1)
+
+        pool.totalCountTarget = 0
+        XCTAssertEqual(pool.totalCount, 1)
+        XCTAssertEqual(pool.retainedCount, 0)
+
+        pool.enqueue(second)
+        XCTAssertEqual(pool.totalCount, 0)
+        XCTAssertEqual(pool.retainedCount, 0)
+    }
+
+    func testTotalCountTargetClampsNegativeValues() {
+        let pool = WebViewPool()
+        pool.totalCountTarget = -4
+        XCTAssertEqual(pool.totalCountTarget, 0)
+    }
+
     func testTransparentNonScrollingOverlayConfigIsGestureNeutralByDefault() {
         let config = WebViewConfig.transparentNonScrollingOverlay
 
