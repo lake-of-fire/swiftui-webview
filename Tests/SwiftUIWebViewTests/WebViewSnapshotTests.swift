@@ -1,8 +1,32 @@
 import CoreGraphics
 @testable import SwiftUIWebView
+import WebKit
 import XCTest
 
 final class WebViewSnapshotTests: XCTestCase {
+    @MainActor
+    func testWebViewAcceptsAnIsolatedWebsiteDataStore() {
+        let websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        let webView = WebView(
+            navigator: WebViewNavigator(),
+            state: .constant(.empty),
+            websiteDataStore: websiteDataStore
+        )
+
+        XCTAssertTrue(webView.websiteDataStore === websiteDataStore)
+    }
+
+    @MainActor
+    func testSnapshotConfigurationCapturesSettledCurrentFrameWithoutWaitingForAnimation() {
+        let rect = CGRect(x: 10, y: 20, width: 320, height: 480)
+
+        let configuration = makeWebViewSnapshotConfiguration(capturedRect: rect)
+
+        XCTAssertEqual(configuration.rect, rect)
+        XCTAssertEqual(configuration.snapshotWidth, 320)
+        XCTAssertFalse(configuration.afterScreenUpdates)
+    }
+
     func testResolvedSnapshotRectUsesFullBoundsWhenNoRectIsRequested() throws {
         let bounds = CGRect(x: 0, y: 0, width: 320, height: 480)
 

@@ -5,6 +5,14 @@ import WebKit
 import UIKit
 #endif
 
+public struct WebViewPoolContentID: Equatable, Hashable, Sendable {
+    public var rawValue: String
+
+    public init(_ rawValue: String) {
+        self.rawValue = rawValue
+    }
+}
+
 @MainActor
 public final class WebViewPrewarmer: ObservableObject {
     public let pool: WebViewPool
@@ -26,6 +34,10 @@ public final class WebViewPrewarmer: ObservableObject {
 
 @MainActor
 public final class WebViewPool: ObservableObject {
+    private struct RetainedWebView {
+        var webView: EnhancedWKWebView
+        var contentID: WebViewPoolContentID?
+    }
     public var warmUpCount: Int {
         didSet {
             if configuredTotalCountTarget == nil {
@@ -63,7 +75,7 @@ public final class WebViewPool: ObservableObject {
     public var defaultResetURL: URL?
     public var debugLabel: String?
 
-    private var warmedUpObjects: [EnhancedWKWebView] = []
+    private var warmedUpObjects: [RetainedWebView] = []
     private var leasedObjectIdentifiers = Set<ObjectIdentifier>()
     private var creationClosure: (() -> EnhancedWKWebView)?
 
@@ -97,9 +109,9 @@ public final class WebViewPool: ObservableObject {
 
     deinit {
         MainActor.assumeIsolated {
-            for webView in warmedUpObjects {
-                onDequeue?(webView)
-                webView.resetForReuse(resetURL: nil)
+            for retained in warmedUpObjects {
+                onDequeue?(retained.webView)
+                retained.webView.resetForReuse(resetURL: nil)
             }
             warmedUpObjects.removeAll()
         }
@@ -124,7 +136,7 @@ public final class WebViewPool: ObservableObject {
         while warmedUpObjects.count < targetRetainedCount {
             let webView = creationClosure()
             webView.warmUpIfNeeded(resetURL: defaultResetURL)
-            warmedUpObjects.append(webView)
+            warmedUpObjects.append(RetainedWebView(webView: webView, contentID: nil))
             onEnqueue?(webView)
             log(
                 event: "prepare.created",
@@ -136,7 +148,8 @@ public final class WebViewPool: ObservableObject {
 
     private func rebalanceRetainedObjects() {
         while warmedUpObjects.count > targetRetainedCount {
-            let webView = warmedUpObjects.removeLast()
+            let retained = warmedUpObjects.removeLast()
+            let webView = retained.webView
             onDequeue?(webView)
             webView.resetForReuse(resetURL: defaultResetURL)
             log(
@@ -155,6 +168,13 @@ public final class WebViewPool: ObservableObject {
 #endif
 
     public func dequeue(createIfNeeded: @escaping () -> EnhancedWKWebView) -> EnhancedWKWebView {
+        dequeue(preferredContentID: nil, createIfNeeded: createIfNeeded)
+    }
+
+    public func dequeue(
+        preferredContentID: WebViewPoolContentID?,
+        createIfNeeded: @escaping () -> EnhancedWKWebView
+    ) -> EnhancedWKWebView {
         if creationClosure == nil {
             creationClosure = createIfNeeded
             log(event: "dequeue.creationClosure.set")
@@ -162,9 +182,13 @@ public final class WebViewPool: ObservableObject {
         prepareIfPossible()
         let webView: EnhancedWKWebView
         let source: String
-        if let warmed = warmedUpObjects.first {
+        if let preferredContentID,
+           let exactIndex = warmedUpObjects.firstIndex(where: { $0.contentID == preferredContentID }) {
+            webView = warmedUpObjects.remove(at: exactIndex).webView
+            source = "warmed.exactContent"
+        } else if let warmed = warmedUpObjects.first {
             warmedUpObjects.removeFirst()
-            webView = warmed
+            webView = warmed.webView
             source = "warmed"
         } else {
             webView = (creationClosure ?? createIfNeeded)()
@@ -188,13 +212,14 @@ public final class WebViewPool: ObservableObject {
         let effectiveResetURL = resetURL ?? defaultResetURL
         let webViewID = ObjectIdentifier(webView)
         leasedObjectIdentifiers.remove(webViewID)
-        guard !warmedUpObjects.contains(where: { $0 === webView }) else {
+        guard !warmedUpObjects.contains(where: { $0.webView === webView }) else {
             log(event: "enqueue.skip.duplicate", extra: ["webView": String(describing: webViewID)])
             return
         }
         if warmedUpObjects.count < targetRetainedCount {
             webView.resetForReuse(resetURL: effectiveResetURL)
-            warmedUpObjects.append(webView)
+            let contentID = effectiveResetURL == nil ? webView.poolReadyContentID : nil
+            warmedUpObjects.append(RetainedWebView(webView: webView, contentID: contentID))
             onEnqueue?(webView)
             log(
                 event: "enqueue.retained",
@@ -211,9 +236,9 @@ public final class WebViewPool: ObservableObject {
 
     public func removeAll(resetURL: URL? = nil) {
         let effectiveResetURL = resetURL ?? defaultResetURL
-        for webView in warmedUpObjects {
-            onDequeue?(webView)
-            webView.resetForReuse(resetURL: effectiveResetURL)
+        for retained in warmedUpObjects {
+            onDequeue?(retained.webView)
+            retained.webView.resetForReuse(resetURL: effectiveResetURL)
         }
         warmedUpObjects.removeAll()
         log(event: "removeAll")
@@ -251,7 +276,9 @@ public final class WebViewPool: ObservableObject {
 private extension EnhancedWKWebView {
     func resetForReuse(resetURL: URL?) {
         stopLoading()
+        poolPendingContentID = nil
         if let resetURL {
+            poolReadyContentID = nil
             load(URLRequest(url: resetURL))
         }
     }

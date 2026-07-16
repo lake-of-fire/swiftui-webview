@@ -3013,6 +3013,11 @@ extension WebViewCoordinator: WKUIDelegate {
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if let enhancedWebView = webView as? EnhancedWKWebView,
+           let pendingContentID = enhancedWebView.poolPendingContentID {
+            enhancedWebView.poolReadyContentID = pendingContentID
+            enhancedWebView.poolPendingContentID = nil
+        }
         navigator.cancelReaderLoadHeartbeat(reason: "didFinishNavigation")
         if !navigator.shouldLoadFallbackOnAttach {
         }
@@ -3162,6 +3167,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        clearPendingPoolContent(on: webView)
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
@@ -3197,11 +3203,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        clearPendingPoolContent(on: webView)
         setLoading(false, isProvisionallyNavigating: false)
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        clearPendingPoolContent(on: webView)
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
@@ -3228,6 +3236,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             cancelSnapshotReload()
         }
 #endif
+    }
+
+    private func clearPendingPoolContent(on webView: WKWebView) {
+        guard let enhancedWebView = webView as? EnhancedWKWebView else { return }
+        enhancedWebView.poolPendingContentID = nil
+        enhancedWebView.poolReadyContentID = nil
     }
     
     @MainActor
@@ -3340,6 +3354,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        (webView as? EnhancedWKWebView)?.invalidatePoolContentForUnkeyedNavigation()
         navigator.nativeLookupHitTesting.removeAllTargets()
         if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
         }
@@ -3600,6 +3615,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     fileprivate var pendingRequest: URLRequest?
     fileprivate var pendingHTML: (html: String, baseURL: URL?)?
+    fileprivate var pendingHTMLContentID: WebViewPoolContentID?
     fileprivate var pendingDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
     fileprivate var lastLoadedRequest: URLRequest?
     fileprivate var lastLoadedHTML: (html: String, baseURL: URL?)?
@@ -4409,6 +4425,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             guard let webView else { return }
             if let request = pendingRequest {
+                clearPoolContentState(on: webView)
                 cancelAttachFallbackLoadTask(reason: "pendingRequestFlushedOnAttach")
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
@@ -4439,6 +4456,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 return
             }
             if let pendingDataLoad {
+                clearPoolContentState(on: webView)
                 cancelAttachFallbackLoadTask(reason: "pendingDataLoadFlushedOnAttach")
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
@@ -4462,6 +4480,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 return
             }
             if let pendingHTML {
+                if let pendingHTMLContentID,
+                   let enhancedWebView = webView as? EnhancedWKWebView,
+                   enhancedWebView.poolReadyContentID == pendingHTMLContentID {
+                    self.pendingHTML = nil
+                    self.pendingHTMLContentID = nil
+                    return
+                }
                 cancelAttachFallbackLoadTask(reason: "pendingHTMLFlushedOnAttach")
                 if shouldLogDiagnostics || !shouldLoadFallbackOnAttach {
                     debugPrint(
@@ -4474,8 +4499,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         ] as [String : Any]
                     )
                 }
+                preparePoolContentLoad(on: webView, contentID: pendingHTMLContentID)
                 webView.loadHTMLString(pendingHTML.html, baseURL: pendingHTML.baseURL)
                 self.pendingHTML = nil
+                pendingHTMLContentID = nil
                 return
             }
             guard shouldLoadFallbackOnAttach else {
@@ -4498,6 +4525,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         cancelAttachFallbackLoadTask(reason: "explicitRequestLoad")
         beginReaderLoadTrace(for: request)
         if let webView = webView {
+            clearPoolContentState(on: webView)
             logPreIssueLoadState(for: request, reason: "navigator.load")
             if webView.window == nil || webView.superview == nil {
                 pendingRequest = request
@@ -4580,6 +4608,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
             return
         }
+        clearPoolContentState(on: webView)
         debugPrint(
             "# READER navigator.load.data",
             "bytes=\(data.count)",
@@ -4612,11 +4641,22 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    public func loadHTML(_ html: String, baseURL: URL? = nil) {
+    public func loadHTML(
+        _ html: String,
+        baseURL: URL? = nil,
+        contentID: WebViewPoolContentID? = nil
+    ) {
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedDataLoad = nil
+        if let contentID,
+           let enhancedWebView = webView as? EnhancedWKWebView,
+           enhancedWebView.poolReadyContentID == contentID {
+            pendingHTML = nil
+            pendingHTMLContentID = nil
+            return
+        }
         cancelAttachFallbackLoadTask(reason: "explicitHTMLLoad")
         cancelReaderLoadHeartbeat(reason: "explicitHTMLLoad")
         cancelContentProcessPrewarm(reason: "explicitHTMLLoad")
@@ -4649,11 +4689,27 @@ public class WebViewNavigator: NSObject, ObservableObject {
             if !shouldLoadFallbackOnAttach {
             }
             pendingHTML = (html: html, baseURL: baseURL)
+            pendingHTMLContentID = contentID
             return
         }
         if !shouldLoadFallbackOnAttach {
         }
+        preparePoolContentLoad(on: webView, contentID: contentID)
         webView.loadHTMLString(html, baseURL: baseURL)
+    }
+
+    @MainActor
+    private func preparePoolContentLoad(on webView: WKWebView, contentID: WebViewPoolContentID?) {
+        guard let enhancedWebView = webView as? EnhancedWKWebView else { return }
+        enhancedWebView.poolReadyContentID = nil
+        enhancedWebView.poolPendingContentID = contentID
+    }
+
+    @MainActor
+    private func clearPoolContentState(on webView: WKWebView) {
+        guard let enhancedWebView = webView as? EnhancedWKWebView else { return }
+        enhancedWebView.poolPendingContentID = nil
+        enhancedWebView.poolReadyContentID = nil
     }
     
     @MainActor
@@ -4811,11 +4867,7 @@ private func makeWebViewSnapshotCapture(
         }
 
         let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: webView.bounds)
-        let configuration = WKSnapshotConfiguration()
-        configuration.rect = capturedRect
-        // WKSnapshotConfiguration.snapshotWidth is in points. Requesting the rect width preserves
-        // the native backing scale while keeping the returned bitmap aligned with view coordinates.
-        configuration.snapshotWidth = NSNumber(value: Double(capturedRect.width))
+        let configuration = makeWebViewSnapshotConfiguration(capturedRect: capturedRect)
 
         let image = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebViewSnapshotPlatformImage, Error>) in
             webView.takeSnapshot(with: configuration) { image, error in
@@ -4850,6 +4902,18 @@ private func makeWebViewSnapshotCapture(
             capturedRect: capturedRect
         )
     }
+}
+
+@MainActor
+func makeWebViewSnapshotConfiguration(capturedRect: CGRect) -> WKSnapshotConfiguration {
+    let configuration = WKSnapshotConfiguration()
+    configuration.rect = capturedRect
+    // snapshotWidth is in points. Matching the captured width preserves native backing scale.
+    configuration.snapshotWidth = NSNumber(value: Double(capturedRect.width))
+    // Reader canvases often animate continuously. Candidates are settled before capture, so waiting
+    // for another screen update can stall indefinitely without producing a more current OCR image.
+    configuration.afterScreenUpdates = false
+    return configuration
 }
 
 private func webViewSnapshotCGImage(from image: WebViewSnapshotPlatformImage) -> CGImage? {
@@ -5805,6 +5869,13 @@ enum PendingRequestLoadDisposition: Equatable {
 public class EnhancedWKWebView: WKWebView {
     var persistedUserScriptsSignature: String?
     var persistedAppliedContentRules: String?
+    var poolPendingContentID: WebViewPoolContentID?
+    var poolReadyContentID: WebViewPoolContentID?
+
+    func invalidatePoolContentForUnkeyedNavigation() {
+        guard poolPendingContentID == nil else { return }
+        poolReadyContentID = nil
+    }
 #if os(iOS)
     var hidesTopScrollEdgeEffect = false
 #endif
@@ -6802,8 +6873,10 @@ public struct WebView {
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
     var bounces = true
+    let websiteDataStore: WKWebsiteDataStore?
     let webViewPool: WebViewPool?
     let webViewPrewarmer: WebViewPrewarmer?
+    let poolContentID: WebViewPoolContentID?
     //    let onWarm: (() async -> Void)?
     
     @Environment(\.webViewMessageHandlers) internal var webViewMessageHandlers
@@ -6830,8 +6903,10 @@ public struct WebView {
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
+                websiteDataStore: WKWebsiteDataStore? = nil,
                 webViewPool: WebViewPool? = nil,
                 webViewPrewarmer: WebViewPrewarmer? = nil,
+                poolContentID: WebViewPoolContentID? = nil,
                 lifecycleConfig: WebViewLifecycleConfig? = nil
     ) {
         self.config = config
@@ -6852,8 +6927,10 @@ public struct WebView {
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
+        self.websiteDataStore = websiteDataStore
         self.webViewPool = webViewPool
         self.webViewPrewarmer = webViewPrewarmer
+        self.poolContentID = poolContentID
         self.lifecycleConfig = lifecycleConfig ?? .default
     }
     
@@ -6920,7 +6997,7 @@ extension WebView: UIViewControllerRepresentable {
     ) -> EnhancedWKWebView {
         var web: EnhancedWKWebView?
         if web == nil, let resolvedWebViewPool {
-            web = resolvedWebViewPool.dequeue {
+            web = resolvedWebViewPool.dequeue(preferredContentID: poolContentID) {
                 makeNewWebView(config: config)
             }
         }
@@ -6955,7 +7032,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = webViewProcessPool
-        configuration.websiteDataStore = WKWebsiteDataStore.default()
+        configuration.websiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
 
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
@@ -7593,7 +7670,7 @@ extension WebView: NSViewRepresentable {
 
         let webView: EnhancedWKWebView
         if let resolvedWebViewPool {
-            webView = resolvedWebViewPool.dequeue {
+            webView = resolvedWebViewPool.dequeue(preferredContentID: poolContentID) {
                 makeNewWebView(context: context)
             }
         } else {
@@ -7694,7 +7771,7 @@ extension WebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.applicationNameForUserAgent = userAgent
         configuration.defaultWebpagePreferences = preferences
-        configuration.websiteDataStore = WKWebsiteDataStore.default()
+        configuration.websiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
         configuration.processPool = webViewProcessPool
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
