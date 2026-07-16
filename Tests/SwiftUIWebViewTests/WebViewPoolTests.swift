@@ -165,6 +165,25 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertEqual(webView.poolPendingContentID, newID)
     }
 
+    func testUnkeyedNavigationInvalidatesPreviouslyReadyContentIdentity() {
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView.poolReadyContentID = WebViewPoolContentID("page-1")
+
+        webView.invalidatePoolContentForUnkeyedNavigation()
+
+        XCTAssertNil(webView.poolReadyContentID)
+    }
+
+    func testKeyedNavigationKeepsItsPendingIdentity() {
+        let contentID = WebViewPoolContentID("page-2")
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView.poolPendingContentID = contentID
+
+        webView.invalidatePoolContentForUnkeyedNavigation()
+
+        XCTAssertEqual(webView.poolPendingContentID, contentID)
+    }
+
     func testTransparentNonScrollingOverlayConfigIsGestureNeutralByDefault() {
         let config = WebViewConfig.transparentNonScrollingOverlay
 

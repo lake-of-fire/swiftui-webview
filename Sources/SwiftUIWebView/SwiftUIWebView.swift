@@ -3354,6 +3354,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        (webView as? EnhancedWKWebView)?.invalidatePoolContentForUnkeyedNavigation()
         navigator.nativeLookupHitTesting.removeAllTargets()
         if ProcessInfo.processInfo.environment["MANABI_PAGE_TURN_INTERACTION_DIAGNOSTIC"] == "1" || !navigator.shouldLoadFallbackOnAttach {
         }
@@ -5870,6 +5871,11 @@ public class EnhancedWKWebView: WKWebView {
     var persistedAppliedContentRules: String?
     var poolPendingContentID: WebViewPoolContentID?
     var poolReadyContentID: WebViewPoolContentID?
+
+    func invalidatePoolContentForUnkeyedNavigation() {
+        guard poolPendingContentID == nil else { return }
+        poolReadyContentID = nil
+    }
 #if os(iOS)
     var hidesTopScrollEdgeEffect = false
 #endif
