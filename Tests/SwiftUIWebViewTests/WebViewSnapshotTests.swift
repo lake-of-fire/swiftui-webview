@@ -5,6 +5,18 @@ import XCTest
 
 final class WebViewSnapshotTests: XCTestCase {
     @MainActor
+    func testWebViewAcceptsAnIsolatedWebsiteDataStore() {
+        let websiteDataStore = WKWebsiteDataStore.nonPersistent()
+        let webView = WebView(
+            navigator: WebViewNavigator(),
+            state: .constant(.empty),
+            websiteDataStore: websiteDataStore
+        )
+
+        XCTAssertTrue(webView.websiteDataStore === websiteDataStore)
+    }
+
+    @MainActor
     func testSnapshotConfigurationCapturesSettledCurrentFrameWithoutWaitingForAnimation() {
         let rect = CGRect(x: 10, y: 20, width: 320, height: 480)
 

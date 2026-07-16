@@ -6873,6 +6873,7 @@ public struct WebView {
     @Binding var textSelection: String?
     let obscuredInsets: EdgeInsets
     var bounces = true
+    let websiteDataStore: WKWebsiteDataStore?
     let webViewPool: WebViewPool?
     let webViewPrewarmer: WebViewPrewarmer?
     let poolContentID: WebViewPoolContentID?
@@ -6902,6 +6903,7 @@ public struct WebView {
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
+                websiteDataStore: WKWebsiteDataStore? = nil,
                 webViewPool: WebViewPool? = nil,
                 webViewPrewarmer: WebViewPrewarmer? = nil,
                 poolContentID: WebViewPoolContentID? = nil,
@@ -6925,6 +6927,7 @@ public struct WebView {
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
+        self.websiteDataStore = websiteDataStore
         self.webViewPool = webViewPool
         self.webViewPrewarmer = webViewPrewarmer
         self.poolContentID = poolContentID
@@ -7029,7 +7032,7 @@ extension WebView: UIViewControllerRepresentable {
         }
         configuration.defaultWebpagePreferences = preferences
         configuration.processPool = webViewProcessPool
-        configuration.websiteDataStore = WKWebsiteDataStore.default()
+        configuration.websiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
 
         for (urlSchemeHandler, urlScheme) in schemeHandlers {
             configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
@@ -7768,7 +7771,7 @@ extension WebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.applicationNameForUserAgent = userAgent
         configuration.defaultWebpagePreferences = preferences
-        configuration.websiteDataStore = WKWebsiteDataStore.default()
+        configuration.websiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
         configuration.processPool = webViewProcessPool
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
