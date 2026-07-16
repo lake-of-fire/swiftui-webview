@@ -4811,11 +4811,7 @@ private func makeWebViewSnapshotCapture(
         }
 
         let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: webView.bounds)
-        let configuration = WKSnapshotConfiguration()
-        configuration.rect = capturedRect
-        // WKSnapshotConfiguration.snapshotWidth is in points. Requesting the rect width preserves
-        // the native backing scale while keeping the returned bitmap aligned with view coordinates.
-        configuration.snapshotWidth = NSNumber(value: Double(capturedRect.width))
+        let configuration = makeWebViewSnapshotConfiguration(capturedRect: capturedRect)
 
         let image = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebViewSnapshotPlatformImage, Error>) in
             webView.takeSnapshot(with: configuration) { image, error in
@@ -4850,6 +4846,18 @@ private func makeWebViewSnapshotCapture(
             capturedRect: capturedRect
         )
     }
+}
+
+@MainActor
+func makeWebViewSnapshotConfiguration(capturedRect: CGRect) -> WKSnapshotConfiguration {
+    let configuration = WKSnapshotConfiguration()
+    configuration.rect = capturedRect
+    // snapshotWidth is in points. Matching the captured width preserves native backing scale.
+    configuration.snapshotWidth = NSNumber(value: Double(capturedRect.width))
+    // Reader canvases often animate continuously. Candidates are settled before capture, so waiting
+    // for another screen update can stall indefinitely without producing a more current OCR image.
+    configuration.afterScreenUpdates = false
+    return configuration
 }
 
 private func webViewSnapshotCGImage(from image: WebViewSnapshotPlatformImage) -> CGImage? {
