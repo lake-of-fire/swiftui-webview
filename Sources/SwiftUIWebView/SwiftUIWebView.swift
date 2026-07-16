@@ -5625,6 +5625,32 @@ public struct WebViewConfig: Sendable {
             paginationConfiguration: paginationConfiguration
         )
     }
+
+    public func withUserScripts(
+        _ userScripts: [WebViewUserScript],
+        dataDetectorsEnabled: Bool? = nil
+    ) -> WebViewConfig {
+        WebViewConfig(
+            javaScriptEnabled: javaScriptEnabled,
+            contentRules: contentRules,
+            allowsBackForwardNavigationGestures: allowsBackForwardNavigationGestures,
+            allowsInlineMediaPlayback: allowsInlineMediaPlayback,
+            mediaTypesRequiringUserActionForPlayback: mediaTypesRequiringUserActionForPlayback,
+            dataDetectorsEnabled: dataDetectorsEnabled ?? self.dataDetectorsEnabled,
+            isScrollEnabled: isScrollEnabled,
+            pageZoom: pageZoom,
+            isOpaque: isOpaque,
+            backgroundColor: backgroundColor,
+            usesSampledPageTopColorForUnderPageBackground: usesSampledPageTopColorForUnderPageBackground,
+            usesConfiguredBackgroundForReaderDocuments: usesConfiguredBackgroundForReaderDocuments,
+            adjustsScrollViewContentInsetsForSafeArea: adjustsScrollViewContentInsetsForSafeArea,
+            hidesTopScrollEdgeEffect: hidesTopScrollEdgeEffect,
+            nativeLookupHitTestingEnabled: nativeLookupHitTestingEnabled,
+            userScripts: userScripts,
+            darkModeSetting: darkModeSetting,
+            paginationConfiguration: paginationConfiguration
+        )
+    }
 }
 
 public struct WebViewLifecycleConfig: Sendable, Equatable {

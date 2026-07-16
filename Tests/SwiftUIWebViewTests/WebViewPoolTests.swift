@@ -108,6 +108,56 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertEqual(config.paginationConfiguration.mode, .unpaginated)
     }
 
+    func testReplacingUserScriptsPreservesUnrelatedConfiguration() {
+        let originalScript = WebViewUserScript(
+            source: "window.original = true",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        let replacementScript = WebViewUserScript(
+            source: "window.replacement = true",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        )
+        let config = WebViewConfig(
+            javaScriptEnabled: false,
+            contentRules: "[]",
+            allowsBackForwardNavigationGestures: false,
+            allowsInlineMediaPlayback: false,
+            mediaTypesRequiringUserActionForPlayback: [.audio],
+            dataDetectorsEnabled: true,
+            isScrollEnabled: false,
+            pageZoom: 1.5,
+            isOpaque: false,
+            usesSampledPageTopColorForUnderPageBackground: true,
+            usesConfiguredBackgroundForReaderDocuments: true,
+            adjustsScrollViewContentInsetsForSafeArea: false,
+            hidesTopScrollEdgeEffect: true,
+            nativeLookupHitTestingEnabled: false,
+            userScripts: [originalScript],
+            darkModeSetting: .darkModeOverride
+        )
+
+        let replaced = config.withUserScripts([replacementScript], dataDetectorsEnabled: false)
+
+        XCTAssertFalse(replaced.javaScriptEnabled)
+        XCTAssertEqual(replaced.contentRules, "[]")
+        XCTAssertFalse(replaced.allowsBackForwardNavigationGestures)
+        XCTAssertFalse(replaced.allowsInlineMediaPlayback)
+        XCTAssertEqual(replaced.mediaTypesRequiringUserActionForPlayback.rawValue, WKAudiovisualMediaTypes.audio.rawValue)
+        XCTAssertFalse(replaced.dataDetectorsEnabled)
+        XCTAssertFalse(replaced.isScrollEnabled)
+        XCTAssertEqual(replaced.pageZoom, 1.5)
+        XCTAssertFalse(replaced.isOpaque)
+        XCTAssertTrue(replaced.usesSampledPageTopColorForUnderPageBackground)
+        XCTAssertTrue(replaced.usesConfiguredBackgroundForReaderDocuments)
+        XCTAssertFalse(replaced.adjustsScrollViewContentInsetsForSafeArea)
+        XCTAssertTrue(replaced.hidesTopScrollEdgeEffect)
+        XCTAssertFalse(replaced.nativeLookupHitTestingEnabled)
+        XCTAssertEqual(replaced.userScripts, [replacementScript])
+        XCTAssertEqual(replaced.darkModeSetting.rawValue, DarkModeSetting.darkModeOverride.rawValue)
+    }
+
     func testTotalCountTargetIncludesLeasedViewsAndTrimsIdleViews() {
         let pool = WebViewPool()
         pool.totalCountTarget = 3
