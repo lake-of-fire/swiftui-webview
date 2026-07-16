@@ -95,6 +95,76 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertEqual(pool.totalCountTarget, 0)
     }
 
+    func testDequeuePrefersRetainedViewWithMatchingContentID() {
+        let pool = WebViewPool()
+        pool.totalCountTarget = 2
+        pool.setCreationClosureIfNeeded {
+            EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+
+        let first = pool.dequeue { fatalError("Expected retained view") }
+        let second = pool.dequeue { fatalError("Expected retained view") }
+        first.poolReadyContentID = WebViewPoolContentID("page-1")
+        second.poolReadyContentID = WebViewPoolContentID("page-2")
+        pool.enqueue(first)
+        pool.enqueue(second)
+
+        let reused = pool.dequeue(preferredContentID: WebViewPoolContentID("page-2")) {
+            fatalError("Expected matching retained view")
+        }
+
+        XCTAssertTrue(reused === second)
+        XCTAssertEqual(reused.poolReadyContentID, WebViewPoolContentID("page-2"))
+    }
+
+    func testDequeueFallsBackToFIFOWhenNoContentMatches() {
+        let pool = WebViewPool()
+        pool.totalCountTarget = 2
+        pool.setCreationClosureIfNeeded {
+            EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        }
+
+        let first = pool.dequeue { fatalError("Expected retained view") }
+        let second = pool.dequeue { fatalError("Expected retained view") }
+        first.poolReadyContentID = WebViewPoolContentID("page-1")
+        second.poolReadyContentID = WebViewPoolContentID("page-2")
+        pool.enqueue(first)
+        pool.enqueue(second)
+
+        let reused = pool.dequeue(preferredContentID: WebViewPoolContentID("page-3")) {
+            fatalError("Expected FIFO retained view")
+        }
+
+        XCTAssertTrue(reused === first)
+    }
+
+    func testMatchingHTMLContentIDDoesNotReloadAttachedWebView() {
+        let contentID = WebViewPoolContentID("page-1")
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView.poolReadyContentID = contentID
+        let navigator = WebViewNavigator()
+        navigator.webView = webView
+
+        navigator.loadHTML("<html>different bytes</html>", contentID: contentID)
+
+        XCTAssertEqual(webView.poolReadyContentID, contentID)
+        XCTAssertNil(webView.poolPendingContentID)
+    }
+
+    func testNewHTMLContentIDReplacesReadyIdentityUntilNavigationFinishes() {
+        let oldID = WebViewPoolContentID("page-1")
+        let newID = WebViewPoolContentID("page-2")
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView.poolReadyContentID = oldID
+        let navigator = WebViewNavigator()
+        navigator.webView = webView
+
+        navigator.loadHTML("<html>new page</html>", contentID: newID)
+
+        XCTAssertNil(webView.poolReadyContentID)
+        XCTAssertEqual(webView.poolPendingContentID, newID)
+    }
+
     func testTransparentNonScrollingOverlayConfigIsGestureNeutralByDefault() {
         let config = WebViewConfig.transparentNonScrollingOverlay
 
