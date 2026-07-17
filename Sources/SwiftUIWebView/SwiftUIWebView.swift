@@ -3742,6 +3742,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public func evaluateJavaScriptInMultiTargetFrames(
         _ js: String,
         arguments: [String: any Sendable]? = nil,
+        propagatesFrameErrors: Bool = false,
         in world: WKContentWorld? = nil
     ) async throws -> [Any?] {
         guard let asyncCaller else {
@@ -3759,7 +3760,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         var results = [Any?]()
         results.append(try await asyncCaller(js, primitiveArguments, nil, world).value)
 
-        await { @MainActor [weak self] in
+        try await { @MainActor [weak self] in
             guard let self else { return }
             for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
                 do {
@@ -3768,6 +3769,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 } catch {
                     if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
                         multiTargetFrames.removeValue(forKey: uuid)
+                    } else if propagatesFrameErrors {
+                        throw error
                     } else {
                         print(error)
                     }
