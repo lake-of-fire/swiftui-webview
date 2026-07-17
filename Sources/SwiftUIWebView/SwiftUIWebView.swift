@@ -204,43 +204,35 @@ private func navigationTypeDescription(_ navigationType: WKNavigationType) -> St
     }
 }
 
-private let readerLoadCommitGapWarningThreshold: TimeInterval = 0.750
 private let readerLoadStaleLoadingStateThreshold: Double = 0.050
-private let internalReaderLoaderStartedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.startedAt."
-private let internalReaderLoaderResponseAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.responseAt."
-private let internalReaderLoaderDataAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.dataAt."
-private let internalReaderLoaderFinishedAtKeyPrefix = "InternalURLSchemeHandler.readerLoader.finishedAt."
-private let activeInternalReaderLoaderTraceIDKey = "SwiftUIWebView.activeInternalReaderLoader.traceID"
-private let activeInternalReaderLoaderURLKey = "SwiftUIWebView.activeInternalReaderLoader.url"
-private let readerLoadVerboseUIViewControllerLoggingEnabled =
-    ProcessInfo.processInfo.environment["SWIFTUIWEBVIEW_READERLOAD_VERBOSE_UIVIEWCONTROLLER"] == "1"
-private let readerLoadCorrelationMaxAge: TimeInterval = 30
 
-@inline(__always)
-private func readerLoadCorrelationTimestamp(
-    forKey key: String,
-    baseline: Date?,
-    now: Date
-) -> Date? {
-    let timestamp = UserDefaults.standard.double(forKey: key)
-    guard timestamp > 0 else { return nil }
-    let resolved = Date(timeIntervalSince1970: timestamp)
-    if let baseline, resolved.timeIntervalSince(baseline) < -0.050 {
-        return nil
-    }
-    guard now.timeIntervalSince(resolved) <= readerLoadCorrelationMaxAge else {
-        return nil
-    }
-    return resolved
-}
+/// Tracks internal reader-loader navigation so transient `about:blank` callbacks do not clear content.
+@MainActor
+public final class WebViewReaderLoadActivity {
+    public static let shared = WebViewReaderLoadActivity()
 
-@inline(__always)
-private func clearReaderLoaderCorrelationTimestamps(for urlString: String) {
-    let defaults = UserDefaults.standard
-    defaults.removeObject(forKey: internalReaderLoaderStartedAtKeyPrefix + urlString)
-    defaults.removeObject(forKey: internalReaderLoaderResponseAtKeyPrefix + urlString)
-    defaults.removeObject(forKey: internalReaderLoaderDataAtKeyPrefix + urlString)
-    defaults.removeObject(forKey: internalReaderLoaderFinishedAtKeyPrefix + urlString)
+    private final class WeakOwner {
+        weak var value: AnyObject?
+
+        init(_ value: AnyObject) {
+            self.value = value
+        }
+    }
+
+    private var pendingLoadOwners = [UUID: WeakOwner]()
+
+    public var hasPendingLoad: Bool {
+        pendingLoadOwners = pendingLoadOwners.filter { $0.value.value != nil }
+        return !pendingLoadOwners.isEmpty
+    }
+
+    func begin(_ id: UUID, owner: AnyObject) {
+        pendingLoadOwners[id] = WeakOwner(owner)
+    }
+
+    func end(_ id: UUID) {
+        pendingLoadOwners.removeValue(forKey: id)
+    }
 }
 
 @inline(__always)
@@ -2544,11 +2536,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "traceID": navigator.readerLoadTraceID ?? "nil"
             ]
         )
-        if isInternalReaderLoaderURL(activeRequestURL) {
-            if let requestURL = activeRequestURL?.absoluteString {
-                clearReaderLoaderCorrelationTimestamps(for: requestURL)
-            }
-        }
         navigator.clearReaderLoadTrace()
         //                debugPrint("# didFinish nav", webView.url)
         let newState = setLoading(
@@ -2652,6 +2639,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        navigator.clearReaderLoadTrace()
         setLoading(false, isProvisionallyNavigating: false)
     }
     
@@ -2661,10 +2649,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             scriptCaller?.removeAllMultiTargetFrames()
         }
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
-        if let requestURL = navigator.activeReaderLoadRequestURL(for: webView.url)?.absoluteString,
-           isInternalReaderLoaderURL(navigator.activeReaderLoadRequestURL(for: webView.url)) {
-            clearReaderLoaderCorrelationTimestamps(for: requestURL)
-        }
         navigator.clearReaderLoadTrace()
         
         extractPageState(webView: webView)
@@ -2690,7 +2674,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         let commitNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
         navigator.readerLoadCommittedAt = commitNow
-        navigator.updateInternalLoaderCorrelation(for: webView.url, now: commitNow)
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
         ReaderLoadSignposts.event(
             .webKitDidCommit,
@@ -2738,7 +2721,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         let provisionalNow = Date()
         navigator.invalidateReaderLoadTraceIfMismatched(with: webView.url)
         navigator.readerLoadProvisionalStartedAt = provisionalNow
-        navigator.updateInternalLoaderCorrelation(for: webView.url, now: provisionalNow)
         let activeRequestURL = navigator.activeReaderLoadRequestURL(for: webView.url)
         ReaderLoadSignposts.event(
             .webKitDidStart,
@@ -2868,10 +2850,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         var committedAt: Date?
         var directDataIssuedAt: Date?
         var directDataReturnedAt: Date?
-        var internalLoaderStartedAt: Date?
-        var internalLoaderResponseAt: Date?
-        var internalLoaderDataAt: Date?
-        var internalLoaderFinishedAt: Date?
     }
 
     fileprivate var pendingRequest: URLRequest?
@@ -2894,6 +2872,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
     @MainActor private var currentReaderLoadTrace: ReaderLoadTrace?
+    @MainActor private var publishedInternalReaderLoadID: UUID?
     public var attachFallbackURL: URL?
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
     public var shouldLoadFallbackOnAttach = true
@@ -2977,36 +2956,25 @@ public class WebViewNavigator: NSObject, ObservableObject {
         readerLoadElapsedString(since: readerLoadDirectDataReturnedAt, now: now)
     }
 
-    @MainActor fileprivate var readerLoadInternalLoaderStartedAt: Date? {
-        currentReaderLoadTrace?.internalLoaderStartedAt
-    }
-
-    @MainActor fileprivate var readerLoadInternalLoaderResponseAt: Date? {
-        currentReaderLoadTrace?.internalLoaderResponseAt
-    }
-
-    @MainActor fileprivate var readerLoadInternalLoaderDataAt: Date? {
-        currentReaderLoadTrace?.internalLoaderDataAt
-    }
-
-    @MainActor fileprivate var readerLoadInternalLoaderFinishedAt: Date? {
-        currentReaderLoadTrace?.internalLoaderFinishedAt
-    }
-
     @MainActor
     private func syncActiveInternalReaderLoaderSignal() {
-        let defaults = UserDefaults.standard
-        if let trace = currentReaderLoadTrace,
-           let requestURL = trace.requestURL,
-           isInternalReaderLoaderURL(requestURL),
-           trace.issuedAt != nil,
-           trace.provisionalStartedAt == nil {
-            defaults.set(trace.id.uuidString, forKey: activeInternalReaderLoaderTraceIDKey)
-            defaults.set(requestURL.absoluteString, forKey: activeInternalReaderLoaderURLKey)
-        } else {
-            defaults.removeObject(forKey: activeInternalReaderLoaderTraceIDKey)
-            defaults.removeObject(forKey: activeInternalReaderLoaderURLKey)
+        let nextID = currentReaderLoadTrace.flatMap { trace -> UUID? in
+            guard let requestURL = trace.requestURL,
+                  isInternalReaderLoaderURL(requestURL),
+                  trace.issuedAt != nil,
+                  trace.provisionalStartedAt == nil else {
+                return nil
+            }
+            return trace.id
         }
+        guard nextID != publishedInternalReaderLoadID else { return }
+        if let publishedInternalReaderLoadID {
+            WebViewReaderLoadActivity.shared.end(publishedInternalReaderLoadID)
+        }
+        if let nextID {
+            WebViewReaderLoadActivity.shared.begin(nextID, owner: self)
+        }
+        publishedInternalReaderLoadID = nextID
     }
 
     @MainActor
@@ -3021,11 +2989,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             provisionalStartedAt: nil,
             committedAt: nil,
             directDataIssuedAt: nil,
-            directDataReturnedAt: nil,
-            internalLoaderStartedAt: nil,
-            internalLoaderResponseAt: nil,
-            internalLoaderDataAt: nil,
-            internalLoaderFinishedAt: nil
+            directDataReturnedAt: nil
         )
         syncActiveInternalReaderLoaderSignal()
         return now
@@ -3078,33 +3042,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard !shouldRetainReaderLoadTrace(for: currentURL) else { return }
         guard !readerLoadTraceMatches(currentURL: currentURL) else { return }
         clearReaderLoadTrace()
-    }
-
-    @MainActor
-    fileprivate func updateInternalLoaderCorrelation(for currentURL: URL?, now: Date) {
-        guard let currentURL, isInternalReaderLoaderURL(currentURL) else { return }
-        let currentURLString = currentURL.absoluteString
-        let correlationBaseline = readerLoadIssuedAt ?? readerLoadRequestedAt
-        currentReaderLoadTrace?.internalLoaderStartedAt = readerLoadCorrelationTimestamp(
-            forKey: internalReaderLoaderStartedAtKeyPrefix + currentURLString,
-            baseline: correlationBaseline,
-            now: now
-        )
-        currentReaderLoadTrace?.internalLoaderResponseAt = readerLoadCorrelationTimestamp(
-            forKey: internalReaderLoaderResponseAtKeyPrefix + currentURLString,
-            baseline: correlationBaseline,
-            now: now
-        )
-        currentReaderLoadTrace?.internalLoaderDataAt = readerLoadCorrelationTimestamp(
-            forKey: internalReaderLoaderDataAtKeyPrefix + currentURLString,
-            baseline: correlationBaseline,
-            now: now
-        )
-        currentReaderLoadTrace?.internalLoaderFinishedAt = readerLoadCorrelationTimestamp(
-            forKey: internalReaderLoaderFinishedAtKeyPrefix + currentURLString,
-            baseline: correlationBaseline,
-            now: now
-        )
     }
 
     @MainActor
@@ -5938,29 +5875,6 @@ extension WebView: UIViewControllerRepresentable {
         let committedAt = context.coordinator.navigator.readerLoadCommittedAt
         let requestedBeforeProvisional = requestedAt != nil && provisionalStartedAt == nil
         let requestedAfterProvisionalBeforeCommit = requestedAt != nil && provisionalStartedAt != nil && committedAt == nil
-        if readerLoadVerboseUIViewControllerLoggingEnabled && (requestedBeforeProvisional || requestedAfterProvisionalBeforeCommit) {
-        }
-        if let provisionalStartedAt, requestedAfterProvisionalBeforeCommit {
-            let waitElapsed = Date().timeIntervalSince(provisionalStartedAt)
-            if waitElapsed >= readerLoadCommitGapWarningThreshold {
-                let requestURLString = context.coordinator.navigator.activeReaderLoadRequestURL(
-                    for: controller.webView.url
-                )?.absoluteString ?? "nil"
-                context.coordinator.navigator.updateInternalLoaderCorrelation(
-                    for: controller.webView.url,
-                    now: Date()
-                )
-                let internalSchemeResponseGap = context.coordinator.navigator.readerLoadInternalLoaderResponseAt.map {
-                    String(format: "%.3fs", Date().timeIntervalSince($0))
-                } ?? "nil"
-                let internalSchemeDataGap = context.coordinator.navigator.readerLoadInternalLoaderDataAt.map {
-                    String(format: "%.3fs", Date().timeIntervalSince($0))
-                } ?? "nil"
-                let internalSchemeFinishGap = context.coordinator.navigator.readerLoadInternalLoaderFinishedAt.map {
-                    String(format: "%.3fs", Date().timeIntervalSince($0))
-                } ?? "nil"
-            }
-        }
         updateCoordinatorBindings(context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         let resolvedDomain = resolvedUserScriptDomain(currentURL: controller.webView.url)
