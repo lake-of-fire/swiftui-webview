@@ -95,6 +95,35 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertEqual(pool.totalCountTarget, 0)
     }
 
+    func testInvalidateBreaksCreationClosureRetainCycle() {
+        weak var weakPool: WebViewPool?
+
+        autoreleasepool {
+            var pool: WebViewPool? = WebViewPool()
+            weakPool = pool
+            pool?.totalCountTarget = 1
+            pool?.setCreationClosureIfNeeded { [pool] in
+                _ = pool
+                return EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+            }
+            XCTAssertEqual(pool?.totalCount, 1)
+
+            pool?.invalidate()
+            XCTAssertEqual(pool?.totalCount, 0)
+            let lateView = pool?.dequeue {
+                EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+            }
+            XCTAssertEqual(pool?.totalCount, 0)
+            if let lateView {
+                pool?.enqueue(lateView)
+            }
+            XCTAssertEqual(pool?.totalCount, 0)
+            pool = nil
+        }
+
+        XCTAssertNil(weakPool)
+    }
+
     func testDequeuePrefersRetainedViewWithMatchingContentID() {
         let pool = WebViewPool()
         pool.totalCountTarget = 2

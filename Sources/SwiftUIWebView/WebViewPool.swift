@@ -78,6 +78,7 @@ public final class WebViewPool: ObservableObject {
     private var warmedUpObjects: [RetainedWebView] = []
     private var leasedObjectIdentifiers = Set<ObjectIdentifier>()
     private var creationClosure: (() -> EnhancedWKWebView)?
+    private var isInvalidated = false
 
     private var targetRetainedCount: Int {
         if let configuredTotalCountTarget {
@@ -118,6 +119,10 @@ public final class WebViewPool: ObservableObject {
     }
 
     public func setCreationClosureIfNeeded(_ closure: @escaping () -> EnhancedWKWebView) {
+        guard !isInvalidated else {
+            log(event: "creationClosure.skip.invalidated")
+            return
+        }
         if creationClosure == nil {
             creationClosure = closure
             log(event: "creationClosure.set")
@@ -128,6 +133,10 @@ public final class WebViewPool: ObservableObject {
     }
 
     public func prepareIfPossible() {
+        guard !isInvalidated else {
+            log(event: "prepare.skip.invalidated")
+            return
+        }
         guard let creationClosure else {
             log(event: "prepare.skip.noCreationClosure")
             return
@@ -147,6 +156,7 @@ public final class WebViewPool: ObservableObject {
     }
 
     private func rebalanceRetainedObjects() {
+        guard !isInvalidated else { return }
         while warmedUpObjects.count > targetRetainedCount {
             let retained = warmedUpObjects.removeLast()
             let webView = retained.webView
@@ -175,6 +185,10 @@ public final class WebViewPool: ObservableObject {
         preferredContentID: WebViewPoolContentID?,
         createIfNeeded: @escaping () -> EnhancedWKWebView
     ) -> EnhancedWKWebView {
+        guard !isInvalidated else {
+            log(event: "dequeue.unpooled.invalidated")
+            return createIfNeeded()
+        }
         if creationClosure == nil {
             creationClosure = createIfNeeded
             log(event: "dequeue.creationClosure.set")
@@ -242,6 +256,21 @@ public final class WebViewPool: ObservableObject {
         }
         warmedUpObjects.removeAll()
         log(event: "removeAll")
+    }
+
+    /// Permanently releases this pool and breaks closures retained for future web-view creation.
+    ///
+    /// Call this when the feature owning the pool is torn down. Use `removeAll(resetURL:)`
+    /// instead when the same pool will serve later views.
+    public func invalidate(resetURL: URL? = nil) {
+        isInvalidated = true
+        configuredTotalCountTarget = 0
+        removeAll(resetURL: resetURL)
+        creationClosure = nil
+        leasedObjectIdentifiers.removeAll()
+        onEnqueue = nil
+        onDequeue = nil
+        log(event: "invalidate")
     }
 
     private func log(event: String, extra: [String: Any] = [:]) {
