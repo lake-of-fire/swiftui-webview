@@ -2351,6 +2351,11 @@ public class WebViewCoordinator: NSObject {
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
     private weak var snapshotHostController: WebViewController?
+    internal weak var scrollBottomObservedScrollView: UIScrollView?
+    internal var scrollBottomContentSizeObservation: NSKeyValueObservation?
+    internal var scrollBottomBoundsObservation: NSKeyValueObservation?
+    internal var scrollBottomContentInsetObservation: NSKeyValueObservation?
+    internal var lastPublishedScrollBottomState: Bool?
     private var awaitingSnapshotReload = false
     private var snapshotReloadCommitted = false
     private var snapshotReloadDocumentReady = false
@@ -2375,6 +2380,7 @@ public class WebViewCoordinator: NSObject {
     var onNavigationFailed: ((WebViewState) -> Void)?
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
+    var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
@@ -2523,6 +2529,7 @@ public class WebViewCoordinator: NSObject {
         onNavigationFailed: ((WebViewState) -> Void)?,
         onURLChanged: ((WebViewState) -> Void)? = nil,
         onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
+        onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
         hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
@@ -2536,6 +2543,7 @@ public class WebViewCoordinator: NSObject {
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
+        self.onScrollBottomStateChanged = onScrollBottomStateChanged
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.mirroredHideNavigationDueToScroll = hideNavigationDueToScroll.wrappedValue
         self.textSelection = textSelection
@@ -2563,6 +2571,14 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
         sampledPageTopColorObservation?.invalidate()
         sampledPageTopColorObservation = nil
+        scrollBottomContentSizeObservation?.invalidate()
+        scrollBottomContentSizeObservation = nil
+        scrollBottomBoundsObservation?.invalidate()
+        scrollBottomBoundsObservation = nil
+        scrollBottomContentInsetObservation?.invalidate()
+        scrollBottomContentInsetObservation = nil
+        scrollBottomObservedScrollView = nil
+        lastPublishedScrollBottomState = nil
 #endif
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
@@ -2723,6 +2739,7 @@ public class WebViewCoordinator: NSObject {
                 }
             }
         }
+        installScrollBottomStateObservations(for: webView.scrollView)
 #endif
     }
 
@@ -7049,6 +7066,7 @@ public struct WebView {
     let onNavigationFailed: ((WebViewState) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
     let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
+    let onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
     let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
@@ -7081,6 +7099,7 @@ public struct WebView {
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
+                onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
@@ -7105,6 +7124,7 @@ public struct WebView {
         self.onNavigationFailed = onNavigationFailed
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
+        self.onScrollBottomStateChanged = onScrollBottomStateChanged
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
@@ -7128,6 +7148,7 @@ public struct WebView {
             onNavigationFailed: onNavigationFailed,
             onURLChanged: onURLChanged,
             onNavigationAction: onNavigationAction,
+            onScrollBottomStateChanged: onScrollBottomStateChanged,
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
@@ -8034,6 +8055,12 @@ extension WebView {
         context.coordinator.onNavigationFailed = onNavigationFailed
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
+        context.coordinator.onScrollBottomStateChanged = onScrollBottomStateChanged
+#if os(iOS)
+        if let webView = context.coordinator.navigator.webView {
+            context.coordinator.installScrollBottomStateObservations(for: webView.scrollView)
+        }
+#endif
         context.coordinator.webViewPool = resolvedWebViewPool
         context.coordinator.lifecycleConfig = lifecycleConfig
         context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
