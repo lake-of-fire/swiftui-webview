@@ -83,6 +83,38 @@ private let readerLoadVerboseUIViewControllerLoggingEnabled: Bool = {
 #endif
 }()
 
+/// Tracks reader loads between issuance and WebKit's provisional-navigation callback.
+///
+/// `ReaderContent` uses this narrow signal to ignore transient `about:blank` loads
+/// without coupling content loading to a particular navigator instance.
+@MainActor
+public final class WebViewReaderLoadActivity {
+    public static let shared = WebViewReaderLoadActivity()
+
+    private final class WeakOwner {
+        weak var value: AnyObject?
+
+        init(_ value: AnyObject) {
+            self.value = value
+        }
+    }
+
+    private var pendingLoadOwners = [UUID: WeakOwner]()
+
+    public var hasPendingPreProvisionalLoad: Bool {
+        pendingLoadOwners = pendingLoadOwners.filter { $0.value.value != nil }
+        return !pendingLoadOwners.isEmpty
+    }
+
+    func begin(_ id: UUID, owner: AnyObject) {
+        pendingLoadOwners[id] = WeakOwner(owner)
+    }
+
+    func end(_ id: UUID) {
+        pendingLoadOwners.removeValue(forKey: id)
+    }
+}
+
 #if DEBUG
 private let readerLoadIssueGapWarningThreshold: TimeInterval = 0.750
 private let readerLoadCommitGapWarningThreshold: TimeInterval = 0.750
@@ -3254,6 +3286,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         clearPendingPoolContent(on: webView)
+        navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
@@ -3288,12 +3321,14 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         clearPendingPoolContent(on: webView)
+        navigator.clearActiveInternalReaderLoadSignal()
         setLoading(false, isProvisionallyNavigating: false)
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         clearPendingPoolContent(on: webView)
+        navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
         Task {
             scriptCaller?.removeAllMultiTargetFrames()
@@ -3727,6 +3762,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
     @MainActor private var readerLoadTraceID: UUID?
+    @MainActor private var publishedInternalReaderLoadID: UUID?
     @MainActor private var preProvisionalWarningGeneration: Int = 0
     @MainActor private var preProvisionalWarningTask: Task<Void, Never>?
     @MainActor fileprivate var didLogReaderLoadHeartbeatForCurrentRequest = false
@@ -3952,18 +3988,45 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     fileprivate func syncActiveInternalReaderLoaderSignal() {
-#if DEBUG
-        let defaults = UserDefaults.standard
+        let nextID: UUID?
         if let requestURL = readerLoadRequestedURL,
            isInternalReaderLoaderURL(requestURL),
            readerLoadIssuedAt != nil,
            readerLoadProvisionalStartedAt == nil {
+            nextID = readerLoadTraceID
+        } else {
+            nextID = nil
+        }
+
+        guard nextID != publishedInternalReaderLoadID else { return }
+        clearActiveInternalReaderLoadSignal()
+        if let nextID {
+            WebViewReaderLoadActivity.shared.begin(nextID, owner: self)
+            publishedInternalReaderLoadID = nextID
+        }
+
+#if DEBUG
+        let defaults = UserDefaults.standard
+        if let requestURL = readerLoadRequestedURL, nextID != nil {
             defaults.set(requestURL.absoluteString, forKey: activeInternalReaderLoaderURLKey)
             defaults.set(readerLoadTraceID?.uuidString ?? requestURL.absoluteString, forKey: activeInternalReaderLoaderTraceIDKey)
         } else {
             defaults.removeObject(forKey: activeInternalReaderLoaderTraceIDKey)
             defaults.removeObject(forKey: activeInternalReaderLoaderURLKey)
         }
+#endif
+    }
+
+    @MainActor
+    fileprivate func clearActiveInternalReaderLoadSignal() {
+        if let publishedInternalReaderLoadID {
+            WebViewReaderLoadActivity.shared.end(publishedInternalReaderLoadID)
+            self.publishedInternalReaderLoadID = nil
+        }
+#if DEBUG
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: activeInternalReaderLoaderTraceIDKey)
+        defaults.removeObject(forKey: activeInternalReaderLoaderURLKey)
 #endif
     }
 
