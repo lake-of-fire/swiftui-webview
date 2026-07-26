@@ -105,4 +105,38 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(dispatchedHit?.point, CGPoint(x: 50, y: 75))
         XCTAssertEqual(dispatchedHit?.lookupPayload?["surface"] as? String, "読む")
     }
+
+    func testReaderInteractionCallbacksRemainAvailableAcrossTargetReset() {
+        let store = WebViewNativeLookupHitTestStore()
+        var cancellationReason: String?
+        var swipe: CGPoint?
+        var completedHandoffElementID: String?
+        store.onExternalTouchInteractionCancelled = {
+            cancellationReason = $0
+        }
+        store.onSegmentSwipe = { dx, dy in
+            swipe = CGPoint(x: dx, y: dy)
+        }
+        store.onPressedTargetHandoffCompleted = {
+            completedHandoffElementID = $0
+        }
+
+        store.preservesActiveLookupDuringPageTurn = true
+        store.updateWebTextSelection(
+            active: true,
+            textLength: 2,
+            source: "test"
+        )
+        store.cancelActiveTouchInteraction(reason: "page-turn")
+        store.dispatchSegmentSwipe(dx: -30, dy: 4)
+        store.completePressedTargetHandoff(elementID: "segment")
+        XCTAssertTrue(store.shouldPassThroughForWebTextSelection)
+        store.removeAllTargets()
+
+        XCTAssertEqual(cancellationReason, "page-turn")
+        XCTAssertEqual(swipe, CGPoint(x: -30, y: 4))
+        XCTAssertEqual(completedHandoffElementID, "segment")
+        XCTAssertFalse(store.shouldPassThroughForWebTextSelection)
+        XCTAssertTrue(store.preservesActiveLookupDuringPageTurn)
+    }
 }

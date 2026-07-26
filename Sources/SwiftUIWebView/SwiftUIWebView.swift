@@ -1286,6 +1286,7 @@ public struct WebViewNativeLookupHit {
     public let debugHitTestRebaseX: CGFloat?
     public let debugHitTestRebaseY: CGFloat?
     public let frameInfo: WKFrameInfo?
+    public let nativeLookupFrameKey: String?
 
     public init(
         elementID: String,
@@ -1300,7 +1301,8 @@ public struct WebViewNativeLookupHit {
         debugHitTestPoint: CGPoint? = nil,
         debugHitTestRebaseX: CGFloat? = nil,
         debugHitTestRebaseY: CGFloat? = nil,
-        frameInfo: WKFrameInfo? = nil
+        frameInfo: WKFrameInfo? = nil,
+        nativeLookupFrameKey: String? = nil
     ) {
         self.elementID = elementID
         self.point = point
@@ -1315,6 +1317,7 @@ public struct WebViewNativeLookupHit {
         self.debugHitTestRebaseX = debugHitTestRebaseX
         self.debugHitTestRebaseY = debugHitTestRebaseY
         self.frameInfo = frameInfo
+        self.nativeLookupFrameKey = nativeLookupFrameKey
     }
 }
 
@@ -1350,9 +1353,15 @@ public final class WebViewNativeLookupHitTestStore {
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
+    public var onPressedTargetHandoffCompleted: (@MainActor (String?) -> Void)?
     public var onActiveLookupBlankTap: (@MainActor () -> Void)?
+    public var onExternalTouchInteractionCancelled: (@MainActor (String) -> Void)?
+    public var onSegmentSwipe: (@MainActor (CGFloat, CGFloat) -> Void)?
     public var activeLookupElementID: (@MainActor () -> String?)?
     public var activeElementID: String?
+    public var preservesActiveLookupDuringPageTurn = false
+    public var showsPressedTargetOverlay = false
+    public var capturesSegmentTouchesInOverlay = false
     public var isEnabled = true {
         didSet {
             if !isEnabled {
@@ -1366,6 +1375,7 @@ public final class WebViewNativeLookupHitTestStore {
         nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
     }
     public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
+    public var shouldPassThroughForWebTextSelection: Bool { webTextSelectionActive }
 
     public init(hitSlop: CGFloat = 8) {
         self.hitSlop = hitSlop
@@ -1469,6 +1479,29 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func updateWebTextSelection(active: Bool) {
         webTextSelectionActive = active
+    }
+
+    public func updateWebTextSelection(
+        active: Bool,
+        textLength _: Int,
+        source _: String
+    ) {
+        webTextSelectionActive = active
+    }
+
+    @MainActor
+    public func cancelActiveTouchInteraction(reason: String) {
+        onExternalTouchInteractionCancelled?(reason)
+    }
+
+    @MainActor
+    public func dispatchSegmentSwipe(dx: CGFloat, dy: CGFloat) {
+        onSegmentSwipe?(dx, dy)
+    }
+
+    @MainActor
+    public func completePressedTargetHandoff(elementID: String?) {
+        onPressedTargetHandoffCompleted?(elementID)
     }
 
     public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
@@ -1875,7 +1908,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestPoint: target.debugHitTestPoint,
             debugHitTestRebaseX: target.debugHitTestRebaseX,
             debugHitTestRebaseY: target.debugHitTestRebaseY,
-            frameInfo: target.frameInfo
+            frameInfo: target.frameInfo,
+            nativeLookupFrameKey: target.nativeLookupFrameKey
         ))
         return true
     }
@@ -1925,7 +1959,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestPoint: rebased.point,
             debugHitTestRebaseX: rebased.rebaseX,
             debugHitTestRebaseY: rebased.rebaseY,
-            frameInfo: target.frameInfo
+            frameInfo: target.frameInfo,
+            nativeLookupFrameKey: target.nativeLookupFrameKey
         ))
         return true
     }
@@ -5360,6 +5395,60 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         return normalizeJavaScriptResult(result)
     }
 
+    /// Evaluates in the main document and every registered content frame.
+    ///
+    /// Set `propagatesFrameErrors` for transactions whose later calls depend on
+    /// every frame accepting the current call. Invalid frame registrations are
+    /// always discarded before the error is either propagated or ignored.
+    public func evaluateJavaScriptInMultiTargetFrames(
+        _ js: String,
+        arguments: [String: any Sendable]? = nil,
+        in world: WKContentWorld? = nil,
+        propagatesFrameErrors: Bool = false
+    ) async throws -> [Any?] {
+        guard let asyncCaller else {
+            throw ScriptCallerError.evaluationTimedOut
+        }
+
+        let primitiveArguments: [String: any Sendable]? = arguments?.mapValues {
+            if let set = $0 as? Set<AnyHashable> {
+                return Array(set) as! any Sendable
+            }
+            return $0
+        }
+
+        var results = [Any?]()
+        let mainResult = try await asyncCaller(
+            js,
+            primitiveArguments,
+            nil,
+            world
+        ).value
+        results.append(normalizeJavaScriptResult(mainResult))
+
+        for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+            do {
+                let result = try await asyncCaller(
+                    js,
+                    primitiveArguments,
+                    targetFrame,
+                    world
+                ).value
+                results.append(normalizeJavaScriptResult(result))
+            } catch {
+                if let webKitError = error as? WKError,
+                   webKitError.code == .javaScriptInvalidFrameTarget {
+                    multiTargetFrames.removeValue(forKey: uuid)
+                }
+                if propagatesFrameErrors {
+                    throw error
+                }
+            }
+        }
+
+        return results
+    }
+
     @MainActor
     public func captureSnapshot(rect: CGRect? = nil) async throws -> WebViewSnapshotImage {
         guard let snapshotCapture else {
@@ -5473,9 +5562,16 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         framesByCanonicalURL.removeAll()
     }
 
+    /// Returns only a canonical URL match and never falls back to another frame.
+    @MainActor
+    public func exactFrame(for url: URL?) -> WKFrameInfo? {
+        guard let key = canonicalFrameKey(for: url) else { return nil }
+        return framesByCanonicalURL[key]
+    }
+
     @MainActor
     public func frame(for url: URL?) -> WKFrameInfo? {
-        if let key = canonicalFrameKey(for: url), let frame = framesByCanonicalURL[key] {
+        if let frame = exactFrame(for: url) {
             return frame
         }
         if let mainFrame = lastKnownMainFrame {
@@ -6165,6 +6261,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
     weak var store: WebViewNativeLookupHitTestStore?
     private let pressedSegmentLayer = CAShapeLayer()
     private var clearPressedSegmentWorkItem: DispatchWorkItem?
+    private var pressedSegmentElementID: String?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -6194,6 +6291,7 @@ private final class NativeLookupHitTestOverlayView: UIView {
     func showPressedTarget(_ target: WebViewNativeLookupHitTarget) {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
+        pressedSegmentElementID = target.elementID
         let path = CGMutablePath()
         for rect in target.projectedRectsForCurrentHitTestOverlay {
             let visualRect = Self.pressVisualRect(for: rect)
@@ -6231,7 +6329,13 @@ private final class NativeLookupHitTestOverlayView: UIView {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
+    func clearPressedTarget(matching elementID: String?) {
+        guard elementID == nil || pressedSegmentElementID == elementID else { return }
+        clearPressedTarget()
+    }
+
     private func clearPressedTargetImmediately() {
+        pressedSegmentElementID = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.path = nil
@@ -6335,8 +6439,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartWasActiveTarget =
             activeLookupElementID == target.elementID
             || activeHighlightElementID == target.elementID
-        touchStartOverlay = coordinateView
-        touchStartOverlay?.showPressedTarget(target)
+        if store?.showsPressedTargetOverlay == true {
+            touchStartOverlay = coordinateView
+            touchStartOverlay?.showPressedTarget(target)
+        } else {
+            touchStartOverlay = nil
+            coordinateView.clearPressedTarget()
+        }
         if hadActiveLookup {
             logTouchDeliveryVerdict(
                 stage: "touchesBegan.activeLookupPendingTapDecision",
@@ -6465,7 +6574,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
-        guard store?.hasActiveWebTextSelection != true else {
+        guard store?.shouldPassThroughForWebTextSelection != true else {
             resetTrackingState()
             state = .failed
             return
@@ -6618,6 +6727,14 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
 #endif
         resetTrackingState()
         state = .failed
+    }
+
+    @MainActor
+    func cancelForExternalInteraction(reason _: String) {
+        resetTrackingState()
+        if state == .possible {
+            state = .failed
+        }
     }
 
     private func logTouchDeliveryVerdict(
@@ -6796,6 +6913,14 @@ public class WebViewController: UIViewController {
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
+        store.onPressedTargetHandoffCompleted = { [weak self] elementID in
+            self?.nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
+        }
+        store.onExternalTouchInteractionCancelled = { [weak self] reason in
+            guard let self else { return }
+            nativeLookupHitTestOverlayView.clearPressedTarget()
+            nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(reason: reason)
+        }
     }
 
     @MainActor
@@ -7656,6 +7781,7 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
     weak var store: WebViewNativeLookupHitTestStore?
     private let pressedSegmentLayer = CAShapeLayer()
     private var clearPressedSegmentWorkItem: DispatchWorkItem?
+    private var pressedSegmentElementID: String?
 
     override var isFlipped: Bool { true }
 
@@ -7681,6 +7807,7 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
     func showPressedTarget(_ target: WebViewNativeLookupHitTarget) {
         clearPressedSegmentWorkItem?.cancel()
         clearPressedSegmentWorkItem = nil
+        pressedSegmentElementID = target.elementID
         let path = CGMutablePath()
         for rect in target.projectedRectsForCurrentHitTestOverlay {
             let visualRect = Self.pressVisualRect(for: rect)
@@ -7718,7 +7845,13 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
+    func clearPressedTarget(matching elementID: String?) {
+        guard elementID == nil || pressedSegmentElementID == elementID else { return }
+        clearPressedTarget()
+    }
+
     private func clearPressedTargetImmediately() {
+        pressedSegmentElementID = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pressedSegmentLayer.path = nil
@@ -7759,7 +7892,11 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         MainActor.assumeIsolated {
             store?.onActiveTargetTouchDown?(target)
         }
-        pressedOverlay?.showPressedTarget(target)
+        if store?.showsPressedTargetOverlay == true {
+            pressedOverlay?.showPressedTarget(target)
+        } else {
+            pressedOverlay?.clearPressedTarget()
+        }
         super.mouseDown(with: event)
         if mouseDownWasActiveTarget {
             pressedOverlay?.clearPressedTarget()
@@ -7803,6 +7940,12 @@ public final class WebViewHostNSView: NSView {
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
+        store.onPressedTargetHandoffCompleted = { [weak self] elementID in
+            self?.nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
+        }
+        store.onExternalTouchInteractionCancelled = { [weak self] _ in
+            self?.nativeLookupHitTestOverlayView.clearPressedTarget()
+        }
     }
 
     private func attachWebView() {
