@@ -123,6 +123,64 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(dispatchedHit?.lookupPayload?["surface"] as? String, "読む")
     }
 
+    func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {
+        let store = WebViewNativeLookupHitTestStore()
+        var dispatchedHit = false
+        store.onHit = { _ in dispatchedHit = true }
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "wrapped-segment",
+                rects: [
+                    CGRect(x: 0, y: 0, width: 20, height: 10),
+                    CGRect(x: 40, y: 20, width: 20, height: 10),
+                ]
+            )
+        ])
+        let blankPointWithinHitSlop = CGPoint(x: 25, y: 5)
+
+        XCTAssertNil(store.hitTarget(at: blankPointWithinHitSlop))
+        XCTAssertFalse(store.containsClaimableTarget(at: blankPointWithinHitSlop))
+        XCTAssertFalse(store.handleTap(at: blankPointWithinHitSlop))
+        XCTAssertFalse(dispatchedHit)
+    }
+
+    func testExpandedHitTargetIsExplicitAndDoesNotChangeClaimableArea() {
+        let store = WebViewNativeLookupHitTestStore()
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "segment",
+                rects: [CGRect(x: 0, y: 0, width: 20, height: 10)]
+            )
+        ])
+        let nearbyPoint = CGPoint(x: 25, y: 5)
+
+        XCTAssertNil(store.hitTarget(at: nearbyPoint))
+        XCTAssertFalse(store.containsClaimableTarget(at: nearbyPoint))
+        XCTAssertEqual(store.expandedHitTarget(at: nearbyPoint)?.elementID, "segment")
+        XCTAssertTrue(store.containsExpandedTarget(at: nearbyPoint))
+    }
+
+    func testExactComponentRectStillDispatchesWrappedSegment() {
+        let store = WebViewNativeLookupHitTestStore()
+        var dispatchedElementID: String?
+        store.onHit = { dispatchedElementID = $0.elementID }
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "wrapped-segment",
+                rects: [
+                    CGRect(x: 0, y: 0, width: 20, height: 10),
+                    CGRect(x: 40, y: 20, width: 20, height: 10),
+                ]
+            )
+        ])
+        let secondLinePoint = CGPoint(x: 50, y: 25)
+
+        XCTAssertEqual(store.hitTarget(at: secondLinePoint)?.elementID, "wrapped-segment")
+        XCTAssertTrue(store.containsClaimableTarget(at: secondLinePoint))
+        XCTAssertTrue(store.handleTap(at: secondLinePoint))
+        XCTAssertEqual(dispatchedElementID, "wrapped-segment")
+    }
+
     func testReaderInteractionCallbacksRemainAvailableAcrossTargetReset() {
         let store = WebViewNativeLookupHitTestStore()
         var cancellationReason: String?

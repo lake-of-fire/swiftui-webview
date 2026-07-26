@@ -1533,26 +1533,12 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> WebViewNativeLookupHitTarget? {
-        guard isEnabled else { return nil }
-        let exactCandidate = bestCandidate(
+        exactHitTarget(
             at: point,
-            usingInflatedRects: false,
-            containerSize: containerSize,
+            in: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         )
-        if let exactCandidate {
-            return target(for: exactCandidate, usedInflatedHitRect: false)
-        }
-        return bestCandidate(
-            at: point,
-            usingInflatedRects: true,
-            containerSize: containerSize,
-            coordinateViewWindowMinY: coordinateViewWindowMinY,
-            coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        ).map {
-            target(for: $0, usedInflatedHitRect: true)
-        }
     }
 
     public func exactHitTarget(
@@ -1570,6 +1556,36 @@ public final class WebViewNativeLookupHitTestStore {
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ).map {
             target(for: $0, usedInflatedHitRect: false)
+        }
+    }
+
+    /// Resolves an exact component rectangle first, then permits the configured hit slop.
+    ///
+    /// Ordinary lookup interaction must use ``hitTarget(at:in:coordinateViewWindowMinY:coordinateViewWindowOrigin:)``
+    /// so a wrapped segment cannot claim blank space between its line fragments.
+    public func expandedHitTarget(
+        at point: CGPoint,
+        in containerSize: CGSize? = nil,
+        coordinateViewWindowMinY: CGFloat? = nil,
+        coordinateViewWindowOrigin: CGPoint? = nil
+    ) -> WebViewNativeLookupHitTarget? {
+        guard isEnabled else { return nil }
+        if let exactTarget = exactHitTarget(
+            at: point,
+            in: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ) {
+            return exactTarget
+        }
+        return bestCandidate(
+            at: point,
+            usingInflatedRects: true,
+            containerSize: containerSize,
+            coordinateViewWindowMinY: coordinateViewWindowMinY,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ).map {
+            target(for: $0, usedInflatedHitRect: true)
         }
     }
 
@@ -1750,6 +1766,10 @@ public final class WebViewNativeLookupHitTestStore {
         hitTarget(at: point, in: containerSize) != nil
     }
 
+    public func containsExpandedTarget(at point: CGPoint, in containerSize: CGSize? = nil) -> Bool {
+        expandedHitTarget(at: point, in: containerSize) != nil
+    }
+
     public func diagnostics(
         at point: CGPoint,
         limit: Int = 5,
@@ -1854,23 +1874,13 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
         guard !webTextSelectionActive else { return false }
-        let exactCandidate = bestCandidate(
+        guard let candidate = bestCandidate(
             at: point,
             usingInflatedRects: false,
             containerSize: containerSize,
             coordinateViewWindowMinY: coordinateViewWindowMinY,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        )
-        let inflatedCandidate = exactCandidate == nil
-            ? bestCandidate(
-                at: point,
-                usingInflatedRects: true,
-                containerSize: containerSize,
-                coordinateViewWindowMinY: coordinateViewWindowMinY,
-                coordinateViewWindowOrigin: coordinateViewWindowOrigin
-            )
-            : nil
-        guard let candidate = exactCandidate ?? inflatedCandidate else {
+        ) else {
 #if DEBUG
             debugPrint(
                 "POPOVER nativeHitTargets.tapMiss",
@@ -1897,7 +1907,7 @@ public final class WebViewNativeLookupHitTestStore {
                 "point": Self.debugPointString(point),
                 "containerSize": containerSize.map(Self.debugSizeString) as Any,
                 "elementID": candidate.target.elementID,
-                "usedInflatedRects": exactCandidate == nil,
+                "usedInflatedRects": false,
                 "distance": candidate.distance,
                 "centerDistance": candidate.centerDistance,
                 "rects": Self.debugRectStrings([candidate.rect]),
@@ -1905,7 +1915,7 @@ public final class WebViewNativeLookupHitTestStore {
             ] as [String : Any]
         )
 #endif
-        let target = target(for: candidate, usedInflatedHitRect: exactCandidate == nil)
+        let target = target(for: candidate, usedInflatedHitRect: false)
         onHit?(WebViewNativeLookupHit(
             elementID: target.elementID,
             point: point,
