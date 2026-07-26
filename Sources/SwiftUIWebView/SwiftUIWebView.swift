@@ -1279,6 +1279,8 @@ public final class WebViewNativeLookupHitTestStore {
     private var nativeTouchElementID: String?
     private var suppressUnhandledTapUntil: TimeInterval = 0
     private var webTextSelectionActive = false
+    private var targetRevision: UInt64 = 0
+    public var onTargetsChanged: (() -> Void)?
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
@@ -1309,10 +1311,15 @@ public final class WebViewNativeLookupHitTestStore {
         viewportOrigin _: CGPoint = .zero
     ) {
         guard isEnabled else {
+            let hadTargets = !entries.isEmpty
             entries.removeAll()
+            if hadTargets {
+                targetsDidChange()
+            }
             return
         }
         entries = makeEntries(for: targets)
+        targetsDidChange()
     }
 
     public func updateTargets(
@@ -1320,12 +1327,17 @@ public final class WebViewNativeLookupHitTestStore {
         replacingNativeLookupFrameKey frameKey: String
     ) {
         guard isEnabled else {
+            let hadTargets = !entries.isEmpty
             entries.removeAll()
+            if hadTargets {
+                targetsDidChange()
+            }
             return
         }
         let replacementEntries = makeEntries(for: targets)
         entries.removeAll { $0.target.nativeLookupFrameKey == frameKey }
         entries.append(contentsOf: replacementEntries)
+        targetsDidChange()
     }
 
     private func makeEntries(for targets: [WebViewNativeLookupHitTarget]) -> [Entry] {
@@ -1339,11 +1351,47 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func removeAllTargets() {
+        let hadTargets = !entries.isEmpty
         entries.removeAll()
         nativeTouchElementID = nil
         suppressUnhandledTapUntil = 0
         webTextSelectionActive = false
+        if hadTargets {
+            targetsDidChange()
+        }
     }
+
+    private func targetsDidChange() {
+        targetRevision &+= 1
+        onTargetsChanged?()
+    }
+
+#if DEBUG
+    public var uiTestTargetProbeText: String {
+        let payloadTargets = entries.compactMap { entry -> String? in
+            guard let payload = entry.target.lookupPayload else { return nil }
+            return payload["surface"] as? String
+        }
+        return [
+            "revision=\(targetRevision)",
+            "targetCount=\(entries.count)",
+            "lookupPayloadCount=\(payloadTargets.count)",
+            "surfaces=\(payloadTargets.prefix(8).joined(separator: "|"))",
+        ].joined(separator: ";")
+    }
+
+    @discardableResult
+    public func handleUITestTapOnFirstLookupTarget() -> Bool {
+        guard let entry = entries.first(where: { $0.target.lookupPayload != nil }),
+              let rect = entry.rects.first else {
+            return false
+        }
+        return handleTap(
+            on: entry.target,
+            at: CGPoint(x: rect.midX, y: rect.midY)
+        )
+    }
+#endif
 
     @MainActor
     public func closeActiveLookupFromBlankTap() {
