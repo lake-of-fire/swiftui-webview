@@ -53,6 +53,23 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(closeCount, 1)
     }
 
+    func testBlankTapDismissesOnlyAnActiveLookupWithoutTextSelection() {
+        let store = WebViewNativeLookupHitTestStore()
+        var closeCount = 0
+        store.activeLookupElementID = { nil }
+        store.onActiveLookupBlankTap = { closeCount += 1 }
+
+        XCTAssertFalse(store.closeActiveLookupFromBlankTapIfNeeded())
+
+        store.activeLookupElementID = { "segment" }
+        XCTAssertTrue(store.closeActiveLookupFromBlankTapIfNeeded())
+        XCTAssertEqual(closeCount, 1)
+
+        store.updateWebTextSelection(active: true)
+        XCTAssertFalse(store.closeActiveLookupFromBlankTapIfNeeded())
+        XCTAssertEqual(closeCount, 1)
+    }
+
     func testTargetPublicationProbeDoesNotNotifyForRedundantEmptyClear() {
         let store = WebViewNativeLookupHitTestStore()
         var notificationCount = 0
