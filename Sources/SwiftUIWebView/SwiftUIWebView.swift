@@ -3644,13 +3644,20 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     "navigationType": "\(navigationAction.navigationType.rawValue)"
                 ]
             )
+            navigator.clearActiveInternalReaderLoadSignal()
             return (.cancel, preferences)
         }
         if let decision = await onNavigationAction?(navigationAction) {
+            if isInternalReaderLoaderNavigation, decision != .allow {
+                navigator.clearActiveInternalReaderLoadSignal()
+            }
             return (decision, preferences)
         }
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
+                if isInternalReaderLoaderNavigation {
+                    navigator.clearActiveInternalReaderLoadSignal()
+                }
                 setLoading(false, isProvisionallyNavigating: false)
                 return (.cancel, preferences)
             }
