@@ -1279,8 +1279,10 @@ public final class WebViewNativeLookupHitTestStore {
     private var nativeTouchElementID: String?
     private var suppressUnhandledTapUntil: TimeInterval = 0
     private var webTextSelectionActive = false
+#if DEBUG
     private var targetRevision: UInt64 = 0
     public var onTargetsChanged: (() -> Void)?
+#endif
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
     public var onTouchDownHitCancelled: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
@@ -1362,8 +1364,10 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     private func targetsDidChange() {
+#if DEBUG
         targetRevision &+= 1
         onTargetsChanged?()
+#endif
     }
 
 #if DEBUG
