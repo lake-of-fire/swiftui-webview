@@ -1215,6 +1215,7 @@ public struct WebViewNativeLookupHitTarget {
     public let coordinateOriginInWindow: CGPoint?
     public let lookupPayload: [String: Any]?
     public let frameInfo: WKFrameInfo?
+    public let documentURL: URL?
     public let nativeLookupFrameKey: String?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
@@ -1230,6 +1231,7 @@ public struct WebViewNativeLookupHitTarget {
         coordinateOriginInWindow: CGPoint? = nil,
         lookupPayload: [String: Any]? = nil,
         frameInfo: WKFrameInfo? = nil,
+        documentURL: URL? = nil,
         nativeLookupFrameKey: String? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
@@ -1244,6 +1246,7 @@ public struct WebViewNativeLookupHitTarget {
         self.coordinateOriginInWindow = coordinateOriginInWindow
         self.lookupPayload = lookupPayload
         self.frameInfo = frameInfo
+        self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
@@ -1286,6 +1289,7 @@ public struct WebViewNativeLookupHit {
     public let debugHitTestRebaseX: CGFloat?
     public let debugHitTestRebaseY: CGFloat?
     public let frameInfo: WKFrameInfo?
+    public let documentURL: URL?
     public let nativeLookupFrameKey: String?
 
     public init(
@@ -1302,6 +1306,7 @@ public struct WebViewNativeLookupHit {
         debugHitTestRebaseX: CGFloat? = nil,
         debugHitTestRebaseY: CGFloat? = nil,
         frameInfo: WKFrameInfo? = nil,
+        documentURL: URL? = nil,
         nativeLookupFrameKey: String? = nil
     ) {
         self.elementID = elementID
@@ -1317,6 +1322,7 @@ public struct WebViewNativeLookupHit {
         self.debugHitTestRebaseX = debugHitTestRebaseX
         self.debugHitTestRebaseY = debugHitTestRebaseY
         self.frameInfo = frameInfo
+        self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
     }
 }
@@ -1348,6 +1354,7 @@ public final class WebViewNativeLookupHitTestStore {
     private var webTextSelectionActive = false
 #if DEBUG
     private var targetRevision: UInt64 = 0
+    private var targetChangeObservers: [UUID: () -> Void] = [:]
     public var onTargetsChanged: (() -> Void)?
 #endif
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
@@ -1441,10 +1448,24 @@ public final class WebViewNativeLookupHitTestStore {
 #if DEBUG
         targetRevision &+= 1
         onTargetsChanged?()
+        for observer in Array(targetChangeObservers.values) {
+            observer()
+        }
 #endif
     }
 
 #if DEBUG
+    @discardableResult
+    public func addTargetsChangedObserver(_ observer: @escaping () -> Void) -> UUID {
+        let id = UUID()
+        targetChangeObservers[id] = observer
+        return id
+    }
+
+    public func removeTargetsChangedObserver(_ id: UUID) {
+        targetChangeObservers[id] = nil
+    }
+
     public var uiTestTargetProbeText: String {
         let payloadTargets = entries.compactMap { entry -> String? in
             guard let payload = entry.target.lookupPayload else { return nil }
@@ -1460,7 +1481,7 @@ public final class WebViewNativeLookupHitTestStore {
 
     @discardableResult
     public func handleUITestTapOnFirstLookupTarget() -> Bool {
-        guard let entry = entries.first(where: { $0.target.lookupPayload != nil }),
+        guard let entry = entries.first,
               let rect = entry.rects.first else {
             return false
         }
@@ -1717,6 +1738,7 @@ public final class WebViewNativeLookupHitTestStore {
             coordinateOriginInWindow: candidate.target.coordinateOriginInWindow,
             lookupPayload: candidate.target.lookupPayload,
             frameInfo: candidate.target.frameInfo,
+            documentURL: candidate.target.documentURL,
             nativeLookupFrameKey: candidate.target.nativeLookupFrameKey,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
@@ -1930,6 +1952,7 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestRebaseX: target.debugHitTestRebaseX,
             debugHitTestRebaseY: target.debugHitTestRebaseY,
             frameInfo: target.frameInfo,
+            documentURL: target.documentURL,
             nativeLookupFrameKey: target.nativeLookupFrameKey
         ))
         return true
@@ -1981,6 +2004,7 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestRebaseX: rebased.rebaseX,
             debugHitTestRebaseY: rebased.rebaseY,
             frameInfo: target.frameInfo,
+            documentURL: target.documentURL,
             nativeLookupFrameKey: target.nativeLookupFrameKey
         ))
         return true

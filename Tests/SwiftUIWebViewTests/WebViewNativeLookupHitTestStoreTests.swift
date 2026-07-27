@@ -99,7 +99,33 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertTrue(store.uiTestTargetProbeText.contains("targetCount=0"))
     }
 
-    func testUITestTapDispatchesFirstPayloadBackedTarget() {
+    func testTargetPublicationProbeSupportsIndependentObservers() {
+        let store = WebViewNativeLookupHitTestStore()
+        var firstCount = 0
+        var secondCount = 0
+        let firstID = store.addTargetsChangedObserver {
+            firstCount += 1
+        }
+        _ = store.addTargetsChangedObserver {
+            secondCount += 1
+        }
+
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "segment",
+                rects: [CGRect(x: 0, y: 0, width: 20, height: 20)]
+            )
+        ])
+        XCTAssertEqual(firstCount, 1)
+        XCTAssertEqual(secondCount, 1)
+
+        store.removeTargetsChangedObserver(firstID)
+        store.removeAllTargets()
+        XCTAssertEqual(firstCount, 1)
+        XCTAssertEqual(secondCount, 2)
+    }
+
+    func testUITestTapDispatchesFirstGeometryTargetWithoutRequiringEagerPayload() {
         let store = WebViewNativeLookupHitTestStore()
         var dispatchedHit: WebViewNativeLookupHit?
         store.onHit = {
@@ -108,7 +134,8 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         store.updateTargets([
             WebViewNativeLookupHitTarget(
                 elementID: "without-payload",
-                rects: [CGRect(x: 0, y: 0, width: 10, height: 10)]
+                rects: [CGRect(x: 0, y: 0, width: 10, height: 10)],
+                documentURL: URL(string: "ebook://book/chapter.xhtml")
             ),
             WebViewNativeLookupHitTarget(
                 elementID: "lookup-target",
@@ -118,9 +145,10 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         ])
 
         XCTAssertTrue(store.handleUITestTapOnFirstLookupTarget())
-        XCTAssertEqual(dispatchedHit?.elementID, "lookup-target")
-        XCTAssertEqual(dispatchedHit?.point, CGPoint(x: 50, y: 75))
-        XCTAssertEqual(dispatchedHit?.lookupPayload?["surface"] as? String, "読む")
+        XCTAssertEqual(dispatchedHit?.elementID, "without-payload")
+        XCTAssertEqual(dispatchedHit?.point, CGPoint(x: 5, y: 5))
+        XCTAssertNil(dispatchedHit?.lookupPayload)
+        XCTAssertEqual(dispatchedHit?.documentURL, URL(string: "ebook://book/chapter.xhtml"))
     }
 
     func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {
