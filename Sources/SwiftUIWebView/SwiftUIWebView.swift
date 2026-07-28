@@ -2404,6 +2404,8 @@ public class WebViewCoordinator: NSObject {
     
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
+    private let scriptCallerBindingOwnerID = UUID()
+    private weak var scriptCallerBoundWebView: WKWebView?
     var config: WebViewConfig
     var lifecycleConfig: WebViewLifecycleConfig = .default
     weak var webViewPool: WebViewPool?
@@ -2674,8 +2676,38 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func clearScriptCallerBinding() {
-        scriptCaller?.asyncCaller = nil
-        scriptCaller?.snapshotCapture = nil
+        scriptCaller?.clearBinding(ownedBy: scriptCallerBindingOwnerID)
+        scriptCallerBoundWebView = nil
+    }
+
+    @MainActor
+    func updateScriptCaller(_ newScriptCaller: WebViewScriptCaller?) {
+        guard scriptCaller !== newScriptCaller else { return }
+        clearScriptCallerBinding()
+        scriptCaller = newScriptCaller
+    }
+
+    @MainActor
+    func hasScriptCallerBinding(for webView: WKWebView) -> Bool {
+        guard scriptCallerBoundWebView === webView else { return false }
+        return scriptCaller?.isBindingOwned(by: scriptCallerBindingOwnerID) == true
+    }
+
+    @MainActor
+    func installScriptCallerBinding(
+        for webView: WKWebView,
+        asyncCaller: @escaping WebViewScriptCaller.AsyncCaller,
+        unsafeCaller: WebViewScriptCaller.UnsafeCaller?,
+        snapshotCapture: WebViewScriptCaller.SnapshotCapture?
+    ) {
+        guard let scriptCaller else { return }
+        scriptCaller.installBinding(
+            ownedBy: scriptCallerBindingOwnerID,
+            asyncCaller: asyncCaller,
+            unsafeCaller: unsafeCaller,
+            snapshotCapture: snapshotCapture
+        )
+        scriptCallerBoundWebView = webView
     }
 
     @MainActor
@@ -2702,7 +2734,9 @@ public class WebViewCoordinator: NSObject {
         removeMessageHandlers(for: webView)
         lastUserScriptsContentController = nil
         lastInstalledScriptsSignature = nil
-        navigator.webView = nil
+        if navigator.webView === webView {
+            navigator.webView = nil
+        }
         clearScriptCallerBinding()
         invalidateWebViewObservations()
         schedulePaginationStateUpdate(paginationController.detach())
@@ -5228,6 +5262,21 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
+    typealias AsyncCaller = @Sendable (
+        String,
+        [String: any Sendable]?,
+        WKFrameInfo?,
+        WKContentWorld?
+    ) async throws -> JavaScriptEvaluationResult
+    typealias UnsafeCaller = @MainActor @Sendable (
+        String,
+        WKFrameInfo?,
+        WKContentWorld?
+    ) -> Void
+    typealias SnapshotCapture = @MainActor @Sendable (
+        CGRect?
+    ) async throws -> WebViewSnapshotImage
+
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
     //    var caller: (@Sendable (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
@@ -5237,15 +5286,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     @Published public private(set) var hasSnapshotCapture = false
     private var asyncCallerReadinessGeneration = 0
     private var snapshotCaptureReadinessGeneration = 0
+    private var bindingOwnerID: UUID?
 
-    var asyncCaller: ( @Sendable
-                       (
-                        String,
-                        [String: any Sendable]?,
-                        WKFrameInfo?,
-                        WKContentWorld?
-                       ) async throws -> JavaScriptEvaluationResult
-    )? = nil {
+    var asyncCaller: AsyncCaller? = nil {
         didSet {
             asyncCallerReadinessGeneration += 1
             let generation = asyncCallerReadinessGeneration
@@ -5258,7 +5301,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
     }
-    var snapshotCapture: (@MainActor @Sendable (CGRect?) async throws -> WebViewSnapshotImage)? = nil {
+    var snapshotCapture: SnapshotCapture? = nil {
         didSet {
             snapshotCaptureReadinessGeneration += 1
             let generation = snapshotCaptureReadinessGeneration
@@ -5271,7 +5314,45 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
     }
-    var unsafeCaller: (@MainActor @Sendable (String, WKFrameInfo?, WKContentWorld?) -> Void)? = nil
+    var unsafeCaller: UnsafeCaller? = nil
+
+    /// Synchronously reflects whether JavaScript evaluation is currently possible.
+    ///
+    /// `hasAsyncCaller` is published on the next main-queue turn so SwiftUI can use it
+    /// as a task identity without publishing during representable updates. Callers
+    /// should use this property for the final check immediately before DOM work.
+    public var canEvaluateJavaScript: Bool {
+        asyncCaller != nil
+    }
+
+    @MainActor
+    func installBinding(
+        ownedBy ownerID: UUID,
+        asyncCaller: @escaping AsyncCaller,
+        unsafeCaller: UnsafeCaller?,
+        snapshotCapture: SnapshotCapture?
+    ) {
+        bindingOwnerID = ownerID
+        self.asyncCaller = asyncCaller
+        self.unsafeCaller = unsafeCaller
+        self.snapshotCapture = snapshotCapture
+    }
+
+    @MainActor
+    @discardableResult
+    func clearBinding(ownedBy ownerID: UUID) -> Bool {
+        guard bindingOwnerID == ownerID else { return false }
+        bindingOwnerID = nil
+        asyncCaller = nil
+        unsafeCaller = nil
+        snapshotCapture = nil
+        return true
+    }
+
+    @MainActor
+    func isBindingOwned(by ownerID: UUID) -> Bool {
+        bindingOwnerID == ownerID && asyncCaller != nil
+    }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
@@ -7557,23 +7638,7 @@ extension WebView: UIViewControllerRepresentable {
             config: config
         )
         context.coordinator.scheduleWebViewBinding(webView, paginationReason: "configure-webview")
-        if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
-            context.coordinator.scriptCaller = scriptCaller
-        }
-        context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] js, args, frame, world in
-            guard let webView else {
-                throw ScriptCallerError.evaluationTimedOut
-            }
-            let resolvedWorld = world ?? .page
-            if let args {
-                let value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
-                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
-            } else {
-                let result = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
-                return WebViewScriptCaller.JavaScriptEvaluationResult(result)
-            }
-        }
-        context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
+        bindScriptCallerIfNeeded(to: webView, context: context)
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         controller.setNativeLookupHitTestingEnabled(
@@ -7582,6 +7647,42 @@ extension WebView: UIViewControllerRepresentable {
         )
         refreshDarkModeSetting(webView: webView)
         applyVisualConfiguration(webView: webView, containerView: controller.view)
+    }
+
+    @MainActor
+    private func bindScriptCallerIfNeeded(
+        to webView: EnhancedWKWebView,
+        context: Context
+    ) {
+        context.coordinator.updateScriptCaller(scriptCaller)
+        guard !context.coordinator.hasScriptCallerBinding(for: webView) else { return }
+        context.coordinator.installScriptCallerBinding(
+            for: webView,
+            asyncCaller: { @MainActor [weak webView] js, args, frame, world in
+                guard let webView else {
+                    throw ScriptCallerError.evaluationTimedOut
+                }
+                let resolvedWorld = world ?? .page
+                if let args {
+                    let value = try await webView.callAsyncJavaScript(
+                        js,
+                        arguments: args,
+                        in: frame,
+                        contentWorld: resolvedWorld
+                    )
+                    return WebViewScriptCaller.JavaScriptEvaluationResult(value)
+                } else {
+                    let result = try await webView.callAsyncJavaScript(
+                        js,
+                        in: frame,
+                        contentWorld: resolvedWorld
+                    )
+                    return WebViewScriptCaller.JavaScriptEvaluationResult(result)
+                }
+            },
+            unsafeCaller: nil,
+            snapshotCapture: makeWebViewSnapshotCapture(for: webView)
+        )
     }
     
     @MainActor
@@ -7748,6 +7849,7 @@ extension WebView: UIViewControllerRepresentable {
         }
 #endif
         updateCoordinatorBindings(context: context)
+        bindScriptCallerIfNeeded(to: controller.webView, context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
             webView: controller.webView,
@@ -8112,78 +8214,111 @@ extension WebView: NSViewRepresentable {
         }
         
         context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
-        if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
-            context.coordinator.scriptCaller = scriptCaller
-        }
-        context.coordinator.scriptCaller?.asyncCaller = { @MainActor [weak webView] (js: String, args, frame: WKFrameInfo?, world: WKContentWorld?) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
-            guard let webView else {
-                throw ScriptCallerError.evaluationTimedOut
-            }
-            let resolvedWorld = world ?? .page
-#if DEBUG
-            let jsPrefix = js.prefix(120)
-            let frameURL = frame?.request.url?.absoluteString ?? "nil"
-            let isMainFrame = frame?.isMainFrame ?? true
-            let currentURL = webView.url?.absoluteString ?? "nil"
-            let startedAt = Date()
-            print("# READER scriptCaller.call.start",
-                  "url=\(currentURL)",
-                  "frameURL=\(frameURL)",
-                  "isMainFrame=\(isMainFrame)",
-                  "world=\(String(describing: resolvedWorld.name))",
-                  "args=\(args?.count ?? 0)",
-                  "jsPrefix=\(jsPrefix)")
-#endif
-            do {
-                let value: Any?
-                if let args {
-                    value = try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: resolvedWorld)
-                } else {
-                    value = try await webView.callAsyncJavaScript(js, in: frame, contentWorld: resolvedWorld)
-                }
-#if DEBUG
-                let elapsed = Date().timeIntervalSince(startedAt)
-                let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
-                let stringLength = (value as? String)?.count
-                print("# READER scriptCaller.call.finish",
-                      "url=\(currentURL)",
-                      "frameURL=\(frameURL)",
-                      "isMainFrame=\(isMainFrame)",
-                      "world=\(String(describing: resolvedWorld.name))",
-                      "jsPrefix=\(jsPrefix)",
-                      "type=\(typeDescription)",
-                      "stringLength=\(stringLength.map(String.init) ?? "nil")",
-                      String(format: "elapsed=%.3fs", elapsed))
-#endif
-                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
-            } catch {
-#if DEBUG
-                let elapsed = Date().timeIntervalSince(startedAt)
-                print("# READER scriptCaller.call.error",
-                      "url=\(currentURL)",
-                      "frameURL=\(frameURL)",
-                      "isMainFrame=\(isMainFrame)",
-                      "world=\(String(describing: resolvedWorld.name))",
-                      "jsPrefix=\(jsPrefix)",
-                      "error=\(error)",
-                      String(format: "elapsed=%.3fs", elapsed))
-#endif
-                throw error
-            }
-        }
-        context.coordinator.scriptCaller?.unsafeCaller = { @MainActor [weak webView] (js: String, frame: WKFrameInfo?, world: WKContentWorld?) in
-            guard let webView else { return }
-            let resolvedWorld = world ?? .page
-            webView.evaluateJavaScript(js, in: frame, in: resolvedWorld, completionHandler: nil)
-        }
-        context.coordinator.scriptCaller?.snapshotCapture = makeWebViewSnapshotCapture(for: webView)
-        
+        bindScriptCallerIfNeeded(to: webView, context: context)
+
         refreshDarkModeSetting(webView: webView)
-        
+
         let hostView = WebViewHostNSView(webView: webView)
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         return hostView
+    }
+
+    @MainActor
+    private func bindScriptCallerIfNeeded(
+        to webView: EnhancedWKWebView,
+        context: Context
+    ) {
+        context.coordinator.updateScriptCaller(scriptCaller)
+        guard !context.coordinator.hasScriptCallerBinding(for: webView) else { return }
+        context.coordinator.installScriptCallerBinding(
+            for: webView,
+            asyncCaller: { @MainActor [weak webView] (
+                js: String,
+                args,
+                frame: WKFrameInfo?,
+                world: WKContentWorld?
+            ) async throws -> WebViewScriptCaller.JavaScriptEvaluationResult in
+                guard let webView else {
+                    throw ScriptCallerError.evaluationTimedOut
+                }
+                let resolvedWorld = world ?? .page
+#if DEBUG
+                let jsPrefix = js.prefix(120)
+                let frameURL = frame?.request.url?.absoluteString ?? "nil"
+                let isMainFrame = frame?.isMainFrame ?? true
+                let currentURL = webView.url?.absoluteString ?? "nil"
+                let startedAt = Date()
+                print("# READER scriptCaller.call.start",
+                      "url=\(currentURL)",
+                      "frameURL=\(frameURL)",
+                      "isMainFrame=\(isMainFrame)",
+                      "world=\(String(describing: resolvedWorld.name))",
+                      "args=\(args?.count ?? 0)",
+                      "jsPrefix=\(jsPrefix)")
+#endif
+                do {
+                    let value: Any?
+                    if let args {
+                        value = try await webView.callAsyncJavaScript(
+                            js,
+                            arguments: args,
+                            in: frame,
+                            contentWorld: resolvedWorld
+                        )
+                    } else {
+                        value = try await webView.callAsyncJavaScript(
+                            js,
+                            in: frame,
+                            contentWorld: resolvedWorld
+                        )
+                    }
+#if DEBUG
+                    let elapsed = Date().timeIntervalSince(startedAt)
+                    let typeDescription = value.map { String(describing: type(of: $0)) } ?? "nil"
+                    let stringLength = (value as? String)?.count
+                    print("# READER scriptCaller.call.finish",
+                          "url=\(currentURL)",
+                          "frameURL=\(frameURL)",
+                          "isMainFrame=\(isMainFrame)",
+                          "world=\(String(describing: resolvedWorld.name))",
+                          "jsPrefix=\(jsPrefix)",
+                          "type=\(typeDescription)",
+                          "stringLength=\(stringLength.map(String.init) ?? "nil")",
+                          String(format: "elapsed=%.3fs", elapsed))
+#endif
+                    return WebViewScriptCaller.JavaScriptEvaluationResult(value)
+                } catch {
+#if DEBUG
+                    let elapsed = Date().timeIntervalSince(startedAt)
+                    print("# READER scriptCaller.call.error",
+                          "url=\(currentURL)",
+                          "frameURL=\(frameURL)",
+                          "isMainFrame=\(isMainFrame)",
+                          "world=\(String(describing: resolvedWorld.name))",
+                          "jsPrefix=\(jsPrefix)",
+                          "error=\(error)",
+                          String(format: "elapsed=%.3fs", elapsed))
+#endif
+                    throw error
+                }
+            },
+            unsafeCaller: { @MainActor [weak webView] (
+                js: String,
+                frame: WKFrameInfo?,
+                world: WKContentWorld?
+            ) in
+                guard let webView else { return }
+                let resolvedWorld = world ?? .page
+                webView.evaluateJavaScript(
+                    js,
+                    in: frame,
+                    in: resolvedWorld,
+                    completionHandler: nil
+                )
+            },
+            snapshotCapture: makeWebViewSnapshotCapture(for: webView)
+        )
     }
 
     @MainActor
@@ -8212,6 +8347,7 @@ extension WebView: NSViewRepresentable {
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         uiView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         let webView = uiView.webView
+        bindScriptCallerIfNeeded(to: webView, context: context)
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,

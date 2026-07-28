@@ -20,4 +20,37 @@ final class WebViewScriptCallerTests: XCTestCase {
 
         XCTAssertEqual(results as? [String], ["main"])
     }
+
+    func testStaleBindingOwnerCannotClearReplacement() async throws {
+        let caller = WebViewScriptCaller()
+        let staleOwnerID = UUID()
+        let activeOwnerID = UUID()
+
+        caller.installBinding(
+            ownedBy: staleOwnerID,
+            asyncCaller: { _, _, _, _ in
+                WebViewScriptCaller.JavaScriptEvaluationResult("stale")
+            },
+            unsafeCaller: nil,
+            snapshotCapture: nil
+        )
+        caller.installBinding(
+            ownedBy: activeOwnerID,
+            asyncCaller: { _, _, _, _ in
+                WebViewScriptCaller.JavaScriptEvaluationResult("active")
+            },
+            unsafeCaller: { _, _, _ in },
+            snapshotCapture: nil
+        )
+
+        XCTAssertFalse(caller.clearBinding(ownedBy: staleOwnerID))
+        XCTAssertTrue(caller.canEvaluateJavaScript)
+        XCTAssertNotNil(caller.unsafeCaller)
+        let activeValue = try await caller.evaluateJavaScript("value") as? String
+        XCTAssertEqual(activeValue, "active")
+
+        XCTAssertTrue(caller.clearBinding(ownedBy: activeOwnerID))
+        XCTAssertFalse(caller.canEvaluateJavaScript)
+        XCTAssertNil(caller.unsafeCaller)
+    }
 }
