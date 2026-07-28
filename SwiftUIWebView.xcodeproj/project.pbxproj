@@ -13,6 +13,8 @@
 		27760E30BD1EF933EAEC654E /* WebViewUserScriptSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B284CD7AB3E4A6FECEFBD /* WebViewUserScriptSignatureTests.swift */; };
 		296A5C9B83011F286947821E /* WebViewPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */; };
 		2A875882342499CCD28D95B4 /* LRUCache.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */; };
+		4F2FCDCE348DFDB9B0370603 /* WebViewReaderLoadActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4CCB07EB8E6A98787E27D /* WebViewReaderLoadActivityTests.swift */; };
+		69EA6DB8E8AA0F5A6FC7FD64 /* WebViewScriptCallerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD33BAFE851DB6ADB1ABA778 /* WebViewScriptCallerTests.swift */; };
 		759A02D660572A6EA0BA5FD7 /* WebViewPaginationConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF3A2C3139BE70BADA5B7688 /* WebViewPaginationConfigurationTests.swift */; };
 		7D8929A1D45F572241643B12 /* PendingRequestLoadDispositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5669F5811D929F206DA245B6 /* PendingRequestLoadDispositionTests.swift */; };
 		88894AAA54335F8B113F4143 /* WebViewSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C42A17D319B90B34692D48F /* WebViewSnapshotTests.swift */; };
@@ -60,6 +62,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		00F4CCB07EB8E6A98787E27D /* WebViewReaderLoadActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewReaderLoadActivityTests.swift; sourceTree = "<group>"; };
 		0D4EA4CD28D693B0668236E4 /* URL+Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "URL+Extensions.swift"; sourceTree = "<group>"; };
 		1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = LRUCache.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewPool.swift; sourceTree = "<group>"; };
@@ -75,6 +78,7 @@
 		B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OrderedCollections.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		B46E4BE7B7C13DA35336B207 /* SwiftUIWebView-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "SwiftUIWebView-Info.plist"; sourceTree = "<group>"; };
 		B86F026B7623C56A1D23FE7C /* SwiftUIWebViewTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SwiftUIWebViewTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BD33BAFE851DB6ADB1ABA778 /* WebViewScriptCallerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewScriptCallerTests.swift; sourceTree = "<group>"; };
 		C2DC59391F12A600628BF2C9 /* LoadingProgressPublicationStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingProgressPublicationStateTests.swift; sourceTree = "<group>"; };
 		C9A1922746100196C740DDA9 /* PDFJS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFJS.swift; sourceTree = "<group>"; };
 		CE1AF16FA398BE9C243EAE16 /* SwiftUIWebViewTests-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "SwiftUIWebViewTests-Info.plist"; sourceTree = "<group>"; };
@@ -111,6 +115,8 @@
 				6C8C8A06C034C6BF5228BD44 /* WebViewNativeLookupHitTestStoreTests.swift */,
 				AF3A2C3139BE70BADA5B7688 /* WebViewPaginationConfigurationTests.swift */,
 				A330AA9D15C974C1BD2F50E1 /* WebViewPoolTests.swift */,
+				00F4CCB07EB8E6A98787E27D /* WebViewReaderLoadActivityTests.swift */,
+				BD33BAFE851DB6ADB1ABA778 /* WebViewScriptCallerTests.swift */,
 				1C42A17D319B90B34692D48F /* WebViewSnapshotTests.swift */,
 				1E1B284CD7AB3E4A6FECEFBD /* WebViewUserScriptSignatureTests.swift */,
 			);
@@ -294,6 +300,8 @@
 				ACC1F3256AEBACFE3D690182 /* WebViewNativeLookupHitTestStoreTests.swift in Sources */,
 				759A02D660572A6EA0BA5FD7 /* WebViewPaginationConfigurationTests.swift in Sources */,
 				D729627185622A03A7F6E2E5 /* WebViewPoolTests.swift in Sources */,
+				4F2FCDCE348DFDB9B0370603 /* WebViewReaderLoadActivityTests.swift in Sources */,
+				69EA6DB8E8AA0F5A6FC7FD64 /* WebViewScriptCallerTests.swift in Sources */,
 				88894AAA54335F8B113F4143 /* WebViewSnapshotTests.swift in Sources */,
 				27760E30BD1EF933EAEC654E /* WebViewUserScriptSignatureTests.swift in Sources */,
 			);

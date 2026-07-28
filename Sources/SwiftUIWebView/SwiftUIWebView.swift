@@ -1381,6 +1381,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var shouldSuppressUnhandledTapForNativeLookup: Bool {
         nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
     }
+
     public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
     public var shouldPassThroughForWebTextSelection: Bool { webTextSelectionActive }
 
@@ -6580,10 +6581,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             in: coordinateView.bounds.size,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ) else {
-            let canDismissActiveLookup = MainActor.assumeIsolated {
-                store?.activeLookupElementID?() != nil
-                    && store?.shouldPassThroughForWebTextSelection != true
-            }
+            let canDismissActiveLookup = store?.activeLookupElementID?() != nil
+                && store?.shouldPassThroughForWebTextSelection != true
             if canDismissActiveLookup {
                 touchStartPoint = point
                 touchStartTime = event.timestamp
@@ -6628,9 +6627,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartTime = event.timestamp
         touchStartTarget = target
         store?.beginNativeTouchStream(on: target)
-        let activeLookupElementID = MainActor.assumeIsolated {
-            store?.activeLookupElementID?()
-        }
+        let activeLookupElementID = store?.activeLookupElementID?()
         let activeHighlightElementID = store?.activeElementID
         let hadActiveLookup = activeLookupElementID != nil
         touchStartWasActiveTarget =
@@ -6728,9 +6725,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             let duration = event.timestamp - startedAt
             guard movement <= Self.segmentTapMovementTolerance,
                   duration <= Self.segmentTapMaximumDuration,
-                  MainActor.assumeIsolated({
-                      store?.closeActiveLookupFromBlankTapIfNeeded() == true
-                  }) else {
+                  store?.closeActiveLookupFromBlankTapIfNeeded() == true else {
                 resetTrackingState()
                 state = .failed
                 return
@@ -6800,9 +6795,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             return
         }
         if touchStartWasActiveTarget {
-            MainActor.assumeIsolated {
-                store?.onActiveTargetTouchDown?(target)
-            }
+            store?.onActiveTargetTouchDown?(target)
         } else {
             let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
             guard store?.handleTap(
@@ -8144,9 +8137,7 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         }
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store?.activeElementID == target.elementID
-        MainActor.assumeIsolated {
-            store?.onActiveTargetTouchDown?(target)
-        }
+        store?.onActiveTargetTouchDown?(target)
         if store?.showsPressedTargetOverlay == true {
             pressedOverlay?.showPressedTarget(target)
         } else {
