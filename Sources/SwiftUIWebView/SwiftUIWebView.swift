@@ -1490,6 +1490,20 @@ public final class WebViewNativeLookupHitTestStore {
             at: CGPoint(x: rect.midX, y: rect.midY)
         )
     }
+
+    @discardableResult
+    public func handleUITestTapOnLookupTarget(
+        differentFrom elementID: String?
+    ) -> Bool {
+        guard let entry = entries.first(where: { $0.target.elementID != elementID }),
+              let rect = entry.rects.first else {
+            return false
+        }
+        return handleTap(
+            on: entry.target,
+            at: CGPoint(x: rect.midX, y: rect.midY)
+        )
+    }
 #endif
 
     @MainActor
@@ -5254,6 +5268,23 @@ private func webViewSnapshotNativeScale(for webView: WKWebView) -> CGFloat {
 
 @MainActor
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
+    public struct UnboundEvaluationAttempt: Equatable, Sendable {
+        public enum Operation: String, Equatable, Sendable {
+            case evaluateJavaScript
+            case evaluateJavaScriptInMultiTargetFrames
+        }
+
+        public let callerID: String
+        public let operation: Operation
+        public let script: String
+
+        public init(callerID: String, operation: Operation, script: String) {
+            self.callerID = callerID
+            self.operation = operation
+            self.script = script
+        }
+    }
+
     struct JavaScriptEvaluationResult: @unchecked Sendable {
         let value: Any?
 
@@ -5284,6 +5315,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     @Published public private(set) var hasAsyncCaller = false
     /// Indicates whether the backing WKWebView has registered a snapshot capture caller.
     @Published public private(set) var hasSnapshotCapture = false
+    /// Diagnostic hook invoked when code attempts evaluation without a mounted WebView binding.
+    ///
+    /// Tests can install a handler that records an issue or fails immediately. This remains
+    /// instance-scoped so parallel tests and independent WebViews cannot observe each other.
+    public var onUnboundEvaluation: (@MainActor @Sendable (UnboundEvaluationAttempt) -> Void)?
     private var asyncCallerReadinessGeneration = 0
     private var snapshotCaptureReadinessGeneration = 0
     private var bindingOwnerID: UUID?
@@ -5323,6 +5359,22 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     /// should use this property for the final check immediately before DOM work.
     public var canEvaluateJavaScript: Bool {
         asyncCaller != nil
+    }
+
+    private func reportUnboundEvaluation(
+        operation: UnboundEvaluationAttempt.Operation,
+        script: String
+    ) {
+        let attempt = UnboundEvaluationAttempt(
+            callerID: id,
+            operation: operation,
+            script: script
+        )
+        if let onUnboundEvaluation {
+            onUnboundEvaluation(attempt)
+        } else {
+            print("No asyncCaller set for WebViewScriptCaller \(id)")
+        }
     }
 
     @MainActor
@@ -5414,7 +5466,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         in world: WKContentWorld? = nil
     ) async throws -> Any? {
         guard let asyncCaller else {
-            print("No asyncCaller set for WebViewScriptCaller \(id)") // TODO: Error
+            reportUnboundEvaluation(operation: .evaluateJavaScript, script: js)
             throw ScriptCallerError.evaluationTimedOut
         }
 
@@ -5533,6 +5585,10 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         propagatesFrameErrors: Bool = false
     ) async throws -> [Any?] {
         guard let asyncCaller else {
+            reportUnboundEvaluation(
+                operation: .evaluateJavaScriptInMultiTargetFrames,
+                script: js
+            )
             throw ScriptCallerError.evaluationTimedOut
         }
 

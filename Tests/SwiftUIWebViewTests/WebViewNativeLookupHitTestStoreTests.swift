@@ -151,6 +151,28 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(dispatchedHit?.documentURL, URL(string: "ebook://book/chapter.xhtml"))
     }
 
+    func testUITestTapCanRetargetToDifferentElementWhileLookupIsActive() {
+        let store = WebViewNativeLookupHitTestStore()
+        var dispatchedElementIDs = [String]()
+        store.onHit = {
+            dispatchedElementIDs.append($0.elementID)
+        }
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "first",
+                rects: [CGRect(x: 0, y: 0, width: 10, height: 10)]
+            ),
+            WebViewNativeLookupHitTarget(
+                elementID: "second",
+                rects: [CGRect(x: 20, y: 0, width: 10, height: 10)]
+            ),
+        ])
+
+        XCTAssertTrue(store.handleUITestTapOnFirstLookupTarget())
+        XCTAssertTrue(store.handleUITestTapOnLookupTarget(differentFrom: "first"))
+        XCTAssertEqual(dispatchedElementIDs, ["first", "second"])
+    }
+
     func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {
         let store = WebViewNativeLookupHitTestStore()
         var dispatchedHit = false
