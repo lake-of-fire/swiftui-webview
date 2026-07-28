@@ -16,6 +16,19 @@ private actor JavaScriptEvaluationRecorder {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+#if os(macOS)
+    func testTopLeadingWebViewOriginIncludesWindowChrome() {
+        XCTAssertEqual(
+            topLeadingWebViewOriginInWindow(
+                frameInWindow: CGRect(x: 408, y: 0, width: 842, height: 798),
+                contentViewHeight: 798,
+                windowChromeTopInset: 52
+            ),
+            CGPoint(x: 408, y: 52)
+        )
+    }
+#endif
+
     func testMultiTargetEvaluationIncludesMainDocumentResult() async throws {
         let caller = WebViewScriptCaller()
         caller.asyncCaller = { script, arguments, frame, _ in
@@ -45,7 +58,8 @@ final class WebViewScriptCallerTests: XCTestCase {
                 WebViewScriptCaller.JavaScriptEvaluationResult("stale")
             },
             unsafeCaller: nil,
-            snapshotCapture: nil
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { CGPoint(x: 1, y: 2) }
         )
         caller.installBinding(
             ownedBy: activeOwnerID,
@@ -53,18 +67,21 @@ final class WebViewScriptCallerTests: XCTestCase {
                 WebViewScriptCaller.JavaScriptEvaluationResult("active")
             },
             unsafeCaller: { _, _, _ in },
-            snapshotCapture: nil
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { CGPoint(x: 3, y: 4) }
         )
 
         XCTAssertFalse(caller.clearBinding(ownedBy: staleOwnerID))
         XCTAssertTrue(caller.canEvaluateJavaScript)
         XCTAssertNotNil(caller.unsafeCaller)
+        XCTAssertEqual(caller.coordinateOriginInWindow, CGPoint(x: 3, y: 4))
         let activeValue = try await caller.evaluateJavaScript("value") as? String
         XCTAssertEqual(activeValue, "active")
 
         XCTAssertTrue(caller.clearBinding(ownedBy: activeOwnerID))
         XCTAssertFalse(caller.canEvaluateJavaScript)
         XCTAssertNil(caller.unsafeCaller)
+        XCTAssertNil(caller.coordinateOriginInWindow)
     }
 
     func testRealWebViewHostSynchronizesOnlyAfterDelayedBindingAndStopsAfterTeardown() async throws {
@@ -114,15 +131,18 @@ final class WebViewScriptCallerTests: XCTestCase {
                 return WebViewScriptCaller.JavaScriptEvaluationResult(nil)
             },
             unsafeCaller: nil,
-            snapshotCapture: nil
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { CGPoint(x: 7, y: 8) }
         )
 
         try await readinessDrivenSynchronization.value
         let scriptsAfterBinding = await evaluations.recordedScripts()
         XCTAssertEqual(scriptsAfterBinding, ["synchronize-reader-dom"])
         XCTAssertEqual(unboundAttempts, [])
+        XCTAssertEqual(caller.coordinateOriginInWindow, CGPoint(x: 7, y: 8))
 
         coordinator.tearDownBindingsForDetachedWebView(mountedWebView)
+        XCTAssertNil(caller.coordinateOriginInWindow)
         mountedWebView.removeFromSuperview()
         await Task.yield()
 

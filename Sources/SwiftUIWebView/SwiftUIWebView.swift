@@ -2713,14 +2713,16 @@ public class WebViewCoordinator: NSObject {
         for webView: WKWebView,
         asyncCaller: @escaping WebViewScriptCaller.AsyncCaller,
         unsafeCaller: WebViewScriptCaller.UnsafeCaller?,
-        snapshotCapture: WebViewScriptCaller.SnapshotCapture?
+        snapshotCapture: WebViewScriptCaller.SnapshotCapture?,
+        coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow
     ) {
         guard let scriptCaller else { return }
         scriptCaller.installBinding(
             ownedBy: scriptCallerBindingOwnerID,
             asyncCaller: asyncCaller,
             unsafeCaller: unsafeCaller,
-            snapshotCapture: snapshotCapture
+            snapshotCapture: snapshotCapture,
+            coordinateOriginInWindow: coordinateOriginInWindow
         )
         scriptCallerBoundWebView = webView
     }
@@ -5268,6 +5270,36 @@ private func webViewSnapshotNativeScale(for webView: WKWebView) -> CGFloat {
 }
 
 @MainActor
+private func webViewCoordinateOriginInWindow(_ webView: WKWebView) -> CGPoint? {
+#if os(iOS)
+    return webView.convert(.zero, to: nil)
+#elseif os(macOS)
+    guard let window = webView.window,
+          let contentView = window.contentView else { return nil }
+    let frameInWindow = webView.convert(webView.bounds, to: nil)
+    let windowChromeTopInset = max(window.frame.height - window.contentLayoutRect.height, 0)
+    return topLeadingWebViewOriginInWindow(
+        frameInWindow: frameInWindow,
+        contentViewHeight: contentView.bounds.height,
+        windowChromeTopInset: windowChromeTopInset
+    )
+#endif
+}
+
+#if os(macOS)
+func topLeadingWebViewOriginInWindow(
+    frameInWindow: CGRect,
+    contentViewHeight: CGFloat,
+    windowChromeTopInset: CGFloat
+) -> CGPoint {
+    CGPoint(
+        x: frameInWindow.minX,
+        y: windowChromeTopInset + contentViewHeight - frameInWindow.maxY
+    )
+}
+#endif
+
+@MainActor
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
     public struct UnboundEvaluationAttempt: Equatable, Sendable {
         public enum Operation: String, Equatable, Sendable {
@@ -5308,6 +5340,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     typealias SnapshotCapture = @MainActor @Sendable (
         CGRect?
     ) async throws -> WebViewSnapshotImage
+    typealias CoordinateOriginInWindow = @MainActor @Sendable () -> CGPoint?
 
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
@@ -5352,6 +5385,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
     var unsafeCaller: UnsafeCaller? = nil
+    private var coordinateOriginInWindowProvider: CoordinateOriginInWindow?
+
+    /// The mounted WKWebView's origin in its window coordinate space.
+    public var coordinateOriginInWindow: CGPoint? {
+        coordinateOriginInWindowProvider?()
+    }
 
     /// Synchronously reflects whether JavaScript evaluation is currently possible.
     ///
@@ -5383,12 +5422,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         ownedBy ownerID: UUID,
         asyncCaller: @escaping AsyncCaller,
         unsafeCaller: UnsafeCaller?,
-        snapshotCapture: SnapshotCapture?
+        snapshotCapture: SnapshotCapture?,
+        coordinateOriginInWindow: @escaping CoordinateOriginInWindow
     ) {
         bindingOwnerID = ownerID
         self.asyncCaller = asyncCaller
         self.unsafeCaller = unsafeCaller
         self.snapshotCapture = snapshotCapture
+        coordinateOriginInWindowProvider = coordinateOriginInWindow
     }
 
     @MainActor
@@ -5399,6 +5440,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         asyncCaller = nil
         unsafeCaller = nil
         snapshotCapture = nil
+        coordinateOriginInWindowProvider = nil
         return true
     }
 
@@ -7730,7 +7772,10 @@ extension WebView: UIViewControllerRepresentable {
                 }
             },
             unsafeCaller: nil,
-            snapshotCapture: makeWebViewSnapshotCapture(for: webView)
+            snapshotCapture: makeWebViewSnapshotCapture(for: webView),
+            coordinateOriginInWindow: { @MainActor [weak webView] in
+                webView.flatMap(webViewCoordinateOriginInWindow)
+            }
         )
     }
     
@@ -8364,7 +8409,10 @@ extension WebView: NSViewRepresentable {
                     completionHandler: nil
                 )
             },
-            snapshotCapture: makeWebViewSnapshotCapture(for: webView)
+            snapshotCapture: makeWebViewSnapshotCapture(for: webView),
+            coordinateOriginInWindow: { @MainActor [weak webView] in
+                webView.flatMap(webViewCoordinateOriginInWindow)
+            }
         )
     }
 
