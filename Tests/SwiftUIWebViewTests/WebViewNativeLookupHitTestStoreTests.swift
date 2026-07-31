@@ -173,6 +173,26 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(dispatchedElementIDs, ["first", "second"])
     }
 
+    func testUITestTapCanSelectLastVisibleTargetForBoundaryNavigation() {
+        let store = WebViewNativeLookupHitTestStore()
+        var dispatchedHit: WebViewNativeLookupHit?
+        store.onHit = { dispatchedHit = $0 }
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "first",
+                rects: [CGRect(x: 0, y: 0, width: 10, height: 10)]
+            ),
+            WebViewNativeLookupHitTarget(
+                elementID: "last",
+                rects: [CGRect(x: 40, y: 60, width: 20, height: 30)]
+            ),
+        ])
+
+        XCTAssertTrue(store.handleUITestTapOnLastLookupTarget())
+        XCTAssertEqual(dispatchedHit?.elementID, "last")
+        XCTAssertEqual(dispatchedHit?.point, CGPoint(x: 50, y: 75))
+    }
+
     func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {
         let store = WebViewNativeLookupHitTestStore()
         var dispatchedHit = false
@@ -246,7 +266,6 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
             completedHandoffElementID = $0
         }
 
-        store.preservesActiveLookupDuringPageTurn = true
         store.updateWebTextSelection(
             active: true,
             textLength: 2,
@@ -262,6 +281,5 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(swipe, CGPoint(x: -30, y: 4))
         XCTAssertEqual(completedHandoffElementID, "segment")
         XCTAssertFalse(store.shouldPassThroughForWebTextSelection)
-        XCTAssertTrue(store.preservesActiveLookupDuringPageTurn)
     }
 }

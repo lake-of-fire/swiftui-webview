@@ -9,7 +9,9 @@
 /* Begin PBXBuildFile section */
 		0B2392A28EF98970076AF683 /* URL+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4EA4CD28D693B0668236E4 /* URL+Extensions.swift */; };
 		0E0093EC8AACF04A5335025A /* OrderedCollections.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */; };
+		15E27763AC3FD99059EDCF02 /* OrderedCollections.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */; };
 		169F8E6726D55168C286044A /* SwiftUIWebView.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4EFDA511EF8EDB9F5158E0E7 /* SwiftUIWebView.framework */; };
+		2142C146638D549559A38D45 /* LRUCache.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */; };
 		27760E30BD1EF933EAEC654E /* WebViewUserScriptSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B284CD7AB3E4A6FECEFBD /* WebViewUserScriptSignatureTests.swift */; };
 		296A5C9B83011F286947821E /* WebViewPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */; };
 		2A875882342499CCD28D95B4 /* LRUCache.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */; };
@@ -91,6 +93,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2142C146638D549559A38D45 /* LRUCache.framework in Frameworks */,
+				15E27763AC3FD99059EDCF02 /* OrderedCollections.framework in Frameworks */,
 				169F8E6726D55168C286044A /* SwiftUIWebView.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -429,12 +433,9 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
+				MACH_O_TYPE = staticlib;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				"ONLY_ACTIVE_ARCH[sdk=iphonesimulator*]" = YES;
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-L$(DT_TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
-				);
 				OTHER_SWIFT_FLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = SwiftUIWebView;
 				PRODUCT_NAME = SwiftUIWebView;
@@ -590,12 +591,9 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
+				MACH_O_TYPE = staticlib;
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				"ONLY_ACTIVE_ARCH[sdk=iphonesimulator*]" = YES;
-				OTHER_LDFLAGS = (
-					"$(inherited)",
-					"-L$(DT_TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)",
-				);
 				OTHER_SWIFT_FLAGS = "$(inherited)";
 				PRODUCT_BUNDLE_IDENTIFIER = SwiftUIWebView;
 				PRODUCT_NAME = SwiftUIWebView;

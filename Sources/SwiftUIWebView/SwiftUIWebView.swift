@@ -1366,11 +1366,11 @@ public final class WebViewNativeLookupHitTestStore {
     public var onSegmentSwipe: (@MainActor (CGFloat, CGFloat) -> Void)?
     public var activeLookupElementID: (@MainActor () -> String?)?
     public var activeElementID: String?
-    public var preservesActiveLookupDuringPageTurn = false
     public var showsPressedTargetOverlay = false
     public var capturesSegmentTouchesInOverlay = false
     public var isEnabled = true {
         didSet {
+            guard oldValue != isEnabled else { return }
             if !isEnabled {
                 removeAllTargets()
             }
@@ -1483,6 +1483,18 @@ public final class WebViewNativeLookupHitTestStore {
     @discardableResult
     public func handleUITestTapOnFirstLookupTarget() -> Bool {
         guard let entry = entries.first,
+              let rect = entry.rects.first else {
+            return false
+        }
+        return handleTap(
+            on: entry.target,
+            at: CGPoint(x: rect.midX, y: rect.midY)
+        )
+    }
+
+    @discardableResult
+    public func handleUITestTapOnLastLookupTarget() -> Bool {
+        guard let entry = entries.last,
               let rect = entry.rects.first else {
             return false
         }
@@ -2444,6 +2456,10 @@ public class WebViewCoordinator: NSObject {
     private var pendingPaginationApplyTask: Task<Void, Never>?
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
+    private var paginationApplyGeneration: UInt64 = 0
+    private weak var lastPaginationUpdateWebView: WKWebView?
+    private var lastPaginationUpdateConfiguration: WebViewPaginationConfiguration?
+    private var lastPaginationUpdateBoundsSize: CGSize?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
@@ -2458,6 +2474,12 @@ public class WebViewCoordinator: NSObject {
     private var snapshotReloadDocumentReady = false
     private var pendingSnapshotRestore = false
     private var activeSnapshotCacheKey: WebViewSnapshotCacheKey?
+    weak var lastVisualConfigurationWebView: WKWebView?
+    var lastVisualConfigurationColor: UIColor?
+    var lastVisualConfigurationIsOpaque: Bool?
+    var lastVisualConfigurationUsesSampledTopColor: Bool?
+    var lastVisualConfigurationUsesReaderBackground: Bool?
+    var lastVisualConfigurationDarkModeSetting: DarkModeSetting?
 #endif
     
     // UIScrollViewDelegate
@@ -2681,6 +2703,10 @@ public class WebViewCoordinator: NSObject {
         pendingProgressUpdateTask = nil
         pendingPaginationApplyTask?.cancel()
         pendingPaginationApplyTask = nil
+        paginationApplyGeneration &+= 1
+        lastPaginationUpdateWebView = nil
+        lastPaginationUpdateConfiguration = nil
+        lastPaginationUpdateBoundsSize = nil
         pendingPaginationStateTask?.cancel()
         pendingPaginationStateTask = nil
         pendingWebViewBindingTask?.cancel()
@@ -2791,19 +2817,39 @@ public class WebViewCoordinator: NSObject {
         let mountedHostIdentifier = paginationController.currentState().mountedHostIdentifier
         let targetHostIdentifier = WebViewPaginationController.hostIdentifier(for: webView)
         guard mountedHostIdentifier == targetHostIdentifier else { return }
+        let boundsSize = webView.bounds.size
+        guard lastPaginationUpdateWebView !== webView
+                || lastPaginationUpdateConfiguration != config.paginationConfiguration
+                || lastPaginationUpdateBoundsSize != boundsSize else {
+            return
+        }
+        lastPaginationUpdateWebView = webView
+        lastPaginationUpdateConfiguration = config.paginationConfiguration
+        lastPaginationUpdateBoundsSize = boundsSize
 
         pendingPaginationApplyTask?.cancel()
+        paginationApplyGeneration &+= 1
+        let generation = paginationApplyGeneration
         pendingPaginationApplyTask = Task { @MainActor [weak self, weak webView] in
             await Task.yield()
-            guard let self, let webView else { return }
+            guard let self,
+                  let webView,
+                  !Task.isCancelled,
+                  self.paginationApplyGeneration == generation else {
+                return
+            }
             let currentMountedHostIdentifier = self.paginationController.currentState().mountedHostIdentifier
             let currentTargetHostIdentifier = WebViewPaginationController.hostIdentifier(for: webView)
             guard currentMountedHostIdentifier == currentTargetHostIdentifier else {
-                self.pendingPaginationApplyTask = nil
+                if self.paginationApplyGeneration == generation {
+                    self.pendingPaginationApplyTask = nil
+                }
                 return
             }
             self.applyPaginationConfigurationIfNeeded(reason: reason)
-            self.pendingPaginationApplyTask = nil
+            if self.paginationApplyGeneration == generation {
+                self.pendingPaginationApplyTask = nil
+            }
         }
     }
     
@@ -7058,6 +7104,7 @@ public class WebViewController: UIViewController {
     private var snapshotImageView: UIImageView?
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
+    private weak var nativeLookupHitTestStore: WebViewNativeLookupHitTestStore?
     private var lastKnownWebViewSize: CGSize = .zero
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
@@ -7179,6 +7226,8 @@ public class WebViewController: UIViewController {
 
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
+        guard nativeLookupHitTestStore !== store else { return }
+        nativeLookupHitTestStore = store
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
@@ -7309,6 +7358,7 @@ public class WebViewController: UIViewController {
                 attachNativeLookupHitTestOverlay()
             }
         } else {
+            guard wasInstalled else { return }
             nativeLookupHitTestGestureRecognizer.view?.removeGestureRecognizer(nativeLookupHitTestGestureRecognizer)
             NSLayoutConstraint.deactivate(nativeLookupHitTestOverlayConstraints)
             nativeLookupHitTestOverlayConstraints.removeAll()
@@ -7737,7 +7787,11 @@ extension WebView: UIViewControllerRepresentable {
             reason: "configureWebView"
         )
         refreshDarkModeSetting(webView: webView)
-        applyVisualConfiguration(webView: webView, containerView: controller.view)
+        applyVisualConfiguration(
+            webView: webView,
+            containerView: controller.view,
+            coordinator: context.coordinator
+        )
     }
 
     @MainActor
@@ -7964,15 +8018,31 @@ extension WebView: UIViewControllerRepresentable {
         
         
         controller.webView.buildMenu = buildMenu
-        controller.webView.scrollView.bounces = bounces
-        controller.webView.scrollView.alwaysBounceVertical = bounces
-        controller.webView.scrollView.contentInsetAdjustmentBehavior = config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
-        controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        if controller.webView.scrollView.bounces != bounces {
+            controller.webView.scrollView.bounces = bounces
+        }
+        if controller.webView.scrollView.alwaysBounceVertical != bounces {
+            controller.webView.scrollView.alwaysBounceVertical = bounces
+        }
+        let contentInsetAdjustmentBehavior: UIScrollView.ContentInsetAdjustmentBehavior =
+            config.adjustsScrollViewContentInsetsForSafeArea ? .always : .never
+        if controller.webView.scrollView.contentInsetAdjustmentBehavior != contentInsetAdjustmentBehavior {
+            controller.webView.scrollView.contentInsetAdjustmentBehavior = contentInsetAdjustmentBehavior
+        }
+        if controller.webView.scrollView.isScrollEnabled != config.isScrollEnabled {
+            controller.webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        }
 #if os(iOS)
-        controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
-        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView)
+        if controller.webView.hidesTopScrollEdgeEffect != config.hidesTopScrollEdgeEffect {
+            controller.webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
+            applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: controller.webView)
+        }
 #endif
-        applyVisualConfiguration(webView: controller.webView, containerView: controller.view)
+        applyVisualConfiguration(
+            webView: controller.webView,
+            containerView: controller.view,
+            coordinator: context.coordinator
+        )
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
         
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
@@ -7993,20 +8063,26 @@ extension WebView: UIViewControllerRepresentable {
         let resolvedObscuredBottomInset = treatsIncomingBottomAsAdditionalClearance
             ? bottomSafeAreaInset + incomingBottomObscuredInset
             : incomingBottomObscuredInset
-        controller.additionalSafeAreaInsets = UIEdgeInsets(
+        let additionalSafeAreaInsets = UIEdgeInsets(
             top: max(0, obscuredInsets.top - topSafeAreaInset),
             left: 0,
             bottom: resolvedAdditionalBottomSafeAreaInset,
             right: 0
         )
+        if controller.additionalSafeAreaInsets != additionalSafeAreaInsets {
+            controller.additionalSafeAreaInsets = additionalSafeAreaInsets
+        }
         //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
         
-        controller.obscuredInsets = UIEdgeInsets(
+        let resolvedObscuredInsets = UIEdgeInsets(
             top: obscuredInsets.top,
             left: max(0, obscuredInsets.leading),
             bottom: resolvedObscuredBottomInset,
             right: max(0, obscuredInsets.trailing)
         )
+        if controller.obscuredInsets != resolvedObscuredInsets {
+            controller.obscuredInsets = resolvedObscuredInsets
+        }
         // _obscuredInsets ignores sides, probably
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
@@ -8213,6 +8289,7 @@ public final class WebViewHostNSView: NSView {
         target: self,
         action: #selector(handleNativeLookupHitTestClick(_:))
     )
+    private weak var nativeLookupHitTestStore: WebViewNativeLookupHitTestStore?
 
     public override var isFlipped: Bool { true }
 
@@ -8229,6 +8306,8 @@ public final class WebViewHostNSView: NSView {
 
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
+        guard nativeLookupHitTestStore !== store else { return }
+        nativeLookupHitTestStore = store
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         store.onPressedTargetHandoffCompleted = { [weak self] elementID in
@@ -8463,11 +8542,19 @@ extension WebView: NSViewRepresentable {
         refreshDarkModeSetting(webView: webView)
         
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-        webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+        if (webView.value(forKey: "drawsBackground") as? Bool) != resolvedDrawsBackground {
+            webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+        }
         if #available(macOS 11.0, *) {
-            webView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
+            let backgroundColor = NSColor(config.backgroundColor).cgColor
+            if webView.layer?.backgroundColor != backgroundColor {
+                webView.layer?.backgroundColor = backgroundColor
+            }
         } else {
-            webView.layer?.backgroundColor = NSColor.clear.cgColor
+            let backgroundColor = NSColor.clear.cgColor
+            if webView.layer?.backgroundColor != backgroundColor {
+                webView.layer?.backgroundColor = backgroundColor
+            }
         }
         
     }
@@ -8510,10 +8597,18 @@ extension WebView {
         } else if let enhancedWebView = webView as? EnhancedWKWebView {
             enhancedWebView.persistedAppliedContentRules = resolvedContentRules
         }
-        webView.navigationDelegate = context.coordinator
-        webView.uiDelegate = context.coordinator
-        webView.pageZoom = config.pageZoom
-        webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        if webView.navigationDelegate !== context.coordinator {
+            webView.navigationDelegate = context.coordinator
+        }
+        if webView.uiDelegate !== context.coordinator {
+            webView.uiDelegate = context.coordinator
+        }
+        if webView.pageZoom != config.pageZoom {
+            webView.pageZoom = config.pageZoom
+        }
+        if webView.allowsBackForwardNavigationGestures != config.allowsBackForwardNavigationGestures {
+            webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        }
         context.coordinator.schedulePaginationConfigurationApply(reason: "apply-common-configuration", for: webView)
     }
 
@@ -8548,29 +8643,61 @@ extension WebView {
     @MainActor
     func refreshDarkModeSetting(webView: WKWebView) {
 #if os(iOS)
+        let desiredStyle: UIUserInterfaceStyle
         switch config.darkModeSetting {
         case .system:
-            webView.overrideUserInterfaceStyle = .unspecified
+            desiredStyle = .unspecified
         case .darkModeOverride:
-            webView.overrideUserInterfaceStyle = .dark
+            desiredStyle = .dark
         case .alwaysLightMode:
-            webView.overrideUserInterfaceStyle = .light
+            desiredStyle = .light
+        }
+        if webView.overrideUserInterfaceStyle != desiredStyle {
+            webView.overrideUserInterfaceStyle = desiredStyle
         }
 #elseif os(macOS)
+        let desiredAppearanceName: NSAppearance.Name?
         switch config.darkModeSetting {
         case .system:
-            webView.appearance = nil
+            desiredAppearanceName = nil
         case .darkModeOverride:
-            webView.appearance = NSAppearance(named: .darkAqua)
+            desiredAppearanceName = .darkAqua
         case .alwaysLightMode:
-            webView.appearance = NSAppearance(named: .aqua)
+            desiredAppearanceName = .aqua
+        }
+        if webView.appearance?.name != desiredAppearanceName {
+            webView.appearance = desiredAppearanceName.flatMap(NSAppearance.init(named:))
         }
 #endif
     }
 
     #if os(iOS)
     @MainActor
-    func applyVisualConfiguration(webView: WKWebView, containerView: UIView?) {
+    func applyVisualConfiguration(
+        webView: WKWebView,
+        containerView: UIView?,
+        coordinator: WebViewCoordinator
+    ) {
+        let configuredColor = UIColor(config.backgroundColor)
+        guard coordinator.lastVisualConfigurationWebView !== webView
+                || coordinator.lastVisualConfigurationColor?.isEqual(configuredColor) != true
+                || coordinator.lastVisualConfigurationIsOpaque != config.isOpaque
+                || coordinator.lastVisualConfigurationUsesSampledTopColor
+                    != config.usesSampledPageTopColorForUnderPageBackground
+                || coordinator.lastVisualConfigurationUsesReaderBackground
+                    != config.usesConfiguredBackgroundForReaderDocuments
+                || coordinator.lastVisualConfigurationDarkModeSetting
+                    != config.darkModeSetting else {
+            return
+        }
+        coordinator.lastVisualConfigurationWebView = webView
+        coordinator.lastVisualConfigurationColor = configuredColor
+        coordinator.lastVisualConfigurationIsOpaque = config.isOpaque
+        coordinator.lastVisualConfigurationUsesSampledTopColor =
+            config.usesSampledPageTopColorForUnderPageBackground
+        coordinator.lastVisualConfigurationUsesReaderBackground =
+            config.usesConfiguredBackgroundForReaderDocuments
+        coordinator.lastVisualConfigurationDarkModeSetting = config.darkModeSetting
         webView.isOpaque = config.isOpaque
         webView.scrollView.isOpaque = config.isOpaque
 
@@ -8578,7 +8705,7 @@ extension WebView {
             let resolvedColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
                 && !manabiCanUseSampledPageTopColorBackground()
                 ? (config.isOpaque ? .systemBackground : .clear)
-                : UIColor(config.backgroundColor)
+                : configuredColor
             webView.backgroundColor = resolvedColor
             if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
                 config: config,
