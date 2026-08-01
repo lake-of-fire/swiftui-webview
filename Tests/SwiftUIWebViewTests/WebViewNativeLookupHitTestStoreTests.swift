@@ -53,6 +53,30 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(closeCount, 1)
     }
 
+    func testActiveTargetMatcherCanRejectTheSameSectionLocalIDFromAnotherDocument() {
+        let store = WebViewNativeLookupHitTestStore()
+        let firstDocumentURL = URL(string: "ebook://book/chapter-1.xhtml")!
+        let secondDocumentURL = URL(string: "ebook://book/chapter-2.xhtml")!
+        let firstTarget = WebViewNativeLookupHitTarget(
+            elementID: "shared-section-local-id",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+            documentURL: firstDocumentURL
+        )
+        let secondTarget = WebViewNativeLookupHitTarget(
+            elementID: "shared-section-local-id",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+            documentURL: secondDocumentURL
+        )
+        store.activeLookupElementID = { "shared-section-local-id" }
+        store.activeElementID = "shared-section-local-id"
+        store.activeLookupTargetMatches = { target in
+            target.documentURL == firstDocumentURL
+        }
+
+        XCTAssertTrue(store.matchesActiveLookupTarget(firstTarget))
+        XCTAssertFalse(store.matchesActiveLookupTarget(secondTarget))
+    }
+
     func testBlankTapDismissesOnlyAnActiveLookupWithoutTextSelection() {
         let store = WebViewNativeLookupHitTestStore()
         var closeCount = 0

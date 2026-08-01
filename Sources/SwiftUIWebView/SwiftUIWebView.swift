@@ -1365,6 +1365,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var onExternalTouchInteractionCancelled: (@MainActor (String) -> Void)?
     public var onSegmentSwipe: (@MainActor (CGFloat, CGFloat) -> Void)?
     public var activeLookupElementID: (@MainActor () -> String?)?
+    public var activeLookupTargetMatches: (@MainActor (WebViewNativeLookupHitTarget) -> Bool)?
     public var activeElementID: String?
     public var showsPressedTargetOverlay = false
     public var capturesSegmentTouchesInOverlay = false
@@ -1518,6 +1519,15 @@ public final class WebViewNativeLookupHitTestStore {
         )
     }
 #endif
+
+    @MainActor
+    public func matchesActiveLookupTarget(_ target: WebViewNativeLookupHitTarget) -> Bool {
+        if let activeLookupTargetMatches {
+            return activeLookupTargetMatches(target)
+        }
+        return activeLookupElementID?() == target.elementID
+            || activeElementID == target.elementID
+    }
 
     @MainActor
     public func closeActiveLookupFromBlankTap() {
@@ -6716,11 +6726,8 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartTarget = target
         store?.beginNativeTouchStream(on: target)
         let activeLookupElementID = store?.activeLookupElementID?()
-        let activeHighlightElementID = store?.activeElementID
         let hadActiveLookup = activeLookupElementID != nil
-        touchStartWasActiveTarget =
-            activeLookupElementID == target.elementID
-            || activeHighlightElementID == target.elementID
+        touchStartWasActiveTarget = store?.matchesActiveLookupTarget(target) == true
         if store?.showsPressedTargetOverlay == true {
             touchStartOverlay = coordinateView
             touchStartOverlay?.showPressedTarget(target)
@@ -8257,7 +8264,7 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
             return
         }
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
-        mouseDownWasActiveTarget = store?.activeElementID == target.elementID
+        mouseDownWasActiveTarget = store?.matchesActiveLookupTarget(target) == true
         store?.onActiveTargetTouchDown?(target)
         if store?.showsPressedTargetOverlay == true {
             pressedOverlay?.showPressedTarget(target)
