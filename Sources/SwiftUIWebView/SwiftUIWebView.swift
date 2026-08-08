@@ -2732,15 +2732,22 @@ internal struct WebViewUnloadTransactionGate {
     private var generation: UInt64 = 0
     private var activeControllerID: ObjectIdentifier?
     private var activeWebViewID: ObjectIdentifier?
+    private var activePoolID: ObjectIdentifier?
 
     mutating func begin(
         controllerID: ObjectIdentifier,
-        webViewID: ObjectIdentifier
+        webViewID: ObjectIdentifier,
+        poolID: ObjectIdentifier
     ) -> UInt64? {
-        guard activeControllerID == nil, activeWebViewID == nil else { return nil }
+        guard activeControllerID == nil,
+              activeWebViewID == nil,
+              activePoolID == nil else {
+            return nil
+        }
         generation &+= 1
         activeControllerID = controllerID
         activeWebViewID = webViewID
+        activePoolID = poolID
         return generation
     }
 
@@ -2748,30 +2755,37 @@ internal struct WebViewUnloadTransactionGate {
         generation &+= 1
         activeControllerID = nil
         activeWebViewID = nil
+        activePoolID = nil
     }
 
     func accepts(
         _ generation: UInt64,
         controllerID: ObjectIdentifier,
-        webViewID: ObjectIdentifier
+        webViewID: ObjectIdentifier,
+        poolID: ObjectIdentifier
     ) -> Bool {
         self.generation == generation
             && activeControllerID == controllerID
             && activeWebViewID == webViewID
+            && activePoolID == poolID
     }
 
     mutating func finish(
         _ generation: UInt64,
         controllerID: ObjectIdentifier,
-        webViewID: ObjectIdentifier
-    ) {
+        webViewID: ObjectIdentifier,
+        poolID: ObjectIdentifier
+    ) -> Bool {
         guard accepts(
             generation,
             controllerID: controllerID,
-            webViewID: webViewID
-        ) else { return }
+            webViewID: webViewID,
+            poolID: poolID
+        ) else { return false }
         activeControllerID = nil
         activeWebViewID = nil
+        activePoolID = nil
+        return true
     }
 }
 
@@ -3055,26 +3069,26 @@ public class WebViewCoordinator: NSObject {
         let sourceWebView = controller.webView
         let controllerID = ObjectIdentifier(controller)
         let webViewID = ObjectIdentifier(sourceWebView)
+        guard let pool = returnPool(for: sourceWebView) else { return }
+        let poolID = ObjectIdentifier(pool)
         guard let unloadGeneration = webViewUnloadGate.begin(
             controllerID: controllerID,
-            webViewID: webViewID
+            webViewID: webViewID,
+            poolID: poolID
         ) else { return }
         webViewUnloadController = controller
         webViewUnloadControllerGeneration = unloadGeneration
         let snapshotCacheKey = lifecycleConfig.snapshotCacheKey
         let resetURL = lifecycleConfig.idleLoadURL
 
-        guard let pool = returnPool(for: sourceWebView) else {
-            webViewUnloadGate.cancel()
-            return
-        }
         Task { @MainActor [weak self, weak controller, weak pool, sourceWebView] in
             guard let self else { return }
             defer {
-                self.webViewUnloadGate.finish(
+                _ = self.webViewUnloadGate.finish(
                     unloadGeneration,
                     controllerID: controllerID,
-                    webViewID: webViewID
+                    webViewID: webViewID,
+                    poolID: poolID
                 )
                 if self.webViewUnloadControllerGeneration == unloadGeneration {
                     self.webViewUnloadController = nil
@@ -3085,8 +3099,10 @@ public class WebViewCoordinator: NSObject {
             guard self.webViewUnloadGate.accepts(
                 unloadGeneration,
                 controllerID: controllerID,
-                webViewID: webViewID
+                webViewID: webViewID,
+                poolID: poolID
             ), controller.webView === sourceWebView,
+               self.returnPool(for: sourceWebView) === pool,
                !controller.isWebViewUnloaded else {
                 return
             }
@@ -3096,12 +3112,27 @@ public class WebViewCoordinator: NSObject {
             self.logLookupPerf(
                 "webview.unload.snapshot.prepare current=\(metrics.current) lastKnown=\(metrics.lastKnown) override=\(metrics.shouldOverride)"
             )
-            let snapshot = await controller.captureSnapshot(of: sourceWebView)
+            let snapshot = await controller.captureSnapshot(
+                of: sourceWebView,
+                ownerMayRestore: { [weak self, weak controller, weak pool] in
+                    guard let self, let controller, let pool else { return false }
+                    return self.webViewUnloadGate.accepts(
+                        unloadGeneration,
+                        controllerID: controllerID,
+                        webViewID: webViewID,
+                        poolID: poolID
+                    ) && controller.webView === sourceWebView
+                        && self.returnPool(for: sourceWebView) === pool
+                        && !controller.isWebViewUnloaded
+                }
+            )
             guard self.webViewUnloadGate.accepts(
                 unloadGeneration,
                 controllerID: controllerID,
-                webViewID: webViewID
+                webViewID: webViewID,
+                poolID: poolID
             ), controller.webView === sourceWebView,
+               self.returnPool(for: sourceWebView) === pool,
                !controller.isWebViewUnloaded else {
                 return
             }
@@ -4069,6 +4100,20 @@ public class WebViewCoordinator: NSObject {
         }
     }
 
+    internal nonisolated static func shouldPublishObservedURL(
+        _ observedURL: URL?,
+        currentWebViewURL: URL?,
+        publishedURL: URL?,
+        isProvisionallyNavigating: Bool = false
+    ) -> Bool {
+        guard !isProvisionallyNavigating,
+              let observedURL,
+              observedURL == currentWebViewURL else {
+            return false
+        }
+        return observedURL != publishedURL
+    }
+
     @MainActor
     internal func handleObservedURLChange(
         _ newURL: URL,
@@ -4076,7 +4121,13 @@ public class WebViewCoordinator: NSObject {
         receiptSequence: UInt64
     ) {
         guard ownsWebView(sourceWebView),
-              receiptSequence > latestURLPublicationReceiptSequence else {
+              receiptSequence > latestURLPublicationReceiptSequence,
+              Self.shouldPublishObservedURL(
+                  newURL,
+                  currentWebViewURL: sourceWebView.url,
+                  publishedURL: webView.state.pageURL,
+                  isProvisionallyNavigating: webView.state.isProvisionallyNavigating
+              ) else {
             return
         }
         latestURLPublicationReceiptSequence = receiptSequence
@@ -9252,7 +9303,10 @@ public class WebViewController: UIViewController {
     }
 
     @MainActor
-    func captureSnapshot(of sourceWebView: EnhancedWKWebView) async -> UIImage? {
+    func captureSnapshot(
+        of sourceWebView: EnhancedWKWebView,
+        ownerMayRestore: @MainActor @escaping () -> Bool = { true }
+    ) async -> UIImage? {
         let metrics = snapshotSizeMetrics(for: sourceWebView)
         let boundsAdjustmentGeneration = beginSnapshotBoundsAdjustmentIfNeeded(
             for: sourceWebView,
@@ -9269,7 +9323,8 @@ public class WebViewController: UIViewController {
         if let boundsAdjustmentGeneration {
             finishSnapshotBoundsAdjustment(
                 boundsAdjustmentGeneration,
-                for: sourceWebView
+                for: sourceWebView,
+                ownerMayRestore: ownerMayRestore()
             )
         }
         return image
@@ -9299,7 +9354,8 @@ public class WebViewController: UIViewController {
     @MainActor
     func finishSnapshotBoundsAdjustment(
         _ generation: UInt64,
-        for sourceWebView: EnhancedWKWebView
+        for sourceWebView: EnhancedWKWebView,
+        ownerMayRestore: Bool = true
     ) {
         guard snapshotBoundsAdjustmentGeneration == generation,
               snapshotBoundsAdjustmentWebView === sourceWebView,
@@ -9310,7 +9366,12 @@ public class WebViewController: UIViewController {
         snapshotBoundsAdjustmentWebView = nil
         snapshotBoundsAdjustmentOriginalBounds = nil
         snapshotBoundsAdjustmentAppliedBounds = nil
-        guard sourceWebView.bounds == appliedBounds else { return }
+        guard ownerMayRestore,
+              webView === sourceWebView,
+              !isWebViewUnloaded,
+              sourceWebView.bounds == appliedBounds else {
+            return
+        }
         sourceWebView.bounds = originalBounds
         sourceWebView.layoutIfNeeded()
     }

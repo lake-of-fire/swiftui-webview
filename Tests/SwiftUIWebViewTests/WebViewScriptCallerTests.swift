@@ -1,5 +1,6 @@
 import XCTest
 import WebKit
+import struct SwiftUI.Binding
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -693,35 +694,35 @@ final class WebViewScriptCallerTests: XCTestCase {
         let replacementPool = NSObject()
         var gate = WebViewUnloadTransactionGate()
 
-        let ticket = gate.begin(
-            controller: controller,
-            webView: webView,
-            pool: pool
-        )
+        let generation = try! XCTUnwrap(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(pool)
+        ))
 
-        XCTAssertTrue(gate.owns(
-            ticket,
-            controller: controller,
-            webView: webView,
-            pool: pool
+        XCTAssertTrue(gate.accepts(
+            generation,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(pool)
         ))
-        XCTAssertFalse(gate.owns(
-            ticket,
-            controller: replacementController,
-            webView: webView,
-            pool: pool
+        XCTAssertFalse(gate.accepts(
+            generation,
+            controllerID: ObjectIdentifier(replacementController),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(pool)
         ))
-        XCTAssertFalse(gate.owns(
-            ticket,
-            controller: controller,
-            webView: replacementWebView,
-            pool: pool
+        XCTAssertFalse(gate.accepts(
+            generation,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(replacementWebView),
+            poolID: ObjectIdentifier(pool)
         ))
-        XCTAssertFalse(gate.owns(
-            ticket,
-            controller: controller,
-            webView: webView,
-            pool: replacementPool
+        XCTAssertFalse(gate.accepts(
+            generation,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(replacementPool)
         ))
     }
 
@@ -730,22 +731,26 @@ final class WebViewScriptCallerTests: XCTestCase {
         let webView = NSObject()
         let pool = NSObject()
         var gate = WebViewUnloadTransactionGate()
-        let ticket = gate.begin(
-            controller: controller,
-            webView: webView,
-            pool: pool
-        )
+        let generation = try! XCTUnwrap(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(pool)
+        ))
 
         gate.cancel()
 
-        XCTAssertNil(gate.activeTicket)
-        XCTAssertFalse(gate.owns(
-            ticket,
-            controller: controller,
-            webView: webView,
-            pool: pool
+        XCTAssertFalse(gate.accepts(
+            generation,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(pool)
         ))
-        XCTAssertFalse(gate.finish(ticket))
+        XCTAssertFalse(gate.finish(
+            generation,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(webView),
+            poolID: ObjectIdentifier(pool)
+        ))
     }
 
     func testLateWebViewUnloadCompletionCannotClearANewerTransaction() {
@@ -754,55 +759,35 @@ final class WebViewScriptCallerTests: XCTestCase {
         let newWebView = NSObject()
         let pool = NSObject()
         var gate = WebViewUnloadTransactionGate()
-        let oldTicket = gate.begin(
-            controller: controller,
-            webView: oldWebView,
-            pool: pool
-        )
-        let newTicket = gate.begin(
-            controller: controller,
-            webView: newWebView,
-            pool: pool
-        )
+        let oldGeneration = try! XCTUnwrap(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(oldWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+        gate.cancel()
+        let newGeneration = try! XCTUnwrap(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(newWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
 
-        XCTAssertFalse(gate.finish(oldTicket))
-        XCTAssertEqual(gate.activeTicket, newTicket)
-        XCTAssertTrue(gate.owns(
-            newTicket,
-            controller: controller,
-            webView: newWebView,
-            pool: pool
+        XCTAssertFalse(gate.finish(
+            oldGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(oldWebView),
+            poolID: ObjectIdentifier(pool)
         ))
-        XCTAssertTrue(gate.finish(newTicket))
-        XCTAssertNil(gate.activeTicket)
-    }
-
-    func testSnapshotBoundsRestoreRequiresCurrentOwnershipAndAnUntouchedOverride() {
-        let temporaryBounds = CGRect(x: 0, y: 0, width: 320, height: 640)
-
-        XCTAssertTrue(shouldRestoreTemporaryWebViewSnapshotBounds(
-            didOverride: true,
-            ownerMayRestore: true,
-            currentBounds: temporaryBounds,
-            temporaryBounds: temporaryBounds
+        XCTAssertTrue(gate.accepts(
+            newGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(newWebView),
+            poolID: ObjectIdentifier(pool)
         ))
-        XCTAssertFalse(shouldRestoreTemporaryWebViewSnapshotBounds(
-            didOverride: true,
-            ownerMayRestore: false,
-            currentBounds: temporaryBounds,
-            temporaryBounds: temporaryBounds
-        ))
-        XCTAssertFalse(shouldRestoreTemporaryWebViewSnapshotBounds(
-            didOverride: true,
-            ownerMayRestore: true,
-            currentBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
-            temporaryBounds: temporaryBounds
-        ))
-        XCTAssertFalse(shouldRestoreTemporaryWebViewSnapshotBounds(
-            didOverride: false,
-            ownerMayRestore: true,
-            currentBounds: temporaryBounds,
-            temporaryBounds: temporaryBounds
+        XCTAssertTrue(gate.finish(
+            newGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(newWebView),
+            poolID: ObjectIdentifier(pool)
         ))
     }
 
@@ -943,21 +928,27 @@ final class WebViewScriptCallerTests: XCTestCase {
         ))
     }
 
-    func testInvalidFrameCleanupRequiresTheExactRegisteredSnapshot() {
-        let staleFrame = NSObject()
+    func testLegacyFrameLookupRequiresOneExactCanonicalRegistration() {
+        let firstFrame = NSObject()
         let replacementFrame = NSObject()
 
-        XCTAssertTrue(WebViewScriptCaller.registeredValueStillMatches(
-            staleFrame,
-            expectedValue: staleFrame
+        XCTAssertTrue(WebViewScriptCaller.uniqueRegisteredValue(
+            in: ["first": firstFrame],
+            canonicalKeysByRegistration: ["first": "chapter"],
+            matching: "chapter"
+        ) === firstFrame)
+        XCTAssertNil(WebViewScriptCaller.uniqueRegisteredValue(
+            in: ["first": firstFrame, "replacement": replacementFrame],
+            canonicalKeysByRegistration: [
+                "first": "chapter",
+                "replacement": "chapter"
+            ],
+            matching: "chapter"
         ))
-        XCTAssertFalse(WebViewScriptCaller.registeredValueStillMatches(
-            replacementFrame,
-            expectedValue: staleFrame
-        ))
-        XCTAssertFalse(WebViewScriptCaller.registeredValueStillMatches(
-            nil as NSObject?,
-            expectedValue: staleFrame
+        XCTAssertNil(WebViewScriptCaller.uniqueRegisteredValue(
+            in: ["first": firstFrame],
+            canonicalKeysByRegistration: ["first": "chapter"],
+            matching: "missing"
         ))
     }
 
@@ -1229,7 +1220,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             generation: replacementGeneration
         ))
         XCTAssertEqual(
-            state.paginationState.mountedHostIdentifier,
+            state.paginationState?.mountedHostIdentifier,
             WebViewPaginationController.hostIdentifier(for: replacementWebView)
         )
     }
@@ -1464,11 +1455,18 @@ final class WebViewScriptCallerTests: XCTestCase {
             return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
         }
 
-        let evaluation = Task {
-            try await caller.evaluateJavaScript(
-                "mutate-reader-state",
-                duplicateInMultiTargetFrames: true
-            )
+        let evaluation = Task { @MainActor in
+            do {
+                _ = try await caller.evaluateJavaScript(
+                    "mutate-reader-state",
+                    duplicateInMultiTargetFrames: true
+                )
+                XCTFail("Expected the replacement frame context to invalidate the evaluation")
+            } catch let error as ScriptCallerError {
+                XCTAssertEqual(error, .frameContextChanged)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
         }
         await fulfillment(of: [started], timeout: 2)
         let generationBeforeReplacement = caller.frameContextGenerationForTesting
@@ -1479,14 +1477,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         )
         await gate.open()
 
-        do {
-            _ = try await evaluation.value
-            XCTFail("Expected the replacement frame context to invalidate the evaluation")
-        } catch let error as ScriptCallerError {
-            XCTAssertEqual(error, .frameContextChanged)
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        await evaluation.value
     }
 
     func testInFlightMultiTargetEvaluationRejectsReplacementDocumentContext() async {
@@ -1499,21 +1490,23 @@ final class WebViewScriptCallerTests: XCTestCase {
             return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
         }
 
-        let evaluation = Task {
-            try await caller.evaluateJavaScriptInMultiTargetFrames("mutate-all-reader-frames")
+        let evaluation = Task { @MainActor in
+            do {
+                _ = try await caller.evaluateJavaScriptInMultiTargetFrames(
+                    "mutate-all-reader-frames"
+                )
+                XCTFail("Expected the replacement frame context to invalidate fan-out")
+            } catch let error as ScriptCallerError {
+                XCTAssertEqual(error, .frameContextChanged)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
         }
         await fulfillment(of: [started], timeout: 2)
         caller.removeAllMultiTargetFrames()
         await gate.open()
 
-        do {
-            _ = try await evaluation.value
-            XCTFail("Expected the replacement frame context to invalidate fan-out")
-        } catch let error as ScriptCallerError {
-            XCTAssertEqual(error, .frameContextChanged)
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        await evaluation.value
     }
 
     func testFrameCanonicalizationDecodesReaderLoaderExactlyOnce() throws {
@@ -2021,10 +2014,16 @@ final class WebViewScriptCallerTests: XCTestCase {
         )
         let firstToken = try XCTUnwrap(caller.currentJavaScriptBindingToken)
         let evaluationTask = Task { @MainActor in
-            try await caller.evaluateJavaScript(
-                "suspended old callback",
-                requiring: firstToken
-            )
+            do {
+                _ = try await caller.evaluateJavaScript(
+                    "suspended old callback",
+                    requiring: firstToken
+                )
+                XCTFail("Completion from the outgoing binding must be rejected")
+            } catch is CancellationError {
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
         }
         await fulfillment(of: [firstEvaluationStarted], timeout: 1)
 
@@ -2042,11 +2041,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             returning: WebViewScriptCaller.JavaScriptEvaluationResult("first")
         )
 
-        do {
-            _ = try await evaluationTask.value
-            XCTFail("Completion from the outgoing binding must be rejected")
-        } catch is CancellationError {
-        }
+        await evaluationTask.value
         XCTAssertEqual(replacementEvaluationCount, 0)
     }
 
@@ -2323,7 +2318,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         coordinator.setWebView(currentWebView)
         state.pageTitle = "current"
 
-        coordinator.webView(detachedWebView, didFinish: nil)
+        coordinator.webView(detachedWebView, didFinish: nil as WKNavigation?)
 
         XCTAssertEqual(finishedCount, 0)
         XCTAssertEqual(state.pageTitle, "current")
@@ -2428,10 +2423,11 @@ final class WebViewScriptCallerTests: XCTestCase {
             forDomain: URL(string: "https://example.com"),
             config: WebViewConfig(userScripts: [pageScript])
         )
-        XCTAssertTrue(try XCTUnwrap(
+        let installedPageScript = try XCTUnwrap(
             sourceWebView.configuration.userContentController.userScripts
                 .first(where: { $0.source == source })
-        ).contentWorld.isEqual(WKContentWorld.page))
+        )
+        let pageSignature = coordinator.lastInstalledScriptsSignature
 
         webViewModel.updateUserScripts(
             webView: sourceWebView,
@@ -2444,7 +2440,8 @@ final class WebViewScriptCallerTests: XCTestCase {
             sourceWebView.configuration.userContentController.userScripts
                 .first(where: { $0.source == source })
         )
-        XCTAssertTrue(installedScript.contentWorld.isEqual(isolatedWorld))
+        XCTAssertFalse(installedScript === installedPageScript)
+        XCTAssertNotEqual(coordinator.lastInstalledScriptsSignature, pageSignature)
     }
 
     func testPendingUserScriptConfigurationPersistsOnExactWebView() {
@@ -3388,49 +3385,59 @@ final class WebViewScriptCallerTests: XCTestCase {
         let controller = NSObject()
         let sourceWebView = NSObject()
         let replacementWebView = NSObject()
+        let pool = NSObject()
         let controllerID = ObjectIdentifier(controller)
         let sourceWebViewID = ObjectIdentifier(sourceWebView)
         let replacementWebViewID = ObjectIdentifier(replacementWebView)
+        let poolID = ObjectIdentifier(pool)
 
         let firstGeneration = try XCTUnwrap(gate.begin(
             controllerID: controllerID,
-            webViewID: sourceWebViewID
+            webViewID: sourceWebViewID,
+            poolID: poolID
         ))
         XCTAssertNil(gate.begin(
             controllerID: controllerID,
-            webViewID: sourceWebViewID
+            webViewID: sourceWebViewID,
+            poolID: poolID
         ))
         XCTAssertTrue(gate.accepts(
             firstGeneration,
             controllerID: controllerID,
-            webViewID: sourceWebViewID
+            webViewID: sourceWebViewID,
+            poolID: poolID
         ))
 
         gate.cancel()
         let replacementGeneration = try XCTUnwrap(gate.begin(
             controllerID: controllerID,
-            webViewID: replacementWebViewID
+            webViewID: replacementWebViewID,
+            poolID: poolID
         ))
         XCTAssertFalse(gate.accepts(
             firstGeneration,
             controllerID: controllerID,
-            webViewID: sourceWebViewID
+            webViewID: sourceWebViewID,
+            poolID: poolID
         ))
         XCTAssertTrue(gate.accepts(
             replacementGeneration,
             controllerID: controllerID,
-            webViewID: replacementWebViewID
+            webViewID: replacementWebViewID,
+            poolID: poolID
         ))
 
-        gate.finish(
+        _ = gate.finish(
             firstGeneration,
             controllerID: controllerID,
-            webViewID: sourceWebViewID
+            webViewID: sourceWebViewID,
+            poolID: poolID
         )
         XCTAssertTrue(gate.accepts(
             replacementGeneration,
             controllerID: controllerID,
-            webViewID: replacementWebViewID
+            webViewID: replacementWebViewID,
+            poolID: poolID
         ))
     }
 
@@ -3768,6 +3775,26 @@ final class WebViewScriptCallerTests: XCTestCase {
 
         controller.finishSnapshotBoundsAdjustment(secondGeneration, for: sourceWebView)
         XCTAssertEqual(sourceWebView.bounds, originalBounds)
+
+        let nonOwningGeneration = try XCTUnwrap(
+            controller.beginSnapshotBoundsAdjustmentIfNeeded(
+                for: sourceWebView,
+                targetSize: CGSize(width: 700, height: 1000),
+                shouldAdjust: true
+            )
+        )
+        let nonOwningBounds = sourceWebView.bounds
+        controller.finishSnapshotBoundsAdjustment(
+            nonOwningGeneration,
+            for: sourceWebView,
+            ownerMayRestore: false
+        )
+        XCTAssertEqual(
+            sourceWebView.bounds,
+            nonOwningBounds,
+            "A snapshot completion that lost its unload owner must not restore layout state"
+        )
+        sourceWebView.bounds = originalBounds
 
         _ = try XCTUnwrap(
             controller.beginSnapshotBoundsAdjustmentIfNeeded(
