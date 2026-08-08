@@ -10416,7 +10416,7 @@ extension WebView {
         if coordinator.lastInstalledScriptsSignature != installedScriptsSignature
             || coordinator.lastUserScriptsContentController !== userContentController {
             userContentController.removeAllUserScripts()
-            for script in allScripts {
+            for var script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
             }
         }
