@@ -377,6 +377,11 @@ struct WebViewPendingDocumentCallbackTask {
     let cancellationHandler: (@MainActor @Sendable () -> Void)?
 }
 
+struct WebViewDocumentCallbackContext: Equatable {
+    let webViewID: ObjectIdentifier
+    let generation: UInt64
+}
+
 @MainActor
 func cancelPendingWebViewDocumentCallbackTasks(
     _ pendingTasks: inout [UUID: WebViewPendingDocumentCallbackTask]
@@ -2881,12 +2886,18 @@ public class WebViewCoordinator: NSObject {
     var scriptCaller: WebViewScriptCaller?
     private let scriptCallerBindingOwnerID = UUID()
     private weak var scriptCallerBoundWebView: WKWebView?
-    private weak var delegateBoundWebView: WKWebView?
-    private weak var observationBoundWebView: WKWebView?
     private var documentCallbackGeneration: UInt64 = 0
     private var documentCallbackContextIsActive = false
+    private var committedDocumentSurvivesProvisionalNavigation = false
     private var pendingDocumentCallbackTasks = [UUID: WebViewPendingDocumentCallbackTask]()
     private var webViewBindingGeneration: UInt64 = 0
+    private var paginationStateGeneration: UInt64 = 0
+    private weak var registeredReturnWebView: EnhancedWKWebView?
+    // A configured-pool replacement must not deallocate the pool that still owns
+    // this mounted lease. Release the strong provenance only when the exact view
+    // is returned or explicitly released.
+    private var registeredReturnWebViewPool: WebViewPool?
+    private var hasRegisteredReturnOwner = false
     var config: WebViewConfig
     var lifecycleConfig: WebViewLifecycleConfig = .default
     weak var webViewPool: WebViewPool?
@@ -2910,8 +2921,6 @@ public class WebViewCoordinator: NSObject {
     private var pendingWebViewBindingTask: Task<Void, Never>?
     private var paginationApplyGeneration: UInt64 = 0
     private var pageStateExtractionGate = WebViewMutationGenerationGate()
-    private var webViewBindingGate = WebViewMutationGenerationGate()
-    private var paginationStateUpdateGate = WebViewMutationGenerationGate()
     private weak var pendingWebViewBindingWebView: WKWebView?
     private weak var lastPaginationUpdateWebView: WKWebView?
     private var lastPaginationUpdateConfiguration: WebViewPaginationConfiguration?
@@ -2923,9 +2932,6 @@ public class WebViewCoordinator: NSObject {
     private var webViewUnloadControllerGeneration: UInt64?
     private var webViewUnloadGate = WebViewUnloadTransactionGate()
     private weak var snapshotHostController: WebViewController?
-    private var webViewUnloadTransactionGate = WebViewUnloadTransactionGate()
-    private var pendingWebViewUnloadTask: Task<Void, Never>?
-    private weak var activeWebViewUnloadController: WebViewController?
     internal weak var scrollBottomObservedScrollView: UIScrollView?
     internal var scrollBottomContentSizeObservation: NSKeyValueObservation?
     internal var scrollBottomBoundsObservation: NSKeyValueObservation?
@@ -3058,6 +3064,10 @@ public class WebViewCoordinator: NSObject {
         let snapshotCacheKey = lifecycleConfig.snapshotCacheKey
         let resetURL = lifecycleConfig.idleLoadURL
 
+        guard let pool = returnPool(for: sourceWebView) else {
+            webViewUnloadGate.cancel()
+            return
+        }
         Task { @MainActor [weak self, weak controller, weak pool, sourceWebView] in
             guard let self else { return }
             defer {
@@ -3112,12 +3122,12 @@ public class WebViewCoordinator: NSObject {
                 } else {
                     self.logLookupPerf("webview.unload.snapshot.skipped size=\(size)")
                 }
-            } else if snapshot != nil {
-                self.logLookupPerf("webview.unload.snapshot.discarded.staleDocument")
             }
             self.tearDownBindingsForDetachedWebView(sourceWebView)
             controller.detachWebView()
-            pool.enqueue(sourceWebView, resetURL: resetURL)
+            guard self.returnWebView(sourceWebView, to: pool, resetURL: resetURL) else {
+                return
+            }
             controller.isWebViewUnloaded = true
             self.logLookupPerf("webview.unload.enqueued")
         }
@@ -3132,10 +3142,10 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
-    func prepareForReloadIfNeeded(controller: WebViewController) {
-        guard lifecycleConfig.autoUnloadOnDisappear else { return }
-        guard controller.isWebViewUnloaded else { return }
-        guard snapshotHostController != nil else { return }
+    func prepareForReloadIfNeeded(controller: WebViewController) -> Bool {
+        guard lifecycleConfig.autoUnloadOnDisappear else { return false }
+        guard controller.isWebViewUnloaded else { return false }
+        guard snapshotHostController != nil else { return false }
         logLookupPerf("webview.reload.prepare")
         pendingSnapshotRestore = true
         snapshotReloadCommitted = false
@@ -3290,9 +3300,6 @@ public class WebViewCoordinator: NSObject {
     }
     
     deinit {
-#if os(iOS)
-        pendingWebViewUnloadTask?.cancel()
-#endif
         urlObservation?.invalidate()
     }
 
@@ -3323,6 +3330,80 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     private func ownsOrIsBindingWebView(_ sourceWebView: WKWebView) -> Bool {
         ownsWebView(sourceWebView) || pendingWebViewBindingWebView === sourceWebView
+    }
+
+    @MainActor
+    func captureDocumentCallbackContext(
+        for sourceWebView: WKWebView
+    ) -> WebViewDocumentCallbackContext? {
+        guard documentCallbackContextIsActive, ownsWebView(sourceWebView) else {
+            return nil
+        }
+        return WebViewDocumentCallbackContext(
+            webViewID: ObjectIdentifier(sourceWebView),
+            generation: documentCallbackGeneration
+        )
+    }
+
+    @MainActor
+    func ownsDocumentCallbackContext(_ context: WebViewDocumentCallbackContext) -> Bool {
+        guard documentCallbackContextIsActive,
+              documentCallbackGeneration == context.generation,
+              let sourceWebView = navigator.webView else {
+            return false
+        }
+        return ObjectIdentifier(sourceWebView) == context.webViewID
+    }
+
+    @MainActor
+    private func invalidateDocumentCallbackContext() {
+        documentCallbackGeneration &+= 1
+        documentCallbackContextIsActive = false
+        cancelPendingWebViewDocumentCallbackTasks(&pendingDocumentCallbackTasks)
+    }
+
+    @MainActor
+    private func activateDocumentCallbackContext(for sourceWebView: WKWebView) {
+        guard ownsWebView(sourceWebView) else { return }
+        documentCallbackGeneration &+= 1
+        documentCallbackContextIsActive = true
+    }
+
+    @MainActor
+    private func scheduleDocumentMessageHandler(
+        _ handler: @Sendable @escaping (WebViewMessage) async -> Void,
+        message: WebViewMessage,
+        context: WebViewDocumentCallbackContext,
+        cancellationHandler: (@MainActor @Sendable (WebViewMessage) -> Void)?
+    ) {
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
+            // Ensure the task is registered before it can finish and remove itself.
+            await Task.yield()
+            guard let self,
+                  !Task.isCancelled,
+                  self.ownsDocumentCallbackContext(context) else {
+                self?.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
+                return
+            }
+            await handler(message)
+            self.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
+        }
+        pendingDocumentCallbackTasks[taskID] = WebViewPendingDocumentCallbackTask(
+            task: task,
+            cancellationHandler: cancellationHandler.map { handler in
+                { @MainActor in handler(message) }
+            }
+        )
+    }
+
+    @MainActor
+    private func publishNavigationFailure(
+        _ state: WebViewState,
+        disposition: WebViewNavigationFailureDisposition
+    ) {
+        onNavigationFailedWithDisposition?(state, disposition)
+        onNavigationFailed?(state)
     }
 
     @MainActor
@@ -3443,7 +3524,7 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func cancelPendingPaginationStateUpdate() {
-        paginationStateUpdateGate.invalidate()
+        paginationStateGeneration &+= 1
         pendingPaginationStateTask?.cancel()
         pendingPaginationStateTask = nil
     }
@@ -3454,7 +3535,7 @@ public class WebViewCoordinator: NSObject {
             return
         }
         let cancelledPendingWebView = pendingWebViewBindingWebView
-        webViewBindingGate.invalidate()
+        webViewBindingGeneration &+= 1
         pendingWebViewBindingTask?.cancel()
         pendingWebViewBindingTask = nil
         pendingWebViewBindingWebView = nil
@@ -3546,7 +3627,6 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func invalidateWebViewObservations() {
-        observationBoundWebView = nil
         urlObservation?.invalidate()
         urlObservation = nil
         estimatedProgressObservation?.invalidate()
@@ -3719,30 +3799,42 @@ public class WebViewCoordinator: NSObject {
         guard ownsWebView else { return }
 
         invalidatePageStateExtraction()
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
+        scriptCaller?.removeAllMultiTargetFrames()
+        onDocumentContextInvalidated?(self.webView.state, .webViewDetached)
         navigator.releaseWebViewIfOwned(webView, reason: "coordinatorDetached")
         invalidateWebViewObservations()
         schedulePaginationStateUpdate(paginationController.detach())
     }
 
     @MainActor
-    private func schedulePaginationStateUpdate(_ paginationState: WebViewPaginationState) {
+    @discardableResult
+    func schedulePaginationStateUpdate(_ paginationState: WebViewPaginationState) -> UInt64 {
         cancelPendingPaginationStateUpdate()
-        let generation = paginationStateUpdateGate.begin()
+        paginationStateGeneration &+= 1
+        let generation = paginationStateGeneration
         pendingPaginationStateTask = Task { @MainActor [weak self] in
             await Task.yield()
-            guard let self,
-                  !Task.isCancelled,
-                  self.paginationStateUpdateGate.accepts(generation) else {
-                return
-            }
-            var newState = self.webView.state
-            newState.paginationState = paginationState.applying(self.navigator.paginationStateEnrichment)
-            if newState != self.webView.state {
-                self.webView.state = newState
-            }
-            if self.paginationStateUpdateGate.accepts(generation) {
-                self.pendingPaginationStateTask = nil
-            }
+            guard let self, !Task.isCancelled else { return }
+            _ = self.completeScheduledPaginationStateUpdate(
+                paginationState,
+                generation: generation
+            )
+        }
+        return generation
+    }
+
+    @discardableResult
+    func completeScheduledPaginationStateUpdate(
+        _ paginationState: WebViewPaginationState,
+        generation: UInt64
+    ) -> Bool {
+        guard generation == paginationStateGeneration else { return false }
+        var newState = webView.state
+        newState.paginationState = paginationState.applying(navigator.paginationStateEnrichment)
+        if newState != webView.state {
+            webView.state = newState
         }
         if generation == paginationStateGeneration {
             pendingPaginationStateTask = nil
@@ -3751,37 +3843,44 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
-    func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) {
+    @discardableResult
+    func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) -> UInt64 {
         cancelPendingWebViewBinding()
-        let generation = webViewBindingGate.begin()
+        webViewBindingGeneration &+= 1
+        let generation = webViewBindingGeneration
         pendingWebViewBindingWebView = webView
         pendingWebViewBindingTask = Task { @MainActor [weak self, weak webView] in
             await Task.yield()
-            guard let self else { return }
-            defer {
-                if self.webViewBindingGate.accepts(generation) {
-                    self.pendingWebViewBindingTask = nil
-                    self.pendingWebViewBindingWebView = nil
-                }
-            }
-            guard let webView,
-                  !Task.isCancelled,
-                  self.webViewBindingGate.accepts(generation),
-                  self.pendingWebViewBindingWebView === webView else {
-                return
-            }
-            self.setWebView(webView)
-            guard self.webViewBindingGate.accepts(generation),
-                  self.pendingWebViewBindingWebView === webView else {
-                return
-            }
-            self.applyPaginationConfigurationIfNeeded(reason: paginationReason)
+            guard let self, let webView, !Task.isCancelled else { return }
+            _ = self.completeScheduledWebViewBinding(
+                webView,
+                generation: generation,
+                paginationReason: paginationReason
+            )
         }
-        setWebView(webView)
+        if !ownsWebView(webView) {
+            setWebView(webView)
+        }
         applyPaginationConfigurationIfNeeded(reason: paginationReason)
-        if generation == webViewBindingGeneration {
-            pendingWebViewBindingTask = nil
+        return generation
+    }
+
+    @discardableResult
+    func completeScheduledWebViewBinding(
+        _ webView: WKWebView,
+        generation: UInt64,
+        paginationReason: String
+    ) -> Bool {
+        guard generation == webViewBindingGeneration,
+              pendingWebViewBindingWebView === webView else {
+            return false
         }
+        if !ownsWebView(webView) {
+            setWebView(webView)
+        }
+        applyPaginationConfigurationIfNeeded(reason: paginationReason)
+        pendingWebViewBindingTask = nil
+        pendingWebViewBindingWebView = nil
         return true
     }
 
@@ -3831,6 +3930,12 @@ public class WebViewCoordinator: NSObject {
         let previousWebView = navigator.webView
         invalidateForeignContentRulesApplication(on: webView)
         if previousWebView !== webView {
+            if previousWebView != nil {
+                invalidateDocumentCallbackContext()
+                committedDocumentSurvivesProvisionalNavigation = false
+                scriptCaller?.removeAllMultiTargetFrames()
+                onDocumentContextInvalidated?(self.webView.state, .webViewDetached)
+            }
             _ = navigator.cancelContentRulesBypass(for: previousWebView)
 #if os(iOS)
             cancelPendingWebViewUnload()
@@ -4297,6 +4402,10 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             receiptSequence: WebViewMessageReceiptSequencer.reserve(),
             javaScriptBindingToken: javaScriptBindingToken(for: message.webView)
         )
+        guard let documentContext = captureDocumentCallbackContext(for: sourceWebView) else {
+            messageHandlers.cancellationHandlers[message.name]?(message)
+            return
+        }
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
         scheduleDocumentMessageHandler(
             messageHandler,
@@ -4564,8 +4673,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
         invalidatePageStateExtraction()
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
-        scriptCaller?.removeAllMultiTargetFrames()
-        _ = setLoading(
+        let preservesCommittedDocument = committedDocumentSurvivesProvisionalNavigation
+        committedDocumentSurvivesProvisionalNavigation = false
+        if preservesCommittedDocument {
+            activateDocumentCallbackContext(for: webView)
+        } else {
+            invalidateDocumentCallbackContext()
+            scriptCaller?.removeAllMultiTargetFrames()
+        }
+        let failedState = setLoading(
             false,
             pageURL: webView.url,
             isProvisionallyNavigating: false,
@@ -4574,6 +4690,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList,
             error: error
+        )
+        publishNavigationFailure(
+            failedState,
+            disposition: preservesCommittedDocument ? .preservedCommittedDocument : .terminal
         )
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
@@ -4600,10 +4720,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard ownsWebView(webView) else { return }
         invalidatePageStateExtraction()
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
         (webView as? EnhancedWKWebView)?.resetPooledContentNavigation()
         navigator.clearActiveInternalReaderLoadSignal()
         scriptCaller?.removeAllMultiTargetFrames()
-        setLoading(false, isProvisionallyNavigating: false)
+        let terminatedState = setLoading(false, isProvisionallyNavigating: false)
+        onDocumentContextInvalidated?(terminatedState, .webContentProcessTerminated)
         if navigator.cancelContentRulesBypass(for: webView) {
             applyConfiguredContentRulesIfNeeded(on: webView)
         }
@@ -4622,6 +4745,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         invalidatePageStateExtraction()
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
         scriptCaller?.removeAllMultiTargetFrames()
@@ -4659,7 +4784,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         invalidatePageStateExtraction()
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
         scriptCaller?.removeAllMultiTargetFrames()
+        activateDocumentCallbackContext(for: webView)
 #if DEBUG
         debugPrint("# READER webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -4774,6 +4902,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         invalidatePageStateExtraction()
+        committedDocumentSurvivesProvisionalNavigation = documentCallbackContextIsActive
+        invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
 #if DEBUG
         debugPrint("# READER webView.nav.start",
@@ -6920,7 +7050,76 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         return components?.string ?? resolved.absoluteString
     }
 
-    private func removeRegisteredFrame(uuid: String, expectedFrame: WKFrameInfo? = nil) {
+    /// Resolves a legacy URL-only frame target only when every matching
+    /// document UUID has exactly one registration. WKFrameInfo is a snapshot;
+    /// its public API does not expose stable frame identity, so object identity
+    /// must not be used to collapse distinct document registrations.
+    nonisolated static func uniqueRegisteredValue<Key: Hashable, Value>(
+        in registrations: [Key: Value],
+        canonicalKeysByRegistration: [Key: String],
+        matching canonicalKey: String
+    ) -> Value? {
+        var resolvedValue: Value?
+        var matchCount = 0
+        for (registrationKey, value) in registrations
+        where canonicalKeysByRegistration[registrationKey] == canonicalKey {
+            matchCount += 1
+            if matchCount > 1 {
+                return nil
+            }
+            resolvedValue = value
+        }
+        return resolvedValue
+    }
+
+    private func makeJavaScriptEvaluationContext(
+        excluding primaryFrame: WKFrameInfo? = nil,
+        includeChildFrames: Bool
+    ) -> JavaScriptEvaluationContext? {
+        guard let asyncCaller else { return nil }
+        let childFrames: [(uuid: String, frame: WKFrameInfo)]
+        if includeChildFrames {
+            childFrames = multiTargetFrames
+                .compactMap { uuid, frame -> (uuid: String, frame: WKFrameInfo)? in
+                    guard !frame.isMainFrame, frame !== primaryFrame else { return nil }
+                    return (uuid, frame)
+                }
+                .sorted { $0.uuid < $1.uuid }
+        } else {
+            childFrames = []
+        }
+        return JavaScriptEvaluationContext(
+            asyncCaller: asyncCaller,
+            frameContextGeneration: frameContextGeneration,
+            childFrames: childFrames
+        )
+    }
+
+    private func requireCurrentFrameContext(_ expectedGeneration: UInt64) throws {
+        guard frameContextGeneration == expectedGeneration else {
+            throw ScriptCallerError.frameContextChanged
+        }
+    }
+
+    /// An explicit frame is the complete transaction boundary. Never replay
+    /// that operation into sibling or replacement documents. A nil primary
+    /// frame represents the reader shell, which may intentionally fan out APIs
+    /// implemented only by registered content documents.
+    nonisolated static func shouldDuplicateEvaluationIntoChildFrames(
+        hasExplicitPrimaryFrame: Bool
+    ) -> Bool {
+        !hasExplicitPrimaryFrame
+    }
+
+    private func removeRegisteredFrame(
+        uuid: String,
+        expectedFrame: WKFrameInfo? = nil,
+        expectedContextGeneration: UInt64? = nil
+    ) {
+        if let expectedContextGeneration,
+           frameContextGeneration != expectedContextGeneration {
+            return
+        }
         guard let registeredFrame = multiTargetFrames[uuid],
               expectedFrame == nil || registeredFrame === expectedFrame else {
             return
@@ -6937,11 +7136,22 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    private func removeRegisteredFrame(_ frame: WKFrameInfo) {
+    private func removeRegisteredFrame(
+        _ frame: WKFrameInfo,
+        expectedContextGeneration: UInt64? = nil
+    ) {
+        if let expectedContextGeneration,
+           frameContextGeneration != expectedContextGeneration {
+            return
+        }
         for uuid in multiTargetFrames.compactMap({ key, value in
             value === frame ? key : nil
         }) {
-            removeRegisteredFrame(uuid: uuid, expectedFrame: frame)
+            removeRegisteredFrame(
+                uuid: uuid,
+                expectedFrame: frame,
+                expectedContextGeneration: expectedContextGeneration
+            )
         }
         if frame === lastKnownMainFrame {
             lastKnownMainFrame = nil
@@ -7000,23 +7210,29 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
         try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
 
-        if duplicateInMultiTargetFrames {
-            await { @MainActor [weak self] in
-                guard let self else { return }
-                for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-                    if targetFrame === frame { continue }
-                    do {
-                        _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
-                    } catch {
-                        if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                            removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
-                        } else {
-                            print(error)
-                        }
+        let shouldDuplicateIntoChildFrames = Self.shouldDuplicateEvaluationIntoChildFrames(
+            hasExplicitPrimaryFrame: frame != nil
+        )
+        if duplicateInMultiTargetFrames && shouldDuplicateIntoChildFrames {
+            for (uuid, targetFrame) in evaluationContext.childFrames {
+                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+                do {
+                    _ = try await asyncCaller(js, primitiveArguments, targetFrame, world).value
+                    try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+                } catch {
+                    try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
+                        removeRegisteredFrame(
+                            uuid: uuid,
+                            expectedFrame: targetFrame,
+                            expectedContextGeneration: evaluationContext.frameContextGeneration
+                        )
+                    } else {
+                        print(error)
                     }
                 }
-                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
             }
+            try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
         }
         if var primaryError {
             var handled = false
@@ -7063,7 +7279,10 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 // Stale WKFrameInfo from a prior navigation can trigger "invalid frame" even after we pick a URL match.
                 // Drop the cached main frame so we fall back to the current main frame next time instead of hard‑failing.
                 if let frame {
-                    removeRegisteredFrame(frame)
+                    removeRegisteredFrame(
+                        frame,
+                        expectedContextGeneration: evaluationContext.frameContextGeneration
+                    )
                 }
                 try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
                 result = nil
@@ -7087,6 +7306,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 throw primaryError
             }
         }
+        try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
         return normalizeJavaScriptResult(result)
     }
 
@@ -7163,12 +7383,19 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 
         var results = [Any?]()
         try requireContinuation()
-        let mainResult = try await asyncCaller(
-            js,
-            primitiveArguments,
-            nil,
-            world
-        ).value
+        let mainResult: Any?
+        do {
+            mainResult = try await asyncCaller(
+                js,
+                primitiveArguments,
+                nil,
+                world
+            ).value
+        } catch {
+            try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+            throw error
+        }
+        try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
         try requireContinuation()
         let normalizedMainResult = normalizeJavaScriptResult(mainResult)
         results.append(normalizedMainResult)
@@ -7176,7 +7403,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return results
         }
 
-        for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+        for (uuid, targetFrame) in evaluationContext.childFrames {
+            try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
             try requireContinuation()
             do {
                 let result = try await asyncCaller(
@@ -7185,6 +7413,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     targetFrame,
                     world
                 ).value
+                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
                 try requireContinuation()
                 let normalizedResult = normalizeJavaScriptResult(result)
                 results.append(normalizedResult)
@@ -7192,9 +7421,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     return results
                 }
             } catch {
+                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
                 if let webKitError = error as? WKError,
                    webKitError.code == .javaScriptInvalidFrameTarget {
-                    removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
+                    removeRegisteredFrame(
+                        uuid: uuid,
+                        expectedFrame: targetFrame,
+                        expectedContextGeneration: evaluationContext.frameContextGeneration
+                    )
                     continue
                 }
                 try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
@@ -7330,11 +7564,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public func removeAllMultiTargetFrames() {
         frameContextGeneration &+= 1
 #if DEBUG
-        if !multiTargetFrames.isEmpty || !canonicalFrameKeysByUUID.isEmpty {
+        if !multiTargetFrames.isEmpty || !canonicalFrameKeyByUUID.isEmpty {
             debugPrint(
                 "# READER scriptCaller.frame.clear",
                 "byUUID=\(multiTargetFrames.count)",
-                "canonicalKeys=\(canonicalFrameKeysByUUID.count)"
+                "canonicalKeys=\(canonicalFrameKeyByUUID.count)"
             )
         }
 #endif
@@ -7351,7 +7585,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         guard let key = canonicalFrameKey(for: url) else { return nil }
         return Self.uniqueRegisteredValue(
             in: multiTargetFrames,
-            canonicalKeysByRegistration: canonicalFrameKeysByUUID,
+            canonicalKeysByRegistration: canonicalFrameKeyByUUID,
             matching: key
         )
     }
@@ -9454,6 +9688,7 @@ extension WebView: UIViewControllerRepresentable {
         web.buildMenu = buildMenu
         
         web.scrollView.delegate = coordinator
+        coordinator.registerReturnOwner(for: web, pool: resolvedWebViewPool)
         
         return web
     }
@@ -9883,10 +10118,18 @@ extension WebView: UIViewControllerRepresentable {
         coordinator.cancelPendingWebViewUnload()
         guard !controller.isWebViewUnloaded else { return }
 
-        coordinator.tearDownBindingsForDetachedWebView(controller.webView)
-        if let pool = coordinator.webViewPool {
+        let webView = controller.webView
+        coordinator.tearDownBindingsForDetachedWebView(webView)
+        if let pool = coordinator.returnPool(for: webView) {
             controller.detachWebView()
-            pool.enqueue(controller.webView, resetURL: coordinator.lifecycleConfig.idleLoadURL)
+            guard coordinator.returnWebView(
+                webView,
+                to: pool,
+                resetURL: coordinator.lifecycleConfig.idleLoadURL
+            ) else {
+                assertionFailure("WebView dismantle lost its exact pool return owner")
+                return
+            }
         } else {
             controller.isWebViewUnloaded = true
             coordinator.releaseUnpooledWebViewOwner(webView)
@@ -10199,6 +10442,7 @@ extension WebView: NSViewRepresentable {
         } else {
             webView = createWebView()
         }
+        context.coordinator.registerReturnOwner(for: webView, pool: resolvedWebViewPool)
 
         context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
         let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
