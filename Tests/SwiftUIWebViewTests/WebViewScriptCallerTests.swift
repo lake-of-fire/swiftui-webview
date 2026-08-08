@@ -1,6 +1,5 @@
 import XCTest
 import WebKit
-import struct SwiftUI.Binding
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -19,6 +18,78 @@ private actor JavaScriptEvaluationRecorder {
         scripts
     }
 }
+
+private actor JavaScriptEvaluationGate {
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor ComposedHandlerCancellationGate {
+    private var didEnter = false
+    private var didRelease = false
+    private var entryWaiters = [CheckedContinuation<Void, Never>]()
+    private var releaseWaiters = [CheckedContinuation<Void, Never>]()
+
+    func enterAndWaitForRelease() async {
+        if !didEnter {
+            didEnter = true
+            let waiters = entryWaiters
+            entryWaiters.removeAll()
+            for waiter in waiters {
+                waiter.resume()
+            }
+        }
+        if didRelease { return }
+        await withCheckedContinuation { continuation in
+            releaseWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilEntered() async {
+        if didEnter { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        guard !didRelease else { return }
+        didRelease = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
+@MainActor
+private final class DocumentCallbackCancellationCounter {
+    private(set) var count = 0
+
+    func increment() {
+        count += 1
+    }
+}
+
+#if os(iOS)
+@MainActor
+private final class WebViewNavigationDelegateSentinel: NSObject, WKNavigationDelegate {}
+#endif
 
 @MainActor
 private final class JavaScriptContinuationState {
@@ -105,6 +176,701 @@ private func drainMainDispatchQueue() async {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testRegisteredReturnOwnerRetainsOriginatingPoolUntilTheLeaseReturns() {
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = model.makeCoordinator()
+        var originalPool: WebViewPool? = WebViewPool(warmUpCount: 0, keepAliveCount: 0)
+        weak var weakOriginalPool = originalPool
+        let replacementPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let webView = originalPool!.dequeue {
+            EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        coordinator.registerReturnOwner(for: webView, pool: originalPool)
+        coordinator.webViewPool = replacementPool
+
+        originalPool = nil
+        XCTAssertNotNil(weakOriginalPool)
+        func returnToOriginatingPool(_ pool: WebViewPool?) {
+            guard let pool else {
+                XCTFail("The registered lease must retain its originating pool")
+                return
+            }
+            XCTAssertTrue(coordinator.returnPool(for: webView) === pool)
+            XCTAssertTrue(
+                coordinator.returnWebView(
+                    webView,
+                    to: pool,
+                    resetURL: nil
+                )
+            )
+            XCTAssertEqual(pool.leasedCount, 0)
+        }
+        returnToOriginatingPool(weakOriginalPool)
+        XCTAssertNil(weakOriginalPool)
+        XCTAssertEqual(replacementPool.retainedCount, 0)
+    }
+
+    func testRegisteredReturnPoolSurvivesConfiguredPoolReplacement() {
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = model.makeCoordinator()
+        let originalPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let replacementPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let webView = originalPool.dequeue {
+            EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        coordinator.registerReturnOwner(for: webView, pool: originalPool)
+        coordinator.webViewPool = replacementPool
+
+        XCTAssertTrue(coordinator.returnPool(for: webView) === originalPool)
+        XCTAssertTrue(coordinator.returnWebView(webView, to: originalPool, resetURL: nil))
+        XCTAssertEqual(originalPool.leasedCount, 0)
+        XCTAssertEqual(originalPool.retainedCount, 1)
+        XCTAssertEqual(replacementPool.retainedCount, 0)
+    }
+
+    func testRegisteredReturnOwnerRejectsADifferentWebViewInsteadOfUsingTheCurrentPool() {
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = model.makeCoordinator()
+        let pool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let ownedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        let staleWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        coordinator.registerReturnOwner(for: ownedWebView, pool: pool)
+        coordinator.webViewPool = pool
+
+        XCTAssertTrue(coordinator.returnPool(for: ownedWebView) === pool)
+        XCTAssertNil(coordinator.returnPool(for: staleWebView))
+    }
+
+    func testUnpooledWebViewDoesNotBecomeOwnedByALaterConfiguredPool() {
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = model.makeCoordinator()
+        let laterPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let webView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        coordinator.registerReturnOwner(for: webView, pool: nil)
+        coordinator.webViewPool = laterPool
+
+        XCTAssertNil(coordinator.returnPool(for: webView))
+        coordinator.releaseUnpooledWebViewOwner(webView)
+        XCTAssertTrue(coordinator.returnPool(for: webView) === laterPool)
+    }
+
+#if os(iOS)
+    func testDismantleTerminalizesLifecycleBeforeReturningTheWebView() {
+        let navigator = WebViewNavigator()
+        let pool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            webViewPool: pool,
+            lifecycleConfig: WebViewLifecycleConfig(autoUnloadOnDisappear: true)
+        )
+        let coordinator = model.makeCoordinator()
+        let webView = pool.dequeue {
+            EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        coordinator.registerReturnOwner(for: webView, pool: pool)
+        let controller = WebViewController(webView: webView)
+        controller.onViewDidAppear = {}
+        controller.onViewWillDisappear = {}
+        controller.onViewDidDisappear = {}
+        controller.onWillAttachToParent = {}
+        controller.onDidDetachFromParent = {}
+
+        WebView.dismantleUIViewController(controller, coordinator: coordinator)
+
+        XCTAssertTrue(controller.isWebViewUnloaded)
+        XCTAssertNil(controller.onViewDidAppear)
+        XCTAssertNil(controller.onViewWillDisappear)
+        XCTAssertNil(controller.onViewDidDisappear)
+        XCTAssertNil(controller.onWillAttachToParent)
+        XCTAssertNil(controller.onDidDetachFromParent)
+        XCTAssertEqual(pool.leasedCount, 0)
+        XCTAssertEqual(pool.retainedCount, 1)
+
+        coordinator.unloadWebViewIfNeeded(controller: controller)
+        XCTAssertEqual(pool.retainedCount, 1)
+    }
+#endif
+
+#if os(iOS)
+    func testAlreadyUnloadedControllerReloadsWhenFutureAutoUnloadIsDisabled() {
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            lifecycleConfig: WebViewLifecycleConfig(autoUnloadOnDisappear: false)
+        )
+        let coordinator = model.makeCoordinator()
+        let controller = WebViewController(webView: EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        ))
+        controller.isWebViewUnloaded = true
+        controller.detachWebView()
+
+        XCTAssertTrue(coordinator.prepareForReloadIfNeeded(controller: controller))
+        XCTAssertNil(coordinator.mountedWebView(for: controller))
+    }
+
+    func testReloadRejectsAnOverlayCapturedForADifferentSnapshotIdentity() {
+        let capturedKey = WebViewSnapshotCacheKey(
+            htmlHash: UUID().hashValue,
+            htmlLength: 17,
+            width: 320
+        )
+        let requestedKey = WebViewSnapshotCacheKey(
+            htmlHash: UUID().hashValue,
+            htmlLength: 29,
+            width: 320
+        )
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            lifecycleConfig: WebViewLifecycleConfig(
+                autoUnloadOnDisappear: true,
+                snapshotCacheKey: requestedKey
+            )
+        )
+        let coordinator = model.makeCoordinator()
+        let controller = WebViewController(webView: EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        ))
+        controller.showSnapshotOverlay(UIImage(), cacheKey: capturedKey)
+        controller.isWebViewUnloaded = true
+        controller.detachWebView()
+
+        XCTAssertTrue(coordinator.prepareForReloadIfNeeded(controller: controller))
+        XCTAssertFalse(
+            controller.hasSnapshotOverlay,
+            "A snapshot from the prior content identity must not cover the replacement document"
+        )
+    }
+
+    func testReloadPreservesTheFreshOverlayForTheSameSnapshotIdentity() {
+        let cacheKey = WebViewSnapshotCacheKey(
+            htmlHash: UUID().hashValue,
+            htmlLength: 17,
+            width: 320
+        )
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            lifecycleConfig: WebViewLifecycleConfig(
+                autoUnloadOnDisappear: true,
+                snapshotCacheKey: cacheKey
+            )
+        )
+        let coordinator = model.makeCoordinator()
+        let controller = WebViewController(webView: EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        ))
+        controller.showSnapshotOverlay(UIImage(), cacheKey: cacheKey)
+        controller.isWebViewUnloaded = true
+        controller.detachWebView()
+
+        XCTAssertTrue(coordinator.prepareForReloadIfNeeded(controller: controller))
+        XCTAssertTrue(controller.hasSnapshotOverlay)
+        XCTAssertTrue(controller.snapshotOverlayMatches(cacheKey: cacheKey))
+    }
+
+    func testContentIdentityChangeClearsAnOverlayDuringInFlightReload() {
+        let capturedKey = WebViewSnapshotCacheKey(
+            htmlHash: UUID().hashValue,
+            htmlLength: 17,
+            width: 320
+        )
+        let replacementKey = WebViewSnapshotCacheKey(
+            htmlHash: UUID().hashValue,
+            htmlLength: 29,
+            width: 320
+        )
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            lifecycleConfig: WebViewLifecycleConfig(
+                autoUnloadOnDisappear: true,
+                snapshotCacheKey: capturedKey
+            )
+        )
+        let coordinator = model.makeCoordinator()
+        let controller = WebViewController(webView: EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        ))
+        controller.showSnapshotOverlay(UIImage(), cacheKey: capturedKey)
+        controller.isWebViewUnloaded = true
+        controller.detachWebView()
+
+        XCTAssertTrue(coordinator.prepareForReloadIfNeeded(controller: controller))
+        XCTAssertTrue(controller.hasSnapshotOverlay)
+
+        coordinator.discardSnapshotPresentationIfContentIdentityChanged(
+            to: replacementKey
+        )
+
+        XCTAssertFalse(
+            controller.hasSnapshotOverlay,
+            "An in-flight reload must not retain a snapshot after its requested content identity changes"
+        )
+    }
+
+    func testSnapshotCacheMissIsConsumedBeforeALateEntryCanAppear() {
+        let cacheKey = WebViewSnapshotCacheKey(
+            htmlHash: UUID().hashValue,
+            htmlLength: 17,
+            width: 320
+        )
+        let navigator = WebViewNavigator()
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            lifecycleConfig: WebViewLifecycleConfig(
+                autoUnloadOnDisappear: true,
+                snapshotCacheKey: cacheKey
+            )
+        )
+        let coordinator = model.makeCoordinator()
+        let controller = WebViewController(webView: EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        ))
+        controller.isWebViewUnloaded = true
+        controller.detachWebView()
+
+        XCTAssertTrue(coordinator.prepareForReloadIfNeeded(controller: controller))
+        XCTAssertFalse(controller.hasSnapshotOverlay)
+
+        WebViewSnapshotCache.storeSnapshot(UIImage(), height: 640, for: cacheKey)
+        coordinator.applyCachedSnapshotIfAvailable(controller: controller)
+
+        XCTAssertFalse(
+            controller.hasSnapshotOverlay,
+            "A cache entry arriving after reload preparation must not cover an already-settling replacement"
+        )
+    }
+
+    func testCancelledUnloadRestoresItsTemporarySnapshotBoundsBeforeReappearance() {
+        let originalBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let temporaryBounds = CGRect(x: 0, y: 0, width: 320, height: 640)
+        let webView = EnhancedWKWebView(
+            frame: originalBounds,
+            configuration: WKWebViewConfiguration()
+        )
+        webView.bounds = originalBounds
+        let controller = WebViewController(webView: webView)
+
+        controller.beginTemporarySnapshotBoundsOverride(
+            for: webView,
+            originalBounds: originalBounds,
+            temporaryBounds: temporaryBounds
+        )
+        XCTAssertEqual(webView.bounds, temporaryBounds)
+
+        controller.restoreTemporarySnapshotBoundsIfNeeded()
+
+        XCTAssertEqual(
+            webView.bounds,
+            originalBounds,
+            "Cancelling an unload must not leave the still-mounted WebView at snapshot-only geometry"
+        )
+    }
+
+    func testCancelledUnloadDoesNotRestoreSnapshotBoundsOverANewerLayout() {
+        let originalBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let temporaryBounds = CGRect(x: 0, y: 0, width: 320, height: 640)
+        let replacementBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let webView = EnhancedWKWebView(
+            frame: originalBounds,
+            configuration: WKWebViewConfiguration()
+        )
+        webView.bounds = originalBounds
+        let controller = WebViewController(webView: webView)
+
+        controller.beginTemporarySnapshotBoundsOverride(
+            for: webView,
+            originalBounds: originalBounds,
+            temporaryBounds: temporaryBounds
+        )
+        webView.bounds = replacementBounds
+
+        controller.restoreTemporarySnapshotBoundsIfNeeded()
+
+        XCTAssertEqual(
+            webView.bounds,
+            replacementBounds,
+            "A delayed cancellation must not overwrite layout that replaced the temporary snapshot bounds"
+        )
+    }
+
+    func testStaleSnapshotCompletionCannotConsumeANewerBoundsOverride() throws {
+        let firstOriginalBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let firstTemporaryBounds = CGRect(x: 0, y: 0, width: 320, height: 640)
+        let secondOriginalBounds = CGRect(x: 0, y: 0, width: 2, height: 2)
+        let secondTemporaryBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let webView = EnhancedWKWebView(
+            frame: firstOriginalBounds,
+            configuration: WKWebViewConfiguration()
+        )
+        webView.bounds = firstOriginalBounds
+        let controller = WebViewController(webView: webView)
+
+        let firstToken = try XCTUnwrap(controller.beginTemporarySnapshotBoundsOverride(
+            for: webView,
+            originalBounds: firstOriginalBounds,
+            temporaryBounds: firstTemporaryBounds
+        ))
+        controller.restoreTemporarySnapshotBoundsIfNeeded()
+        webView.bounds = secondOriginalBounds
+        let secondToken = try XCTUnwrap(controller.beginTemporarySnapshotBoundsOverride(
+            for: webView,
+            originalBounds: secondOriginalBounds,
+            temporaryBounds: secondTemporaryBounds
+        ))
+
+        controller.restoreTemporarySnapshotBoundsIfNeeded(
+            expectedToken: firstToken,
+            expectedWebView: webView,
+            ownerMayRestore: false
+        )
+        XCTAssertEqual(
+            webView.bounds,
+            secondTemporaryBounds,
+            "A late completion from the cancelled snapshot must not consume its successor's bounds ownership"
+        )
+
+        controller.restoreTemporarySnapshotBoundsIfNeeded(
+            expectedToken: secondToken,
+            expectedWebView: webView
+        )
+        XCTAssertEqual(webView.bounds, secondOriginalBounds)
+    }
+
+    func testReplacingAnUnloadedControllerDoesNotDetachAReusedWebView() {
+        let pooledWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        let staleController = WebViewController(webView: pooledWebView)
+        XCTAssertTrue(staleController.hasAttachedNativeLookupGestureRecognizer)
+        staleController.isWebViewUnloaded = true
+        staleController.detachWebView()
+        XCTAssertFalse(staleController.hasAttachedNativeLookupGestureRecognizer)
+
+        let activeOwnerView = UIView(frame: CGRect(x: 0, y: 0, width: 320, height: 640))
+        activeOwnerView.addSubview(pooledWebView)
+        let replacementWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+
+        staleController.replaceWebView(replacementWebView)
+
+        XCTAssertTrue(pooledWebView.superview === activeOwnerView)
+        XCTAssertTrue(staleController.webView === replacementWebView)
+        XCTAssertFalse(staleController.isWebViewUnloaded)
+    }
+
+    func testDismantlingAnAlreadyUnloadedControllerDoesNotMutateAReusedWebView() {
+        let navigator = WebViewNavigator()
+        let pool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            webViewPool: pool,
+            lifecycleConfig: WebViewLifecycleConfig(autoUnloadOnDisappear: true)
+        )
+        let coordinator = model.makeCoordinator()
+        let webView = pool.dequeue {
+            EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        coordinator.registerReturnOwner(for: webView, pool: pool)
+        let staleController = WebViewController(webView: webView)
+        staleController.isWebViewUnloaded = true
+        staleController.detachWebView()
+        XCTAssertTrue(coordinator.returnWebView(webView, to: pool, resetURL: nil))
+
+        let reusedWebView = pool.dequeue {
+            XCTFail("The retained WebView should be reused")
+            return EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        XCTAssertTrue(reusedWebView === webView)
+        let delegate = WebViewNavigationDelegateSentinel()
+        reusedWebView.navigationDelegate = delegate
+
+        WebView.dismantleUIViewController(staleController, coordinator: coordinator)
+
+        XCTAssertTrue(reusedWebView.navigationDelegate === delegate)
+        XCTAssertEqual(pool.leasedCount, 1)
+        XCTAssertEqual(pool.retainedCount, 0)
+    }
+#endif
+
+#if os(iOS)
+    func testHierarchyOnlyUnloadWaitsForConfirmedDetachmentAndReattachCancels() {
+        let webView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        let controller = WebViewController(webView: webView)
+        var lifecycleEvents = [String]()
+        controller.onWillAttachToParent = {
+            lifecycleEvents.append("willAttach")
+        }
+        controller.onDidDetachFromParent = {
+            lifecycleEvents.append("didDetach")
+        }
+
+        controller.willMove(toParent: nil)
+        XCTAssertEqual(
+            lifecycleEvents,
+            [],
+            "A provisional removal signal must not begin destructive unload work"
+        )
+
+        controller.didMove(toParent: nil)
+        XCTAssertEqual(lifecycleEvents, ["didDetach"])
+
+        controller.willMove(toParent: UIViewController())
+        XCTAssertEqual(
+            lifecycleEvents,
+            ["didDetach", "willAttach"],
+            "A reparenting attach must synchronously cancel any queued detach transaction"
+        )
+    }
+#endif
+
+    func testWebViewUnloadTransactionRequiresTheExactControllerWebViewAndPool() {
+        let controller = NSObject()
+        let webView = NSObject()
+        let pool = NSObject()
+        let replacementController = NSObject()
+        let replacementWebView = NSObject()
+        let replacementPool = NSObject()
+        var gate = WebViewUnloadTransactionGate()
+
+        let ticket = gate.begin(
+            controller: controller,
+            webView: webView,
+            pool: pool
+        )
+
+        XCTAssertTrue(gate.owns(
+            ticket,
+            controller: controller,
+            webView: webView,
+            pool: pool
+        ))
+        XCTAssertFalse(gate.owns(
+            ticket,
+            controller: replacementController,
+            webView: webView,
+            pool: pool
+        ))
+        XCTAssertFalse(gate.owns(
+            ticket,
+            controller: controller,
+            webView: replacementWebView,
+            pool: pool
+        ))
+        XCTAssertFalse(gate.owns(
+            ticket,
+            controller: controller,
+            webView: webView,
+            pool: replacementPool
+        ))
+    }
+
+    func testWebViewUnloadCancellationInvalidatesAnInFlightSnapshot() {
+        let controller = NSObject()
+        let webView = NSObject()
+        let pool = NSObject()
+        var gate = WebViewUnloadTransactionGate()
+        let ticket = gate.begin(
+            controller: controller,
+            webView: webView,
+            pool: pool
+        )
+
+        gate.cancel()
+
+        XCTAssertNil(gate.activeTicket)
+        XCTAssertFalse(gate.owns(
+            ticket,
+            controller: controller,
+            webView: webView,
+            pool: pool
+        ))
+        XCTAssertFalse(gate.finish(ticket))
+    }
+
+    func testLateWebViewUnloadCompletionCannotClearANewerTransaction() {
+        let controller = NSObject()
+        let oldWebView = NSObject()
+        let newWebView = NSObject()
+        let pool = NSObject()
+        var gate = WebViewUnloadTransactionGate()
+        let oldTicket = gate.begin(
+            controller: controller,
+            webView: oldWebView,
+            pool: pool
+        )
+        let newTicket = gate.begin(
+            controller: controller,
+            webView: newWebView,
+            pool: pool
+        )
+
+        XCTAssertFalse(gate.finish(oldTicket))
+        XCTAssertEqual(gate.activeTicket, newTicket)
+        XCTAssertTrue(gate.owns(
+            newTicket,
+            controller: controller,
+            webView: newWebView,
+            pool: pool
+        ))
+        XCTAssertTrue(gate.finish(newTicket))
+        XCTAssertNil(gate.activeTicket)
+    }
+
+    func testSnapshotBoundsRestoreRequiresCurrentOwnershipAndAnUntouchedOverride() {
+        let temporaryBounds = CGRect(x: 0, y: 0, width: 320, height: 640)
+
+        XCTAssertTrue(shouldRestoreTemporaryWebViewSnapshotBounds(
+            didOverride: true,
+            ownerMayRestore: true,
+            currentBounds: temporaryBounds,
+            temporaryBounds: temporaryBounds
+        ))
+        XCTAssertFalse(shouldRestoreTemporaryWebViewSnapshotBounds(
+            didOverride: true,
+            ownerMayRestore: false,
+            currentBounds: temporaryBounds,
+            temporaryBounds: temporaryBounds
+        ))
+        XCTAssertFalse(shouldRestoreTemporaryWebViewSnapshotBounds(
+            didOverride: true,
+            ownerMayRestore: true,
+            currentBounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+            temporaryBounds: temporaryBounds
+        ))
+        XCTAssertFalse(shouldRestoreTemporaryWebViewSnapshotBounds(
+            didOverride: false,
+            ownerMayRestore: true,
+            currentBounds: temporaryBounds,
+            temporaryBounds: temporaryBounds
+        ))
+    }
+
+    func testUpdatingAHandlerPreservesItsDocumentCancellationProtocol() {
+        let handlers = WebViewMessageHandlers()
+            .updatingCancellationHandler("processJapanese") { @MainActor _ in }
+            .updating("debugOnlyHandler") { _ in }
+
+        XCTAssertNotNil(handlers.handlers["debugOnlyHandler"])
+        XCTAssertNotNil(handlers.cancellationHandlers["processJapanese"])
+    }
+
+    func testDocumentCallbackInvalidationCancelsWorkAndSettlesItsProtocolOnce() async {
+        let gate = ComposedHandlerCancellationGate()
+        let recorder = JavaScriptEvaluationRecorder()
+        let counter = DocumentCallbackCancellationCounter()
+        let task = Task {
+            await gate.enterAndWaitForRelease()
+            if Task.isCancelled {
+                await recorder.record("cancelled")
+            }
+        }
+
+        await gate.waitUntilEntered()
+        var pendingTasks = [
+            UUID(): WebViewPendingDocumentCallbackTask(
+                task: task,
+                cancellationHandler: { @MainActor in
+                    counter.increment()
+                }
+            )
+        ]
+
+        cancelPendingWebViewDocumentCallbackTasks(&pendingTasks)
+        cancelPendingWebViewDocumentCallbackTasks(&pendingTasks)
+        await gate.release()
+        await task.value
+
+        let recorded = await recorder.recordedScripts()
+        XCTAssertTrue(pendingTasks.isEmpty)
+        XCTAssertEqual(counter.count, 1)
+        XCTAssertEqual(recorded, ["cancelled"])
+    }
+
+    func testComposedMessageHandlersStopAfterDocumentOwnerCancellation() async {
+        let gate = ComposedHandlerCancellationGate()
+        let recorder = JavaScriptEvaluationRecorder()
+        let task = Task {
+            await WebViewMessageHandlers.runComposedHandlers(
+                first: { _ in
+                    await gate.enterAndWaitForRelease()
+                },
+                second: { value in
+                    await recorder.record(value)
+                },
+                message: "second-handler"
+            )
+        }
+
+        await gate.waitUntilEntered()
+        task.cancel()
+        await gate.release()
+        await task.value
+
+        let recorded = await recorder.recordedScripts()
+        XCTAssertTrue(recorded.isEmpty)
+    }
+
 #if os(macOS)
     func testTopLeadingWebViewOriginIncludesWindowChrome() {
         XCTAssertEqual(
@@ -117,6 +883,659 @@ final class WebViewScriptCallerTests: XCTestCase {
         )
     }
 #endif
+
+    func testLegacyCanonicalFrameResolutionFailsClosedForDistinctDuplicateFrames() {
+        let firstFrame = NSObject()
+        let secondFrame = NSObject()
+        let registrations = [
+            "first": firstFrame,
+            "second": secondFrame,
+        ]
+        let canonicalKeys = [
+            "first": "ebook://book/chapter.xhtml",
+            "second": "ebook://book/chapter.xhtml",
+        ]
+
+        XCTAssertNil(WebViewScriptCaller.uniqueRegisteredValue(
+            in: registrations,
+            canonicalKeysByRegistration: canonicalKeys,
+            matching: "ebook://book/chapter.xhtml"
+        ))
+        XCTAssertTrue(WebViewScriptCaller.uniqueRegisteredValue(
+            in: ["first": firstFrame],
+            canonicalKeysByRegistration: ["first": "ebook://book/chapter.xhtml"],
+            matching: "ebook://book/chapter.xhtml"
+        ) === firstFrame)
+    }
+
+    func testLegacyCanonicalFrameResolutionTreatsMultipleDocumentUUIDsAsAmbiguousEvenWhenSnapshotsAlias() {
+        let frame = NSObject()
+        let unrelatedFrame = NSObject()
+        let registrations = [
+            "old-alias": frame,
+            "current-alias": frame,
+            "other": unrelatedFrame,
+        ]
+        let canonicalKeys = [
+            "old-alias": "ebook://book/chapter.xhtml",
+            "current-alias": "ebook://book/chapter.xhtml",
+            "other": "ebook://book/other.xhtml",
+        ]
+
+        XCTAssertNil(WebViewScriptCaller.uniqueRegisteredValue(
+            in: registrations,
+            canonicalKeysByRegistration: canonicalKeys,
+            matching: "ebook://book/chapter.xhtml"
+        ))
+        XCTAssertNil(WebViewScriptCaller.uniqueRegisteredValue(
+            in: registrations,
+            canonicalKeysByRegistration: canonicalKeys,
+            matching: "ebook://book/missing.xhtml"
+        ))
+    }
+
+    func testOnlyReaderShellEvaluationsMayFanOutIntoChildFrames() {
+        XCTAssertFalse(WebViewScriptCaller.shouldDuplicateEvaluationIntoChildFrames(
+            hasExplicitPrimaryFrame: true
+        ))
+        XCTAssertTrue(WebViewScriptCaller.shouldDuplicateEvaluationIntoChildFrames(
+            hasExplicitPrimaryFrame: false
+        ))
+    }
+
+    func testInvalidFrameCleanupRequiresTheExactRegisteredSnapshot() {
+        let staleFrame = NSObject()
+        let replacementFrame = NSObject()
+
+        XCTAssertTrue(WebViewScriptCaller.registeredValueStillMatches(
+            staleFrame,
+            expectedValue: staleFrame
+        ))
+        XCTAssertFalse(WebViewScriptCaller.registeredValueStillMatches(
+            replacementFrame,
+            expectedValue: staleFrame
+        ))
+        XCTAssertFalse(WebViewScriptCaller.registeredValueStillMatches(
+            nil as NSObject?,
+            expectedValue: staleFrame
+        ))
+    }
+
+    func testObservedURLPublicationRequiresCurrentUnpublishedURL() throws {
+        let publishedURL = try XCTUnwrap(URL(string: "https://example.com/old"))
+        let currentURL = try XCTUnwrap(URL(string: "https://example.com/current"))
+        let staleURL = try XCTUnwrap(URL(string: "https://example.com/stale"))
+
+        XCTAssertTrue(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            staleURL,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: currentURL
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            nil,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL,
+            isProvisionallyNavigating: true
+        ))
+    }
+
+    func testMountedDocumentContextRejectsReplacementAndNewNavigationGeneration() {
+        let navigator = WebViewNavigator()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let oldWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        let replacementWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        coordinator.scheduleWebViewBinding(oldWebView, paginationReason: "test.context.old")
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: oldWebView))
+        coordinator.webView(oldWebView, didCommit: nil)
+        let oldContext = coordinator.captureDocumentCallbackContext(for: oldWebView)
+        XCTAssertNotNil(oldContext)
+        if let oldContext {
+            XCTAssertTrue(coordinator.ownsDocumentCallbackContext(oldContext))
+        }
+
+        coordinator.scheduleWebViewBinding(
+            replacementWebView,
+            paginationReason: "test.context.replacement"
+        )
+        if let oldContext {
+            XCTAssertFalse(coordinator.ownsDocumentCallbackContext(oldContext))
+        }
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: oldWebView))
+
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: replacementWebView))
+        coordinator.webView(replacementWebView, didCommit: nil)
+        let replacementContext = coordinator.captureDocumentCallbackContext(
+            for: replacementWebView
+        )
+        XCTAssertNotNil(replacementContext)
+        if let replacementContext {
+            XCTAssertTrue(coordinator.ownsDocumentCallbackContext(replacementContext))
+        }
+
+        coordinator.webView(
+            replacementWebView,
+            didStartProvisionalNavigation: nil
+        )
+        if let replacementContext {
+            XCTAssertFalse(coordinator.ownsDocumentCallbackContext(replacementContext))
+        }
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: replacementWebView))
+
+        coordinator.webView(replacementWebView, didCommit: nil)
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: replacementWebView))
+    }
+
+    func testProvisionalFailureReactivatesTheSurvivingCommittedDocumentContext() {
+        let navigator = WebViewNavigator()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.provisional")
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+        coordinator.webView(mountedWebView, didCommit: nil)
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+
+        coordinator.webView(mountedWebView, didStartProvisionalNavigation: nil)
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+
+        coordinator.webView(
+            mountedWebView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+        )
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+    }
+
+    func testInitialProvisionalFailureDoesNotInventACommittedDocumentContext() {
+        let navigator = WebViewNavigator()
+        var disposition: WebViewNavigationFailureDisposition?
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            onNavigationFailedWithDisposition: { _, receivedDisposition in
+                disposition = receivedDisposition
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        coordinator.scheduleWebViewBinding(
+            mountedWebView,
+            paginationReason: "test.initial-provisional-failure"
+        )
+        coordinator.webView(mountedWebView, didStartProvisionalNavigation: nil)
+        coordinator.webView(
+            mountedWebView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        )
+
+        XCTAssertEqual(disposition, .terminal)
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+    }
+
+    func testCommittedDocumentProvisionalFailureReportsPreservedDisposition() {
+        let navigator = WebViewNavigator()
+        var disposition: WebViewNavigationFailureDisposition?
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            onNavigationFailedWithDisposition: { _, receivedDisposition in
+                disposition = receivedDisposition
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.preserved")
+        coordinator.webView(mountedWebView, didCommit: nil)
+        coordinator.webView(mountedWebView, didStartProvisionalNavigation: nil)
+        coordinator.webView(
+            mountedWebView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+        )
+
+        XCTAssertEqual(disposition, .preservedCommittedDocument)
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+    }
+
+    func testProvisionalFailurePreservesSurvivingDocumentFrameRegistry() {
+        let caller = WebViewScriptCaller()
+        let navigator = WebViewNavigator()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.preserved-frames")
+        coordinator.webView(mountedWebView, didCommit: nil)
+        let committedFrameGeneration = caller.frameContextGenerationForTesting
+
+        coordinator.webView(mountedWebView, didStartProvisionalNavigation: nil)
+        coordinator.webView(
+            mountedWebView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+        )
+
+        XCTAssertEqual(caller.frameContextGenerationForTesting, committedFrameGeneration)
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+    }
+
+    func testInitialProvisionalFailureInvalidatesAnyStaleFrameRegistry() {
+        let caller = WebViewScriptCaller()
+        let navigator = WebViewNavigator()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.terminal-frames")
+        let initialFrameGeneration = caller.frameContextGenerationForTesting
+        coordinator.webView(mountedWebView, didStartProvisionalNavigation: nil)
+        coordinator.webView(
+            mountedWebView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        )
+
+        XCTAssertEqual(caller.frameContextGenerationForTesting, initialFrameGeneration &+ 1)
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
+    }
+
+    func testStalePaginationPublicationCannotOverwriteReplacementHost() {
+        var state = WebViewState.empty
+        let navigator = WebViewNavigator()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: Binding(
+                get: { state },
+                set: { state = $0 }
+            )
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let oldWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        let replacementWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        let oldState = coordinator.paginationController.attach(webView: oldWebView)
+        let oldGeneration = coordinator.schedulePaginationStateUpdate(oldState)
+        let replacementState = coordinator.paginationController.attach(webView: replacementWebView)
+        let replacementGeneration = coordinator.schedulePaginationStateUpdate(replacementState)
+
+        XCTAssertFalse(coordinator.completeScheduledPaginationStateUpdate(
+            oldState,
+            generation: oldGeneration
+        ))
+        XCTAssertTrue(coordinator.completeScheduledPaginationStateUpdate(
+            replacementState,
+            generation: replacementGeneration
+        ))
+        XCTAssertEqual(
+            state.paginationState.mountedHostIdentifier,
+            WebViewPaginationController.hostIdentifier(for: replacementWebView)
+        )
+    }
+
+    func testStaleScheduledBindingCannotReattachDetachedWebView() {
+        let navigator = WebViewNavigator()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let oldWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        let replacementWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+
+        let oldGeneration = coordinator.scheduleWebViewBinding(
+            oldWebView,
+            paginationReason: "test.binding.old"
+        )
+        let replacementGeneration = coordinator.scheduleWebViewBinding(
+            replacementWebView,
+            paginationReason: "test.binding.replacement"
+        )
+
+        XCTAssertFalse(coordinator.completeScheduledWebViewBinding(
+            oldWebView,
+            generation: oldGeneration,
+            paginationReason: "test.binding.stale-completion"
+        ))
+        XCTAssertTrue(coordinator.completeScheduledWebViewBinding(
+            replacementWebView,
+            generation: replacementGeneration,
+            paginationReason: "test.binding.current-completion"
+        ))
+        XCTAssertTrue(navigator.webView === replacementWebView)
+    }
+
+    func testNavigationCommitInvalidatesFrameContextSynchronouslyAndNotifiesOwner() {
+        let caller = WebViewScriptCaller()
+        let navigator = WebViewNavigator()
+        var invalidationReason: WebViewDocumentContextInvalidationReason?
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller,
+            onDocumentContextInvalidated: { _, reason in
+                invalidationReason = reason
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.commit")
+        let generationBeforeCommit = caller.frameContextGenerationForTesting
+
+        coordinator.webView(mountedWebView, didCommit: nil)
+
+        XCTAssertEqual(
+            caller.frameContextGenerationForTesting,
+            generationBeforeCommit &+ 1
+        )
+        XCTAssertEqual(invalidationReason, .navigationCommitted)
+    }
+
+    func testWebContentProcessTerminationInvalidatesFrameContextAndNotifiesOwner() {
+        let caller = WebViewScriptCaller()
+        let navigator = WebViewNavigator()
+        var terminatedState: WebViewState?
+        var invalidationReason: WebViewDocumentContextInvalidationReason?
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller,
+            onDocumentContextInvalidated: { state, reason in
+                terminatedState = state
+                invalidationReason = reason
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.termination")
+        let generationBeforeTermination = caller.frameContextGenerationForTesting
+
+        coordinator.webViewWebContentProcessDidTerminate(mountedWebView)
+
+        XCTAssertEqual(
+            caller.frameContextGenerationForTesting,
+            generationBeforeTermination &+ 1
+        )
+        XCTAssertNotNil(terminatedState)
+        XCTAssertFalse(terminatedState?.isLoading ?? true)
+        XCTAssertEqual(invalidationReason, .webContentProcessTerminated)
+    }
+
+    func testDetachedWebViewInvalidatesTheOwnedContextAndDisconnectsDelegates() {
+        let caller = WebViewScriptCaller()
+        let navigator = WebViewNavigator()
+        var invalidationReasons = [WebViewDocumentContextInvalidationReason]()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller,
+            onDocumentContextInvalidated: { _, reason in
+                invalidationReasons.append(reason)
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        mountedWebView.navigationDelegate = coordinator
+        mountedWebView.uiDelegate = coordinator
+#if os(iOS)
+        mountedWebView.scrollView.delegate = coordinator
+#endif
+        mountedWebView.onDidMoveToWindow = { _ in }
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.detach")
+
+        coordinator.tearDownBindingsForDetachedWebView(mountedWebView)
+
+        XCTAssertEqual(invalidationReasons, [.webViewDetached])
+        XCTAssertNil(mountedWebView.navigationDelegate)
+        XCTAssertNil(mountedWebView.uiDelegate)
+#if os(iOS)
+        XCTAssertNil(mountedWebView.scrollView.delegate)
+#endif
+        XCTAssertNil(mountedWebView.onDidMoveToWindow)
+    }
+
+    func testDetachedWebViewCannotClearOrTerminateTheReplacementDocumentContext() {
+        let caller = WebViewScriptCaller()
+        let navigator = WebViewNavigator()
+        var invalidationReasons = [WebViewDocumentContextInvalidationReason]()
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller,
+            onDocumentContextInvalidated: { _, reason in
+                invalidationReasons.append(reason)
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let oldWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        let replacementWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        let asyncCaller: WebViewScriptCaller.AsyncCaller = { _, _, _, _ in
+            WebViewScriptCaller.JavaScriptEvaluationResult(nil)
+        }
+
+        coordinator.scheduleWebViewBinding(oldWebView, paginationReason: "test.old")
+        coordinator.setWebView(oldWebView)
+        coordinator.installScriptCallerBinding(
+            for: oldWebView,
+            asyncCaller: asyncCaller,
+            unsafeCaller: nil,
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { CGPoint(x: 1, y: 2) }
+        )
+
+        coordinator.scheduleWebViewBinding(replacementWebView, paginationReason: "test.replacement")
+        coordinator.setWebView(replacementWebView)
+        coordinator.installScriptCallerBinding(
+            for: replacementWebView,
+            asyncCaller: asyncCaller,
+            unsafeCaller: nil,
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { CGPoint(x: 3, y: 4) }
+        )
+        XCTAssertEqual(invalidationReasons, [.webViewDetached])
+
+        coordinator.tearDownBindingsForDetachedWebView(oldWebView)
+        coordinator.webViewWebContentProcessDidTerminate(oldWebView)
+        XCTAssertEqual(invalidationReasons, [.webViewDetached])
+        XCTAssertTrue(navigator.webView === replacementWebView)
+        XCTAssertTrue(caller.canEvaluateJavaScript)
+        XCTAssertEqual(caller.coordinateOriginInWindow, CGPoint(x: 3, y: 4))
+
+        coordinator.webViewWebContentProcessDidTerminate(replacementWebView)
+        XCTAssertEqual(
+            invalidationReasons,
+            [.webViewDetached, .webContentProcessTerminated]
+        )
+    }
+
+    func testProvisionalNavigationFailureReachesOwnerFailureCallback() {
+        let navigator = WebViewNavigator()
+        var failedState: WebViewState?
+        let webViewModel = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            onNavigationFailed: { state in
+                failedState = state
+            }
+        )
+        let coordinator = webViewModel.makeCoordinator()
+        let mountedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.provisional-failure")
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+
+        coordinator.webView(mountedWebView, didFailProvisionalNavigation: nil, withError: error)
+
+        XCTAssertEqual((failedState?.error as NSError?)?.code, error.code)
+        XCTAssertFalse(failedState?.isLoading ?? true)
+    }
+
+    func testInFlightDuplicatedEvaluationRejectsReplacementDocumentContext() async {
+        let caller = WebViewScriptCaller()
+        let gate = JavaScriptEvaluationGate()
+        let started = expectation(description: "primary evaluation started")
+        caller.asyncCaller = { _, _, _, _ in
+            started.fulfill()
+            await gate.wait()
+            return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
+        }
+
+        let evaluation = Task {
+            try await caller.evaluateJavaScript(
+                "mutate-reader-state",
+                duplicateInMultiTargetFrames: true
+            )
+        }
+        await fulfillment(of: [started], timeout: 2)
+        let generationBeforeReplacement = caller.frameContextGenerationForTesting
+        caller.removeAllMultiTargetFrames()
+        XCTAssertEqual(
+            caller.frameContextGenerationForTesting,
+            generationBeforeReplacement &+ 1
+        )
+        await gate.open()
+
+        do {
+            _ = try await evaluation.value
+            XCTFail("Expected the replacement frame context to invalidate the evaluation")
+        } catch let error as ScriptCallerError {
+            XCTAssertEqual(error, .frameContextChanged)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testInFlightMultiTargetEvaluationRejectsReplacementDocumentContext() async {
+        let caller = WebViewScriptCaller()
+        let gate = JavaScriptEvaluationGate()
+        let started = expectation(description: "main-frame fan-out evaluation started")
+        caller.asyncCaller = { _, _, _, _ in
+            started.fulfill()
+            await gate.wait()
+            return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
+        }
+
+        let evaluation = Task {
+            try await caller.evaluateJavaScriptInMultiTargetFrames("mutate-all-reader-frames")
+        }
+        await fulfillment(of: [started], timeout: 2)
+        caller.removeAllMultiTargetFrames()
+        await gate.open()
+
+        do {
+            _ = try await evaluation.value
+            XCTFail("Expected the replacement frame context to invalidate fan-out")
+        } catch let error as ScriptCallerError {
+            XCTAssertEqual(error, .frameContextChanged)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFrameCanonicalizationDecodesReaderLoaderExactlyOnce() throws {
+        let contentURL = try XCTUnwrap(URL(
+            string: "https://example.com/chapter%2Fpart.xhtml?q=value%252Fencoded#section"
+        ))
+        let encodedContentURL = try XCTUnwrap(contentURL.absoluteString.addingPercentEncoding(
+            withAllowedCharacters: .alphanumerics
+        ))
+        let loaderURL = try XCTUnwrap(URL(
+            string: "internal://local/load/reader?reader-url=\(encodedContentURL)"
+        ))
+
+        XCTAssertEqual(
+            WebViewScriptCaller.canonicalizedFrameURL(loaderURL).absoluteString,
+            contentURL.absoluteString
+        )
+        XCTAssertNotEqual(
+            WebViewScriptCaller.canonicalizedFrameURL(loaderURL).absoluteString,
+            "https://example.com/chapter/part.xhtml?q=value%2Fencoded#section"
+        )
+    }
 
     func testReaderLoaderCanonicalizationPreservesEscapedReservedCharacters() throws {
         let contentURL = try XCTUnwrap(URL(
@@ -483,6 +1902,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         let staleOwnerID = UUID()
         let activeOwnerID = UUID()
 
+        let initialFrameContextGeneration = caller.frameContextGenerationForTesting
         caller.installBinding(
             ownedBy: staleOwnerID,
             asyncCaller: { _, _, _, _ in
@@ -491,6 +1911,10 @@ final class WebViewScriptCallerTests: XCTestCase {
             unsafeCaller: nil,
             snapshotCapture: nil,
             coordinateOriginInWindow: { CGPoint(x: 1, y: 2) }
+        )
+        XCTAssertEqual(
+            caller.frameContextGenerationForTesting,
+            initialFrameContextGeneration &+ 1
         )
         caller.installBinding(
             ownedBy: activeOwnerID,
@@ -502,7 +1926,10 @@ final class WebViewScriptCallerTests: XCTestCase {
             coordinateOriginInWindow: { CGPoint(x: 3, y: 4) }
         )
 
+        let activeFrameContextGeneration = caller.frameContextGenerationForTesting
+        XCTAssertEqual(activeFrameContextGeneration, initialFrameContextGeneration &+ 2)
         XCTAssertFalse(caller.clearBinding(ownedBy: staleOwnerID))
+        XCTAssertEqual(caller.frameContextGenerationForTesting, activeFrameContextGeneration)
         XCTAssertTrue(caller.canEvaluateJavaScript)
         XCTAssertNotNil(caller.unsafeCaller)
         XCTAssertEqual(caller.coordinateOriginInWindow, CGPoint(x: 3, y: 4))
@@ -510,6 +1937,10 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertEqual(activeValue, "active")
 
         XCTAssertTrue(caller.clearBinding(ownedBy: activeOwnerID))
+        XCTAssertEqual(
+            caller.frameContextGenerationForTesting,
+            activeFrameContextGeneration &+ 1
+        )
         XCTAssertFalse(caller.canEvaluateJavaScript)
         XCTAssertNil(caller.unsafeCaller)
         XCTAssertNil(caller.coordinateOriginInWindow)
@@ -892,7 +2323,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         coordinator.setWebView(currentWebView)
         state.pageTitle = "current"
 
-        coordinator.webView(detachedWebView, didFinish: nil as WKNavigation?)
+        coordinator.webView(detachedWebView, didFinish: nil)
 
         XCTAssertEqual(finishedCount, 0)
         XCTAssertEqual(state.pageTitle, "current")
@@ -997,11 +2428,10 @@ final class WebViewScriptCallerTests: XCTestCase {
             forDomain: URL(string: "https://example.com"),
             config: WebViewConfig(userScripts: [pageScript])
         )
-        let installedPageScript = try XCTUnwrap(
+        XCTAssertTrue(try XCTUnwrap(
             sourceWebView.configuration.userContentController.userScripts
                 .first(where: { $0.source == source })
-        )
-        let pageSignature = coordinator.lastInstalledScriptsSignature
+        ).contentWorld.isEqual(WKContentWorld.page))
 
         webViewModel.updateUserScripts(
             webView: sourceWebView,
@@ -1014,8 +2444,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             sourceWebView.configuration.userContentController.userScripts
                 .first(where: { $0.source == source })
         )
-        XCTAssertFalse(installedScript === installedPageScript)
-        XCTAssertNotEqual(coordinator.lastInstalledScriptsSignature, pageSignature)
+        XCTAssertTrue(installedScript.contentWorld.isEqual(isolatedWorld))
     }
 
     func testPendingUserScriptConfigurationPersistsOnExactWebView() {
