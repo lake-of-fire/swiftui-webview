@@ -1163,6 +1163,10 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var backList: [WKBackForwardListItem]
     public internal(set) var forwardList: [WKBackForwardListItem]
     public internal(set) var paginationState: WebViewPaginationState?
+
+    public mutating func markReaderRenderReady() {
+        hasReaderRenderReady = true
+    }
     
     public static let empty = WebViewState(
         isLoading: false,
