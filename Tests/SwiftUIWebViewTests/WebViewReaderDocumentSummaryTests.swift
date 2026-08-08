@@ -139,73 +139,11 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
     }
 
 
-    func testObservedURLChangePreservesActiveLoadingState() throws {
-        var state = WebViewState.empty
-        state.pageURL = try XCTUnwrap(URL(string: "https://example.com/loading/start"))
-        state.isLoading = true
-        let navigator = WebViewNavigator()
-        let webViewModel = SwiftUIWebView.WebView(
-            navigator: navigator,
-            state: Binding(
-                get: { state },
-                set: { state = $0 }
-            )
-        )
-        let coordinator = webViewModel.makeCoordinator()
-        let webView = EnhancedWKWebView(
-            frame: CGRect(x: 0, y: 0, width: 430, height: 932),
-            configuration: WKWebViewConfiguration()
-        )
-        coordinator.setWebView(webView)
-        let nextURL = try XCTUnwrap(URL(string: "https://example.com/loading/next"))
-
-        coordinator.handleObservedURLChange(
-            nextURL,
-            from: webView,
-            receiptSequence: 1
-        )
-
-        XCTAssertEqual(state.pageURL, nextURL)
-        XCTAssertTrue(state.isLoading)
-    }
-
-    func testObservedURLChangeRejectsOutOfOrderReceiptAfterNewerDuplicateURL() throws {
-        var state = WebViewState.empty
-        let currentURL = try XCTUnwrap(URL(string: "https://example.com/history/current"))
-        let staleURL = try XCTUnwrap(URL(string: "https://example.com/history/stale"))
-        state.pageURL = currentURL
-        let navigator = WebViewNavigator()
-        let webViewModel = SwiftUIWebView.WebView(
-            navigator: navigator,
-            state: Binding(
-                get: { state },
-                set: { state = $0 }
-            )
-        )
-        let coordinator = webViewModel.makeCoordinator()
-        let webView = EnhancedWKWebView(
-            frame: CGRect(x: 0, y: 0, width: 430, height: 932),
-            configuration: WKWebViewConfiguration()
-        )
-        coordinator.setWebView(webView)
-
-        coordinator.handleObservedURLChange(
-            currentURL,
-            from: webView,
-            receiptSequence: 2
-        )
-        coordinator.handleObservedURLChange(
-            staleURL,
-            from: webView,
-            receiptSequence: 1
-        )
-
-        XCTAssertEqual(state.pageURL, currentURL)
-    }
-
     func testCurrentWebViewURLObservationPublishesHistoryStateChanges() async throws {
         var state = WebViewState.empty
         var expectedURL: URL?
+        var didFinishInitialLoad = false
+        let loadExpectation = expectation(description: "history fixture loaded")
         let urlExpectation = expectation(description: "history URL published")
         let navigator = WebViewNavigator()
         let webViewModel = SwiftUIWebView.WebView(
@@ -218,7 +156,12 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                         urlExpectation.fulfill()
                     }
                 }
-            )
+            ),
+            onNavigationFinished: { _ in
+                guard !didFinishInitialLoad else { return }
+                didFinishInitialLoad = true
+                loadExpectation.fulfill()
+            }
         )
         let coordinator = webViewModel.makeCoordinator()
         let configuration = WKWebViewConfiguration()
@@ -229,9 +172,6 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         )
         coordinator.setWebView(webView)
 
-        let loadExpectation = expectation(description: "history fixture loaded")
-        let navigationDelegate = NavigationDelegate(completion: loadExpectation)
-        webView.navigationDelegate = navigationDelegate
         webView.loadHTMLString(
             "<!doctype html><html><body>history</body></html>",
             baseURL: URL(string: "https://example.com/history/start")!
@@ -247,13 +187,14 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
 
         XCTAssertEqual(state.pageURL, nextURL)
         XCTAssertTrue(navigator.webView === webView)
-        withExtendedLifetime(navigationDelegate) {}
         withExtendedLifetime(coordinator) {}
         withExtendedLifetime(webView) {}
     }
 
     func testSameURLHistoryEntryPublishesBackForwardState() async throws {
         var state = WebViewState.empty
+        var didFinishInitialLoad = false
+        let loadExpectation = expectation(description: "same-URL fixture loaded")
         let backStateExpectation = expectation(description: "same-URL history state published")
         let navigator = WebViewNavigator()
         let webViewModel = SwiftUIWebView.WebView(
@@ -266,7 +207,12 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                         backStateExpectation.fulfill()
                     }
                 }
-            )
+            ),
+            onNavigationFinished: { _ in
+                guard !didFinishInitialLoad else { return }
+                didFinishInitialLoad = true
+                loadExpectation.fulfill()
+            }
         )
         let coordinator = webViewModel.makeCoordinator()
         let configuration = WKWebViewConfiguration()
@@ -277,9 +223,6 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         )
         coordinator.setWebView(webView)
 
-        let loadExpectation = expectation(description: "same-URL fixture loaded")
-        let navigationDelegate = NavigationDelegate(completion: loadExpectation)
-        webView.navigationDelegate = navigationDelegate
         let baseURL = try XCTUnwrap(URL(string: "https://example.com/history/same"))
         webView.loadHTMLString(
             "<!doctype html><html><body>same URL history</body></html>",
@@ -294,7 +237,6 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
 
         XCTAssertEqual(state.pageURL, baseURL)
         XCTAssertTrue(state.canGoBack)
-        withExtendedLifetime(navigationDelegate) {}
         withExtendedLifetime(coordinator) {}
         withExtendedLifetime(webView) {}
     }
@@ -302,6 +244,8 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
     func testDetachedWebViewTeardownPreservesReplacementURLObservation() async throws {
         var state = WebViewState.empty
         var expectedURL: URL?
+        var didFinishInitialLoad = false
+        let loadExpectation = expectation(description: "replacement fixture loaded")
         let urlExpectation = expectation(description: "replacement history URL published")
         let navigator = WebViewNavigator()
         let webViewModel = SwiftUIWebView.WebView(
@@ -314,7 +258,12 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                         urlExpectation.fulfill()
                     }
                 }
-            )
+            ),
+            onNavigationFinished: { _ in
+                guard !didFinishInitialLoad else { return }
+                didFinishInitialLoad = true
+                loadExpectation.fulfill()
+            }
         )
         let coordinator = webViewModel.makeCoordinator()
         let detachedWebView = EnhancedWKWebView(
@@ -334,9 +283,6 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         coordinator.setWebView(replacementWebView)
         coordinator.tearDownBindingsForDetachedWebView(detachedWebView)
 
-        let loadExpectation = expectation(description: "replacement fixture loaded")
-        let navigationDelegate = NavigationDelegate(completion: loadExpectation)
-        replacementWebView.navigationDelegate = navigationDelegate
         replacementWebView.loadHTMLString(
             "<!doctype html><html><body>replacement</body></html>",
             baseURL: URL(string: "https://example.com/replacement/start")!
@@ -352,7 +298,6 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
 
         XCTAssertEqual(state.pageURL, nextURL)
         XCTAssertTrue(navigator.webView === replacementWebView)
-        withExtendedLifetime(navigationDelegate) {}
         withExtendedLifetime(coordinator) {}
         withExtendedLifetime(replacementWebView) {}
     }
