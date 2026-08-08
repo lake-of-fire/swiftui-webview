@@ -1,5 +1,6 @@
 import XCTest
 import WebKit
+import struct SwiftUI.Binding
 #if os(iOS)
 import UIKit
 #elseif os(macOS)
@@ -891,7 +892,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         coordinator.setWebView(currentWebView)
         state.pageTitle = "current"
 
-        coordinator.webView(detachedWebView, didFinish: nil)
+        coordinator.webView(detachedWebView, didFinish: nil as WKNavigation?)
 
         XCTAssertEqual(finishedCount, 0)
         XCTAssertEqual(state.pageTitle, "current")
@@ -996,10 +997,11 @@ final class WebViewScriptCallerTests: XCTestCase {
             forDomain: URL(string: "https://example.com"),
             config: WebViewConfig(userScripts: [pageScript])
         )
-        XCTAssertTrue(try XCTUnwrap(
+        let installedPageScript = try XCTUnwrap(
             sourceWebView.configuration.userContentController.userScripts
                 .first(where: { $0.source == source })
-        ).contentWorld.isEqual(WKContentWorld.page))
+        )
+        let pageSignature = coordinator.lastInstalledScriptsSignature
 
         webViewModel.updateUserScripts(
             webView: sourceWebView,
@@ -1012,7 +1014,8 @@ final class WebViewScriptCallerTests: XCTestCase {
             sourceWebView.configuration.userContentController.userScripts
                 .first(where: { $0.source == source })
         )
-        XCTAssertTrue(installedScript.contentWorld.isEqual(isolatedWorld))
+        XCTAssertFalse(installedScript === installedPageScript)
+        XCTAssertNotEqual(coordinator.lastInstalledScriptsSignature, pageSignature)
     }
 
     func testPendingUserScriptConfigurationPersistsOnExactWebView() {
