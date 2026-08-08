@@ -2813,15 +2813,15 @@ public class WebViewCoordinator: NSObject {
     private var webViewBindingGate = WebViewMutationGenerationGate()
     private var paginationStateUpdateGate = WebViewMutationGenerationGate()
     private weak var pendingWebViewBindingWebView: WKWebView?
-    private weak var webViewUnloadController: WebViewController?
-    private var webViewUnloadControllerGeneration: UInt64?
-    private var webViewUnloadGate = WebViewUnloadTransactionGate()
     private weak var lastPaginationUpdateWebView: WKWebView?
     private var lastPaginationUpdateConfiguration: WebViewPaginationConfiguration?
     private var lastPaginationUpdateBoundsSize: CGSize?
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
+    private weak var webViewUnloadController: WebViewController?
+    private var webViewUnloadControllerGeneration: UInt64?
+    private var webViewUnloadGate = WebViewUnloadTransactionGate()
     private weak var snapshotHostController: WebViewController?
     internal weak var scrollBottomObservedScrollView: UIScrollView?
     internal var scrollBottomContentSizeObservation: NSKeyValueObservation?
