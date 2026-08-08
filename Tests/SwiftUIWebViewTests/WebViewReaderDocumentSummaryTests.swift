@@ -171,6 +171,13 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
             configuration: configuration
         )
         coordinator.setWebView(webView)
+        webView.navigationDelegate = coordinator
+        webView.uiDelegate = coordinator
+        defer {
+            coordinator.tearDownBindingsForDetachedWebView(webView)
+            webView.navigationDelegate = nil
+            webView.uiDelegate = nil
+        }
 
         webView.loadHTMLString(
             "<!doctype html><html><body>history</body></html>",
@@ -222,6 +229,13 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
             configuration: configuration
         )
         coordinator.setWebView(webView)
+        webView.navigationDelegate = coordinator
+        webView.uiDelegate = coordinator
+        defer {
+            coordinator.tearDownBindingsForDetachedWebView(webView)
+            webView.navigationDelegate = nil
+            webView.uiDelegate = nil
+        }
 
         let baseURL = try XCTUnwrap(URL(string: "https://example.com/history/same"))
         webView.loadHTMLString(
@@ -281,7 +295,14 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         detachedWebView.navigationDelegate = coordinator
         detachedWebView.uiDelegate = coordinator
         coordinator.setWebView(replacementWebView)
+        replacementWebView.navigationDelegate = coordinator
+        replacementWebView.uiDelegate = coordinator
         coordinator.tearDownBindingsForDetachedWebView(detachedWebView)
+        defer {
+            coordinator.tearDownBindingsForDetachedWebView(replacementWebView)
+            replacementWebView.navigationDelegate = nil
+            replacementWebView.uiDelegate = nil
+        }
 
         replacementWebView.loadHTMLString(
             "<!doctype html><html><body>replacement</body></html>",
