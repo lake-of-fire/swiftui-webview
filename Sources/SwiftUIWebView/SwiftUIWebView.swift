@@ -170,6 +170,7 @@ private func clearReaderLoaderCorrelationTimestamps(for urlString: String) {
 #endif
 
 @inline(__always)
+@MainActor
 private func beginPooledContentUnkeyedNavigation(
     _ webView: WKWebView,
     navigation: WKNavigation? = nil
