@@ -3612,7 +3612,9 @@ public class WebViewCoordinator: NSObject {
         invalidateForeignContentRulesApplication(on: webView)
         if previousWebView !== webView {
             _ = navigator.cancelContentRulesBypass(for: previousWebView)
+#if os(iOS)
             cancelPendingWebViewUnload()
+#endif
             invalidatePageStateExtraction()
             cancelContentRulesApplication(ownedBy: previousWebView)
             removeWindowAttachmentCallbackIfOwned(from: previousWebView)
@@ -10280,9 +10282,9 @@ extension WebView {
         let contentRules = normalizedWebViewContentRules(requestedContentRules)
         let appliedContentRules = coordinator.appliedContentRules(for: sourceWebView)
         let cachedRuleList = contentRules.flatMap { coordinator.compiledContentRules[$0] }
-        let pendingContentRules = if contentRules != nil,
-                                     contentRules != appliedContentRules,
-                                     cachedRuleList == nil {
+        let pendingContentRules: String? = if contentRules != nil,
+                                              contentRules != appliedContentRules,
+                                              cachedRuleList == nil {
             contentRules
         } else {
             nil
@@ -10408,22 +10410,13 @@ extension WebView {
             return
         }
         
-        var matchedExistingScripts = [WKUserScript]()
-        if !allScripts.allSatisfy({ newScript in
-            return userContentController.userScripts.contains(where: { existingScript in
-                let expectedWorld = newScript.world ?? .page
-                if newScript.source == existingScript.source
-                    && newScript.injectionTime == existingScript.injectionTime
-                    && newScript.isForMainFrameOnly == existingScript.isForMainFrameOnly
-                    && expectedWorld.isEqual(existingScript.contentWorld) {
-                    matchedExistingScripts.append(existingScript)
-                    return true
-                }
-                return false
-            })
-        }) || userContentController.userScripts.contains(where: { !matchedExistingScripts.contains($0) }) {
+        // WKUserScript exposes its configured content world only through its
+        // initializer. The persisted signature above is therefore the sole
+        // exact comparison. If it differs, replace the complete owned set.
+        if coordinator.lastInstalledScriptsSignature != installedScriptsSignature
+            || coordinator.lastUserScriptsContentController !== userContentController {
             userContentController.removeAllUserScripts()
-            for var script in allScripts {
+            for script in allScripts {
                 userContentController.addUserScript(script.webKitUserScript)
             }
         }
