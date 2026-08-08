@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import WebKit
 @testable import SwiftUIWebView
 
@@ -63,9 +64,10 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         )
 
         await fulfillment(of: [loadExpectation], timeout: 10)
-        let pendingSummary = try XCTUnwrap(
-            try await webView.evaluateJavaScript(webViewReaderDocumentSummaryScript) as? [String: Any]
-        )
+        let pendingSummaryResult = try await webView.evaluateJavaScript(
+            webViewReaderDocumentSummaryScript
+        ) as? [String: Any]
+        let pendingSummary = try XCTUnwrap(pendingSummaryResult)
         XCTAssertEqual(pendingSummary["hasReaderRenderReady"] as? Bool, false)
         XCTAssertEqual(pendingSummary["documentTitle"] as? String, "Reader Summary")
         XCTAssertEqual(
@@ -76,9 +78,10 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         try await webView.evaluateJavaScript(
             "delete document.documentElement.dataset.mnbFontPending"
         )
-        let readySummary = try XCTUnwrap(
-            try await webView.evaluateJavaScript(webViewReaderDocumentSummaryScript) as? [String: Any]
-        )
+        let readySummaryResult = try await webView.evaluateJavaScript(
+            webViewReaderDocumentSummaryScript
+        ) as? [String: Any]
+        let readySummary = try XCTUnwrap(readySummaryResult)
         XCTAssertEqual(readySummary["hasReaderRenderReady"] as? Bool, true)
 
         withExtendedLifetime(navigationDelegate) {}
@@ -111,9 +114,10 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         )
 
         await fulfillment(of: [loadExpectation], timeout: 10)
-        let summary = try XCTUnwrap(
-            try await webView.evaluateJavaScript(webViewReaderDocumentSummaryScript) as? [String: Any]
-        )
+        let summaryResult = try await webView.evaluateJavaScript(
+            webViewReaderDocumentSummaryScript
+        ) as? [String: Any]
+        let summary = try XCTUnwrap(summaryResult)
         XCTAssertEqual(summary["hasReaderRenderReady"] as? Bool, true)
         XCTAssertEqual(summary["readerRenderGeneration"] as? String, generation.uuidString)
 
@@ -140,7 +144,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         state.pageURL = try XCTUnwrap(URL(string: "https://example.com/loading/start"))
         state.isLoading = true
         let navigator = WebViewNavigator()
-        let webViewModel = WebView(
+        let webViewModel = SwiftUIWebView.WebView(
             navigator: navigator,
             state: Binding(
                 get: { state },
@@ -171,7 +175,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         let staleURL = try XCTUnwrap(URL(string: "https://example.com/history/stale"))
         state.pageURL = currentURL
         let navigator = WebViewNavigator()
-        let webViewModel = WebView(
+        let webViewModel = SwiftUIWebView.WebView(
             navigator: navigator,
             state: Binding(
                 get: { state },
@@ -204,7 +208,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         var expectedURL: URL?
         let urlExpectation = expectation(description: "history URL published")
         let navigator = WebViewNavigator()
-        let webViewModel = WebView(
+        let webViewModel = SwiftUIWebView.WebView(
             navigator: navigator,
             state: Binding(
                 get: { state },
@@ -252,7 +256,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         var state = WebViewState.empty
         let backStateExpectation = expectation(description: "same-URL history state published")
         let navigator = WebViewNavigator()
-        let webViewModel = WebView(
+        let webViewModel = SwiftUIWebView.WebView(
             navigator: navigator,
             state: Binding(
                 get: { state },
@@ -300,7 +304,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         var expectedURL: URL?
         let urlExpectation = expectation(description: "replacement history URL published")
         let navigator = WebViewNavigator()
-        let webViewModel = WebView(
+        let webViewModel = SwiftUIWebView.WebView(
             navigator: navigator,
             state: Binding(
                 get: { state },

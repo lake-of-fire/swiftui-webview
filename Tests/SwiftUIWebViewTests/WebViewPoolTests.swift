@@ -250,7 +250,7 @@ final class WebViewPoolTests: XCTestCase {
             weakPrewarmer = prewarmer
             retainedPool = prewarmer?.pool
 
-            var sourceView: WebView? = WebView(
+            var sourceView: SwiftUIWebView.WebView? = SwiftUIWebView.WebView(
                 navigator: navigator!,
                 state: .constant(.empty),
                 webViewPrewarmer: prewarmer
