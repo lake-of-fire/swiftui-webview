@@ -156,6 +156,15 @@ private func clearReaderLoaderCorrelationTimestamps(for urlString: String) {
 #endif
 
 @inline(__always)
+private func beginPooledContentUnkeyedNavigation(
+    _ webView: WKWebView,
+    navigation: WKNavigation? = nil
+) {
+    (webView as? EnhancedWKWebView)?.beginUnkeyedNavigation(
+        navigation: navigation
+    )
+}
+
 private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
     #if os(iOS)
     guard let scene = webView?.window?.windowScene else { return "nil" }
@@ -177,7 +186,7 @@ private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
 }
 
 @inline(__always)
-private func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
+func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     guard let url,
           url.scheme?.lowercased() == "internal",
           url.host?.lowercased() == "local",
@@ -187,10 +196,20 @@ private func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     else {
         return nil
     }
-    if let decoded = readerURLValue.removingPercentEncoding, let resolved = URL(string: decoded) {
+
+    // URLComponents has already decoded the query-item value once. Parse that
+    // value first so escaped reserved characters such as %2F remain part of
+    // the content URL. Decode only as a compatibility fallback for legacy
+    // reader-loader URLs whose value itself was percent-encoded twice.
+    if let resolved = URL(string: readerURLValue), resolved.scheme != nil {
         return resolved
     }
-    return URL(string: readerURLValue)
+    guard let decoded = readerURLValue.removingPercentEncoding,
+          let resolved = URL(string: decoded),
+          resolved.scheme != nil else {
+        return nil
+    }
+    return resolved
 }
 
 @inline(__always)
@@ -1183,21 +1202,42 @@ public struct WebViewState: Equatable, Sendable {
     }
 }
 
+@MainActor
+private enum WebViewMessageReceiptSequencer {
+    private static var nextSequence: UInt64 = 0
+
+    static func reserve() -> UInt64 {
+        nextSequence &+= 1
+        return nextSequence
+    }
+}
+
 public struct WebViewMessage: Equatable, @unchecked Sendable {
     public let frameInfo: WKFrameInfo
     fileprivate let uuid: UUID
     public let name: String
     public let body: Any
+    public let receiptSequence: UInt64?
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
     public let isMainFrame: Bool
     public let requestURL: URL?
     public let mainDocumentURL: URL?
 
     @MainActor
-    public init(frameInfo: WKFrameInfo, uuid: UUID, name: String, body: Any) {
+    public init(
+        frameInfo: WKFrameInfo,
+        uuid: UUID,
+        name: String,
+        body: Any,
+        receiptSequence: UInt64? = nil,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+    ) {
         self.frameInfo = frameInfo
         self.uuid = uuid
         self.name = name
         self.body = body
+        self.receiptSequence = receiptSequence
+        self.javaScriptBindingToken = javaScriptBindingToken
         self.isMainFrame = frameInfo.isMainFrame
         self.requestURL = frameInfo.request.url
         self.mainDocumentURL = frameInfo.request.mainDocumentURL
@@ -1217,6 +1257,8 @@ public struct WebViewNativeLookupHitTarget {
     public let frameInfo: WKFrameInfo?
     public let documentURL: URL?
     public let nativeLookupFrameKey: String?
+    /// Opaque identity of the exact target publication currently stored by the hit-test store.
+    public let nativeLookupPublicationID: UUID?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
     public let debugDistance: CGFloat?
@@ -1233,6 +1275,7 @@ public struct WebViewNativeLookupHitTarget {
         frameInfo: WKFrameInfo? = nil,
         documentURL: URL? = nil,
         nativeLookupFrameKey: String? = nil,
+        nativeLookupPublicationID: UUID? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
         debugDistance: CGFloat? = nil,
@@ -1248,6 +1291,7 @@ public struct WebViewNativeLookupHitTarget {
         self.frameInfo = frameInfo
         self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
+        self.nativeLookupPublicationID = nativeLookupPublicationID
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
         self.debugDistance = debugDistance
@@ -1273,6 +1317,26 @@ public struct WebViewNativeLookupHitTarget {
                 return projectedRect
             }
     }
+
+    fileprivate func withNativeLookupPublicationID(_ publicationID: UUID) -> Self {
+        Self(
+            elementID: elementID,
+            rects: rects,
+            coordinateOriginInWindow: coordinateOriginInWindow,
+            lookupPayload: lookupPayload,
+            frameInfo: frameInfo,
+            documentURL: documentURL,
+            nativeLookupFrameKey: nativeLookupFrameKey,
+            nativeLookupPublicationID: publicationID,
+            debugUsedInflatedHitRect: debugUsedInflatedHitRect,
+            debugHitRects: debugHitRects,
+            debugDistance: debugDistance,
+            debugCenterDistance: debugCenterDistance,
+            debugHitTestPoint: debugHitTestPoint,
+            debugHitTestRebaseX: debugHitTestRebaseX,
+            debugHitTestRebaseY: debugHitTestRebaseY
+        )
+    }
 }
 
 public struct WebViewNativeLookupHit {
@@ -1291,6 +1355,8 @@ public struct WebViewNativeLookupHit {
     public let frameInfo: WKFrameInfo?
     public let documentURL: URL?
     public let nativeLookupFrameKey: String?
+    /// Opaque identity of the exact target publication that produced this hit.
+    public let nativeLookupPublicationID: UUID?
 
     public init(
         elementID: String,
@@ -1307,7 +1373,8 @@ public struct WebViewNativeLookupHit {
         debugHitTestRebaseY: CGFloat? = nil,
         frameInfo: WKFrameInfo? = nil,
         documentURL: URL? = nil,
-        nativeLookupFrameKey: String? = nil
+        nativeLookupFrameKey: String? = nil,
+        nativeLookupPublicationID: UUID? = nil
     ) {
         self.elementID = elementID
         self.point = point
@@ -1324,14 +1391,17 @@ public struct WebViewNativeLookupHit {
         self.frameInfo = frameInfo
         self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
+        self.nativeLookupPublicationID = nativeLookupPublicationID
     }
 }
 
 public final class WebViewNativeLookupHitTestStore {
     private struct Entry {
+        let id: UUID
         let target: WebViewNativeLookupHitTarget
         let rects: [CGRect]
         let hitRects: [CGRect]
+        let publicationSequence: UInt64?
     }
 
     private struct Candidate {
@@ -1350,6 +1420,7 @@ public final class WebViewNativeLookupHitTestStore {
     private let hitSlop: CGFloat
     private var entries: [Entry] = []
     private var nativeTouchElementID: String?
+    private var nativeTouchEntryID: UUID?
     private var suppressUnhandledTapUntil: TimeInterval = 0
     private var webTextSelectionActive = false
 #if DEBUG
@@ -1365,6 +1436,7 @@ public final class WebViewNativeLookupHitTestStore {
     public var onExternalTouchInteractionCancelled: (@MainActor (String) -> Void)?
     public var onSegmentSwipe: (@MainActor (CGFloat, CGFloat) -> Void)?
     public var activeLookupElementID: (@MainActor () -> String?)?
+    public var activeLookupInteractionID: (@MainActor () -> UUID?)?
     public var activeLookupTargetMatches: (@MainActor (WebViewNativeLookupHitTarget) -> Bool)?
     public var activeElementID: String?
     public var showsPressedTargetOverlay = false
@@ -1393,45 +1465,86 @@ public final class WebViewNativeLookupHitTestStore {
     public func updateTargets(
         _ targets: [WebViewNativeLookupHitTarget],
         viewportSize _: CGSize? = nil,
-        viewportOrigin _: CGPoint = .zero
+        viewportOrigin _: CGPoint = .zero,
+        publicationSequence: UInt64? = nil
     ) {
         guard isEnabled else {
             let hadTargets = !entries.isEmpty
             entries.removeAll()
+            reconcileActiveNativeTouchPublication()
             if hadTargets {
                 targetsDidChange()
             }
             return
         }
-        entries = makeEntries(for: targets)
+        entries = makeEntries(
+            for: targets,
+            publicationSequence: publicationSequence
+        )
+        reconcileActiveNativeTouchPublication()
         targetsDidChange()
     }
 
     public func updateTargets(
         _ targets: [WebViewNativeLookupHitTarget],
-        replacingNativeLookupFrameKey frameKey: String
+        replacingNativeLookupFrameKey frameKey: String,
+        publicationSequence: UInt64? = nil
     ) {
         guard isEnabled else {
             let hadTargets = !entries.isEmpty
             entries.removeAll()
+            reconcileActiveNativeTouchPublication()
             if hadTargets {
                 targetsDidChange()
             }
             return
         }
-        let replacementEntries = makeEntries(for: targets)
+        let replacementEntries = makeEntries(
+            for: targets,
+            publicationSequence: publicationSequence
+        )
         entries.removeAll { $0.target.nativeLookupFrameKey == frameKey }
         entries.append(contentsOf: replacementEntries)
+        reconcileActiveNativeTouchPublication()
         targetsDidChange()
     }
 
-    private func makeEntries(for targets: [WebViewNativeLookupHitTarget]) -> [Entry] {
+    /// Removes only publications that were present no later than an out-of-order
+    /// invalidation receipt. Newer child-frame publications remain hit-testable.
+    @discardableResult
+    public func removeTargets(publishedAtOrBefore sequence: UInt64) -> Int {
+        let previousCount = entries.count
+        entries.removeAll { entry in
+            guard let publicationSequence = entry.publicationSequence else {
+                return true
+            }
+            return publicationSequence <= sequence
+        }
+        let removedCount = previousCount - entries.count
+        if removedCount > 0 {
+            reconcileActiveNativeTouchPublication()
+            targetsDidChange()
+        }
+        return removedCount
+    }
+
+    private func makeEntries(
+        for targets: [WebViewNativeLookupHitTarget],
+        publicationSequence: UInt64?
+    ) -> [Entry] {
         targets.compactMap { target in
             let rects = target.rects
                 .filter { !$0.isNull && !$0.isEmpty }
             let hitRects = rects.map { $0.insetBy(dx: -hitSlop, dy: -hitSlop) }
             guard !hitRects.isEmpty else { return nil }
-            return Entry(target: target, rects: rects, hitRects: hitRects)
+            let publicationID = UUID()
+            return Entry(
+                id: publicationID,
+                target: target.withNativeLookupPublicationID(publicationID),
+                rects: rects,
+                hitRects: hitRects,
+                publicationSequence: publicationSequence
+            )
         }
     }
 
@@ -1439,6 +1552,7 @@ public final class WebViewNativeLookupHitTestStore {
         let hadTargets = !entries.isEmpty
         entries.removeAll()
         nativeTouchElementID = nil
+        nativeTouchEntryID = nil
         suppressUnhandledTapUntil = 0
         webTextSelectionActive = false
         if hadTargets {
@@ -1530,6 +1644,16 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     @MainActor
+    func captureActiveLookupInteractionID() -> UUID? {
+        activeLookupInteractionID?()
+    }
+
+    @MainActor
+    func isActiveLookupInteractionCurrent(_ capturedID: UUID?) -> Bool {
+        activeLookupInteractionID?() == capturedID
+    }
+
+    @MainActor
     public func closeActiveLookupFromBlankTap() {
         guard !webTextSelectionActive else { return }
         onActiveLookupBlankTap?()
@@ -1575,7 +1699,52 @@ public final class WebViewNativeLookupHitTestStore {
 
     public func beginNativeTouchStream(on target: WebViewNativeLookupHitTarget) {
         nativeTouchElementID = target.elementID
+        if let publicationID = target.nativeLookupPublicationID {
+            nativeTouchEntryID = isPublicationCurrent(publicationID) ? publicationID : nil
+        } else {
+            // Compatibility for callers that construct targets themselves. A target
+            // emitted by this store always carries its exact publication identity.
+            nativeTouchEntryID = entries.first(where: { entry in
+                entry.target.elementID == target.elementID
+                    && entry.target.nativeLookupFrameKey == target.nativeLookupFrameKey
+                    && entry.target.documentURL == target.documentURL
+                    && entry.target.rects == target.rects
+                    && entry.target.coordinateOriginInWindow == target.coordinateOriginInWindow
+            })?.id
+        }
         suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+    }
+
+    public func isPublicationCurrent(_ publicationID: UUID?) -> Bool {
+        guard let publicationID else { return false }
+        return entries.contains { $0.id == publicationID }
+    }
+
+    var isActiveNativeTouchPublicationCurrent: Bool {
+        guard let nativeTouchEntryID else { return false }
+        return entries.contains { $0.id == nativeTouchEntryID }
+    }
+
+    @MainActor
+    func isCapturedNativeTouchCurrent(
+        _ target: WebViewNativeLookupHitTarget,
+        lookupInteractionID: UUID?
+    ) -> Bool {
+        guard isEnabled,
+              isActiveLookupInteractionCurrent(lookupInteractionID),
+              let publicationID = target.nativeLookupPublicationID,
+              publicationID == nativeTouchEntryID else {
+            return false
+        }
+        return isPublicationCurrent(publicationID)
+    }
+
+    private func reconcileActiveNativeTouchPublication() {
+        guard let nativeTouchEntryID,
+              !entries.contains(where: { $0.id == nativeTouchEntryID }) else {
+            return
+        }
+        self.nativeTouchEntryID = nil
     }
 
     public func finishNativeTouchStream(reason _: String) {
@@ -1583,6 +1752,7 @@ public final class WebViewNativeLookupHitTestStore {
             suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
         }
         nativeTouchElementID = nil
+        nativeTouchEntryID = nil
     }
 
     public func hitTarget(
@@ -1777,6 +1947,7 @@ public final class WebViewNativeLookupHitTestStore {
             frameInfo: candidate.target.frameInfo,
             documentURL: candidate.target.documentURL,
             nativeLookupFrameKey: candidate.target.nativeLookupFrameKey,
+            nativeLookupPublicationID: candidate.target.nativeLookupPublicationID,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
             debugDistance: candidate.distance,
@@ -1932,7 +2103,7 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
-        guard !webTextSelectionActive else { return false }
+        guard isEnabled, !webTextSelectionActive else { return false }
         guard let candidate = bestCandidate(
             at: point,
             usingInflatedRects: false,
@@ -1990,7 +2161,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestRebaseY: target.debugHitTestRebaseY,
             frameInfo: target.frameInfo,
             documentURL: target.documentURL,
-            nativeLookupFrameKey: target.nativeLookupFrameKey
+            nativeLookupFrameKey: target.nativeLookupFrameKey,
+            nativeLookupPublicationID: target.nativeLookupPublicationID
         ))
         return true
     }
@@ -2002,7 +2174,11 @@ public final class WebViewNativeLookupHitTestStore {
         coordinateViewWindowMinY: CGFloat? = nil,
         coordinateViewWindowOrigin: CGPoint? = nil
     ) -> Bool {
-        guard !webTextSelectionActive else { return false }
+        guard isEnabled, !webTextSelectionActive else { return false }
+        if let publicationID = target.nativeLookupPublicationID,
+           !isPublicationCurrent(publicationID) {
+            return false
+        }
         let rebased = rebasedHitTestPoint(
             point,
             containerSize: containerSize,
@@ -2042,7 +2218,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestRebaseY: rebased.rebaseY,
             frameInfo: target.frameInfo,
             documentURL: target.documentURL,
-            nativeLookupFrameKey: target.nativeLookupFrameKey
+            nativeLookupFrameKey: target.nativeLookupFrameKey,
+            nativeLookupPublicationID: target.nativeLookupPublicationID
         ))
         return true
     }
@@ -2435,6 +2612,173 @@ public final class WebViewPaginationController {
     }
 }
 
+internal struct WebViewMutationGenerationGate {
+    private(set) var generation: UInt64 = 0
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+    }
+
+    func accepts(_ generation: UInt64) -> Bool {
+        self.generation == generation
+    }
+}
+
+internal struct WebViewUnloadTransactionGate {
+    private var generation: UInt64 = 0
+    private var activeControllerID: ObjectIdentifier?
+    private var activeWebViewID: ObjectIdentifier?
+
+    mutating func begin(
+        controllerID: ObjectIdentifier,
+        webViewID: ObjectIdentifier
+    ) -> UInt64? {
+        guard activeControllerID == nil, activeWebViewID == nil else { return nil }
+        generation &+= 1
+        activeControllerID = controllerID
+        activeWebViewID = webViewID
+        return generation
+    }
+
+    mutating func cancel() {
+        generation &+= 1
+        activeControllerID = nil
+        activeWebViewID = nil
+    }
+
+    func accepts(
+        _ generation: UInt64,
+        controllerID: ObjectIdentifier,
+        webViewID: ObjectIdentifier
+    ) -> Bool {
+        self.generation == generation
+            && activeControllerID == controllerID
+            && activeWebViewID == webViewID
+    }
+
+    mutating func finish(
+        _ generation: UInt64,
+        controllerID: ObjectIdentifier,
+        webViewID: ObjectIdentifier
+    ) {
+        guard accepts(
+            generation,
+            controllerID: controllerID,
+            webViewID: webViewID
+        ) else { return }
+        activeControllerID = nil
+        activeWebViewID = nil
+    }
+}
+
+internal func normalizedWebViewContentRules(_ contentRules: String?) -> String? {
+    guard let normalized = contentRules?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+          !normalized.isEmpty else {
+        return nil
+    }
+    return normalized
+}
+
+internal struct WebViewContentRulesBypassOwner: Hashable {
+    let webViewID: ObjectIdentifier
+    let navigationID: ObjectIdentifier
+}
+
+internal struct WebViewContentRulesBypassGate {
+    private var pendingOwners: [WebViewContentRulesBypassOwner] = []
+    private var activeOwners: Set<WebViewContentRulesBypassOwner> = []
+
+    func isBypassing(webViewID: ObjectIdentifier) -> Bool {
+        activeOwners.contains(where: { $0.webViewID == webViewID })
+            || pendingOwners.contains(where: { $0.webViewID == webViewID })
+    }
+
+    mutating func register(_ owner: WebViewContentRulesBypassOwner) {
+        pendingOwners.append(owner)
+    }
+
+    mutating func consumeNext(
+        webViewID: ObjectIdentifier
+    ) -> WebViewContentRulesBypassOwner? {
+        guard let index = pendingOwners.firstIndex(where: { $0.webViewID == webViewID }) else {
+            return nil
+        }
+        let owner = pendingOwners.remove(at: index)
+        activeOwners.insert(owner)
+        return owner
+    }
+
+    @discardableResult
+    mutating func finish(_ owner: WebViewContentRulesBypassOwner) -> Bool {
+        if activeOwners.remove(owner) != nil {
+            return true
+        }
+        guard let index = pendingOwners.firstIndex(of: owner) else {
+            return false
+        }
+        pendingOwners.remove(at: index)
+        return true
+    }
+
+    @discardableResult
+    mutating func cancelAll(webViewID: ObjectIdentifier) -> Bool {
+        let pendingCount = pendingOwners.count
+        let activeCount = activeOwners.count
+        pendingOwners.removeAll(where: { $0.webViewID == webViewID })
+        activeOwners = Set(activeOwners.filter { $0.webViewID != webViewID })
+        return pendingOwners.count != pendingCount || activeOwners.count != activeCount
+    }
+}
+
+private final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextSequence: UInt64 = 0
+
+    func reserve() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        nextSequence &+= 1
+        return nextSequence
+    }
+}
+
+internal let webViewReaderDocumentSummaryScript = """
+(function() {
+    const body = document.body;
+    const html = document.documentElement;
+    const bodyStyle = body ? window.getComputedStyle(body) : null;
+    const bodyText = (body?.innerText || "").trim();
+    const bodyHTML = body?.innerHTML || "";
+    return {
+        documentURL: document.URL.toString(),
+        documentTitle: document.title || "",
+        readerRenderGeneration:
+            html?.dataset?.mnbReaderRenderGeneration
+            ?? body?.dataset?.mnbReaderRenderGeneration
+            ?? null,
+        readyState: document.readyState,
+        bodyChildElementCount: body?.childElementCount || 0,
+        bodyTextLength: bodyText.length,
+        bodyHTMLLength: bodyHTML.length,
+        hasReaderRenderReady:
+            (html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
+            && !!document.getElementById("reader-content")
+            && (html?.dataset?.mnbFontPending ?? null) !== '1'
+            && bodyStyle?.visibility !== 'hidden'
+            && bodyStyle?.display !== 'none'
+            && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
+        hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
+        titleLength: (document.title || "").length
+    };
+})();
+"""
+
 @MainActor
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
@@ -2446,14 +2790,12 @@ public class WebViewCoordinator: NSObject {
     var config: WebViewConfig
     var lifecycleConfig: WebViewLifecycleConfig = .default
     weak var webViewPool: WebViewPool?
-    var registeredMessageHandlerNames = Set<String>()
-    weak var lastUserContentController: WKUserContentController?
     weak var lastUserScriptsContentController: WKUserContentController?
     var lastInstalledScriptsSignature: String?
     var compiledContentRules = [String: WKContentRuleList]()
-    var lastAppliedContentRules: String?
-    var shouldReapplyContentRulesAfterLoad = false
     private var urlObservation: NSKeyValueObservation?
+    private let urlPublicationReceiptSequencer = WebViewURLPublicationReceiptSequencer()
+    private var latestURLPublicationReceiptSequence: UInt64 = 0
     private var estimatedProgressObservation: NSKeyValueObservation?
     private var isLoadingObservation: NSKeyValueObservation?
 #if os(iOS)
@@ -2467,6 +2809,13 @@ public class WebViewCoordinator: NSObject {
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
     private var paginationApplyGeneration: UInt64 = 0
+    private var pageStateExtractionGate = WebViewMutationGenerationGate()
+    private var webViewBindingGate = WebViewMutationGenerationGate()
+    private var paginationStateUpdateGate = WebViewMutationGenerationGate()
+    private weak var pendingWebViewBindingWebView: WKWebView?
+    private weak var webViewUnloadController: WebViewController?
+    private var webViewUnloadControllerGeneration: UInt64?
+    private var webViewUnloadGate = WebViewUnloadTransactionGate()
     private weak var lastPaginationUpdateWebView: WKWebView?
     private var lastPaginationUpdateConfiguration: WebViewPaginationConfiguration?
     private var lastPaginationUpdateBoundsSize: CGSize?
@@ -2501,7 +2850,6 @@ public class WebViewCoordinator: NSObject {
     internal var accumulatedScrollOffset: CGFloat = 0
     internal var navigationScrollAxis: NavigationScrollAxis = .vertical
     internal var horizontalForwardSign: CGFloat = 1
-    internal var lastEnvHandlerNames: OrderedSet<String>? = nil
     public let paginationController = WebViewPaginationController()
     
     var onNavigationCommitted: ((WebViewState) -> Void)?
@@ -2551,36 +2899,87 @@ public class WebViewCoordinator: NSObject {
         guard let pool = webViewPool else { return }
         guard !controller.isWebViewUnloaded else { return }
 
-        Task { @MainActor in
-            logLookupPerf("webview.unload.start url=\(controller.webView.url?.absoluteString ?? "<nil>")")
-            let metrics = controller.snapshotSizeMetrics()
-            logLookupPerf(
+        let sourceWebView = controller.webView
+        let controllerID = ObjectIdentifier(controller)
+        let webViewID = ObjectIdentifier(sourceWebView)
+        guard let unloadGeneration = webViewUnloadGate.begin(
+            controllerID: controllerID,
+            webViewID: webViewID
+        ) else { return }
+        webViewUnloadController = controller
+        webViewUnloadControllerGeneration = unloadGeneration
+        let snapshotCacheKey = lifecycleConfig.snapshotCacheKey
+        let resetURL = lifecycleConfig.idleLoadURL
+
+        Task { @MainActor [weak self, weak controller, weak pool, sourceWebView] in
+            guard let self else { return }
+            defer {
+                self.webViewUnloadGate.finish(
+                    unloadGeneration,
+                    controllerID: controllerID,
+                    webViewID: webViewID
+                )
+                if self.webViewUnloadControllerGeneration == unloadGeneration {
+                    self.webViewUnloadController = nil
+                    self.webViewUnloadControllerGeneration = nil
+                }
+            }
+            guard let controller, let pool else { return }
+            guard self.webViewUnloadGate.accepts(
+                unloadGeneration,
+                controllerID: controllerID,
+                webViewID: webViewID
+            ), controller.webView === sourceWebView,
+               !controller.isWebViewUnloaded else {
+                return
+            }
+
+            self.logLookupPerf("webview.unload.start url=\(sourceWebView.url?.absoluteString ?? "<nil>")")
+            let metrics = controller.snapshotSizeMetrics(for: sourceWebView)
+            self.logLookupPerf(
                 "webview.unload.snapshot.prepare current=\(metrics.current) lastKnown=\(metrics.lastKnown) override=\(metrics.shouldOverride)"
             )
-            let snapshot = await controller.captureSnapshot()
+            let snapshot = await controller.captureSnapshot(of: sourceWebView)
+            guard self.webViewUnloadGate.accepts(
+                unloadGeneration,
+                controllerID: controllerID,
+                webViewID: webViewID
+            ), controller.webView === sourceWebView,
+               !controller.isWebViewUnloaded else {
+                return
+            }
+
             if let snapshot {
                 let size = snapshot.size
-                logLookupPerf("webview.unload.snapshot.captured size=\(size)")
+                self.logLookupPerf("webview.unload.snapshot.captured size=\(size)")
                 if size.width > 2, size.height > 2 {
                     controller.showSnapshotOverlay(snapshot)
-                    logLookupPerf("webview.unload.snapshot.overlay.shown")
-                    snapshotHostController = controller
-                    if let cacheKey = lifecycleConfig.snapshotCacheKey {
-                        WebViewSnapshotCache.storeSnapshot(snapshot, height: size.height, for: cacheKey)
-                        logLookupPerf(
-                            "webview.unload.snapshot.cached widthBucket=\(cacheKey.widthBucket) htmlLength=\(cacheKey.htmlLength) height=\(size.height)"
+                    self.logLookupPerf("webview.unload.snapshot.overlay.shown")
+                    self.snapshotHostController = controller
+                    if let snapshotCacheKey {
+                        WebViewSnapshotCache.storeSnapshot(snapshot, height: size.height, for: snapshotCacheKey)
+                        self.logLookupPerf(
+                            "webview.unload.snapshot.cached widthBucket=\(snapshotCacheKey.widthBucket) htmlLength=\(snapshotCacheKey.htmlLength) height=\(size.height)"
                         )
                     }
                 } else {
-                    logLookupPerf("webview.unload.snapshot.skipped size=\(size)")
+                    self.logLookupPerf("webview.unload.snapshot.skipped size=\(size)")
                 }
             }
-            tearDownBindingsForDetachedWebView(controller.webView)
+            self.tearDownBindingsForDetachedWebView(sourceWebView)
             controller.detachWebView()
-            pool.enqueue(controller.webView, resetURL: lifecycleConfig.idleLoadURL)
+            pool.enqueue(sourceWebView, resetURL: resetURL)
             controller.isWebViewUnloaded = true
-            logLookupPerf("webview.unload.enqueued")
+            self.logLookupPerf("webview.unload.enqueued")
         }
+    }
+
+    @MainActor
+    func cancelPendingWebViewUnload() {
+        webViewUnloadController?.cancelPendingSnapshotBoundsAdjustment()
+        webViewUnloadController = nil
+        webViewUnloadControllerGeneration = nil
+        webViewUnloadGate.cancel()
     }
 
     @MainActor
@@ -2690,6 +3089,254 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
+    private func invalidatePageStateExtraction() {
+        pageStateExtractionGate.invalidate()
+    }
+
+    @MainActor
+    private func beginPageStateExtraction() -> UInt64 {
+        pageStateExtractionGate.begin()
+    }
+
+    @MainActor
+    private func isCurrentPageStateExtraction(
+        _ generation: UInt64,
+        from sourceWebView: WKWebView
+    ) -> Bool {
+        pageStateExtractionGate.accepts(generation)
+            && ownsWebView(sourceWebView)
+    }
+
+    @MainActor
+    private func ownsWebView(_ sourceWebView: WKWebView) -> Bool {
+        navigator.ownsBoundWebView(sourceWebView)
+    }
+
+    @MainActor
+    private func ownsOrIsBindingWebView(_ sourceWebView: WKWebView) -> Bool {
+        ownsWebView(sourceWebView) || pendingWebViewBindingWebView === sourceWebView
+    }
+
+    @MainActor
+    internal func admitsScriptMessage(
+        from sourceWebView: WKWebView?,
+        userContentController: WKUserContentController
+    ) -> Bool {
+        guard let sourceWebView else { return false }
+        return ownsWebView(sourceWebView)
+            && sourceWebView.configuration.userContentController === userContentController
+            && (sourceWebView as? EnhancedWKWebView)?.persistedMessageHandlerOwner === self
+    }
+
+    @MainActor
+    internal func appliedContentRules(for sourceWebView: WKWebView) -> String? {
+        guard let sourceWebView = sourceWebView as? EnhancedWKWebView else {
+            return nil
+        }
+        return normalizedWebViewContentRules(
+            sourceWebView.persistedAppliedContentRules
+        )
+    }
+
+    @MainActor
+    internal func needsContentRulesApplication(
+        _ requestedContentRules: String?,
+        for sourceWebView: WKWebView
+    ) -> Bool {
+        let normalizedRequestedContentRules = normalizedWebViewContentRules(
+            requestedContentRules
+        )
+        if let sourceWebView = sourceWebView as? EnhancedWKWebView,
+           let applicationOwner = sourceWebView.persistedContentRulesApplicationOwner {
+            guard applicationOwner === self else { return true }
+            if let pendingContentRules = sourceWebView.persistedPendingContentRules {
+                return pendingContentRules != normalizedRequestedContentRules
+            }
+        }
+        return appliedContentRules(for: sourceWebView)
+            != normalizedRequestedContentRules
+    }
+
+    @MainActor
+    internal func recordAppliedContentRules(
+        _ contentRules: String?,
+        for sourceWebView: WKWebView
+    ) {
+        guard let sourceWebView = sourceWebView as? EnhancedWKWebView else {
+            return
+        }
+        sourceWebView.persistedAppliedContentRules = normalizedWebViewContentRules(
+            contentRules
+        )
+    }
+
+    @MainActor
+    internal func applyConfiguredContentRulesIfNeeded(on sourceWebView: WKWebView) {
+        guard needsContentRulesApplication(
+            config.contentRules,
+            for: sourceWebView
+        ) else { return }
+        webView.refreshContentRules(
+            webView: sourceWebView,
+            coordinator: self,
+            contentRules: config.contentRules
+        )
+    }
+
+    @MainActor
+    internal func reconcileMessageHandlers(
+        on sourceWebView: EnhancedWKWebView,
+        requiredHandlers: Set<String>,
+        environmentHandlerNames: OrderedSet<String>
+    ) {
+        let userContentController = sourceWebView.configuration.userContentController
+        var registeredHandlers = sourceWebView.persistedMessageHandlerNames
+
+        if sourceWebView.persistedMessageHandlerOwner !== self {
+            for messageHandlerName in registeredHandlers {
+                userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+                userContentController.removeScriptMessageHandler(
+                    forName: messageHandlerName,
+                    contentWorld: .page
+                )
+            }
+            registeredHandlers.removeAll()
+        } else if sourceWebView.persistedEnvironmentMessageHandlerNames == environmentHandlerNames,
+                  registeredHandlers == requiredHandlers {
+            return
+        }
+
+        for messageHandlerName in requiredHandlers.subtracting(registeredHandlers) {
+            // A pooled WebView may still contain a handler installed by an older coordinator.
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+            userContentController.removeScriptMessageHandler(
+                forName: messageHandlerName,
+                contentWorld: .page
+            )
+            userContentController.add(
+                self,
+                contentWorld: .page,
+                name: messageHandlerName
+            )
+        }
+
+        for messageHandlerName in registeredHandlers.subtracting(requiredHandlers) {
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName)
+            userContentController.removeScriptMessageHandler(
+                forName: messageHandlerName,
+                contentWorld: .page
+            )
+        }
+
+        sourceWebView.persistedMessageHandlerNames = requiredHandlers
+        sourceWebView.persistedEnvironmentMessageHandlerNames = environmentHandlerNames
+        sourceWebView.persistedMessageHandlerOwner = self
+    }
+
+    @MainActor
+    private func cancelPendingPaginationStateUpdate() {
+        paginationStateUpdateGate.invalidate()
+        pendingPaginationStateTask?.cancel()
+        pendingPaginationStateTask = nil
+    }
+
+    @MainActor
+    private func cancelPendingWebViewBinding(ownedBy webView: WKWebView? = nil) {
+        if let webView, pendingWebViewBindingWebView !== webView {
+            return
+        }
+        let cancelledPendingWebView = pendingWebViewBindingWebView
+        webViewBindingGate.invalidate()
+        pendingWebViewBindingTask?.cancel()
+        pendingWebViewBindingTask = nil
+        pendingWebViewBindingWebView = nil
+        if let cancelledPendingWebView,
+           navigator.webView !== cancelledPendingWebView {
+            cancelContentRulesApplication(ownedBy: cancelledPendingWebView)
+        }
+    }
+
+    @MainActor
+    func beginContentRulesApplication(
+        for webView: WKWebView,
+        pendingContentRules: String? = nil
+    ) -> UInt64? {
+        guard ownsOrIsBindingWebView(webView),
+              let webView = webView as? EnhancedWKWebView else {
+            return nil
+        }
+        let normalizedPendingContentRules = normalizedWebViewContentRules(
+            pendingContentRules
+        )
+        if let normalizedPendingContentRules,
+           webView.persistedContentRulesApplicationOwner === self,
+           webView.persistedPendingContentRules == normalizedPendingContentRules {
+            return nil
+        }
+        webView.persistedContentRulesApplicationGeneration &+= 1
+        webView.persistedContentRulesApplicationOwner = self
+        webView.persistedPendingContentRules = normalizedPendingContentRules
+        return webView.persistedContentRulesApplicationGeneration
+    }
+
+    @MainActor
+    func acceptsContentRulesApplication(
+        _ generation: UInt64,
+        for webView: WKWebView
+    ) -> Bool {
+        guard ownsOrIsBindingWebView(webView),
+              let webView = webView as? EnhancedWKWebView else {
+            return false
+        }
+        return generation != 0
+            && webView.persistedContentRulesApplicationOwner === self
+            && webView.persistedContentRulesApplicationGeneration == generation
+    }
+
+    @MainActor
+    func finishContentRulesApplication(
+        _ generation: UInt64,
+        for webView: WKWebView
+    ) {
+        guard acceptsContentRulesApplication(generation, for: webView),
+              let webView = webView as? EnhancedWKWebView else {
+            return
+        }
+        webView.persistedPendingContentRules = nil
+        webView.persistedContentRulesApplicationOwner = nil
+    }
+
+    @MainActor
+    private func invalidateContentRulesApplication(
+        on webView: EnhancedWKWebView
+    ) {
+        webView.persistedContentRulesApplicationGeneration &+= 1
+        webView.persistedPendingContentRules = nil
+        webView.persistedContentRulesApplicationOwner = nil
+    }
+
+    @MainActor
+    private func cancelContentRulesApplication(ownedBy webView: WKWebView?) {
+        guard let webView = webView as? EnhancedWKWebView,
+              webView.persistedContentRulesApplicationOwner === self else {
+            return
+        }
+        invalidateContentRulesApplication(on: webView)
+    }
+
+    @MainActor
+    private func invalidateForeignContentRulesApplication(
+        on webView: WKWebView
+    ) {
+        guard let webView = webView as? EnhancedWKWebView,
+              let owner = webView.persistedContentRulesApplicationOwner,
+              owner !== self else {
+            return
+        }
+        invalidateContentRulesApplication(on: webView)
+    }
+
+    @MainActor
     private func invalidateWebViewObservations() {
         urlObservation?.invalidate()
         urlObservation = nil
@@ -2717,10 +3364,7 @@ public class WebViewCoordinator: NSObject {
         lastPaginationUpdateWebView = nil
         lastPaginationUpdateConfiguration = nil
         lastPaginationUpdateBoundsSize = nil
-        pendingPaginationStateTask?.cancel()
-        pendingPaginationStateTask = nil
-        pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = nil
+        cancelPendingPaginationStateUpdate()
         lastEmittedProgress = nil
         lastProgressUpdateTime = 0
     }
@@ -2744,6 +3388,21 @@ public class WebViewCoordinator: NSObject {
         return scriptCaller?.isBindingOwned(by: scriptCallerBindingOwnerID) == true
     }
 
+    /// Returns a receipt-time token only when the script message came from the
+    /// exact WebView currently owned by this coordinator's caller binding.
+    @MainActor
+    func javaScriptBindingToken(
+        for sourceWebView: WKWebView?
+    ) -> WebViewScriptCaller.JavaScriptBindingToken? {
+        guard let sourceWebView,
+              scriptCallerBoundWebView === sourceWebView,
+              let scriptCaller,
+              scriptCaller.isBindingOwned(by: scriptCallerBindingOwnerID) else {
+            return nil
+        }
+        return scriptCaller.currentJavaScriptBindingToken
+    }
+
     @MainActor
     func installScriptCallerBinding(
         for webView: WKWebView,
@@ -2764,61 +3423,145 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
-    private func removeMessageHandlers(for webView: WKWebView?) {
-        guard let userContentController = webView?.configuration.userContentController else {
-            registeredMessageHandlerNames.removeAll()
-            lastEnvHandlerNames = nil
-            lastUserContentController = nil
-            return
-        }
-        for messageHandlerName in registeredMessageHandlerNames {
+    fileprivate func removeTrackedMessageHandlers(from webView: WKWebView) {
+        guard let webView = webView as? EnhancedWKWebView,
+              webView.persistedMessageHandlerOwner === self else { return }
+        let userContentController = webView.configuration.userContentController
+        for messageHandlerName in webView.persistedMessageHandlerNames {
             userContentController.removeScriptMessageHandler(forName: messageHandlerName)
-            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
+            userContentController.removeScriptMessageHandler(
+                forName: messageHandlerName,
+                contentWorld: .page
+            )
         }
-        registeredMessageHandlerNames.removeAll()
-        lastEnvHandlerNames = nil
-        lastUserContentController = nil
+        webView.persistedMessageHandlerNames.removeAll()
+        webView.persistedEnvironmentMessageHandlerNames = nil
+        webView.persistedMessageHandlerOwner = nil
     }
 
     @MainActor
-    func tearDownBindingsForDetachedWebView(_ webView: WKWebView?) {
-        pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = nil
-        removeMessageHandlers(for: webView)
-        lastUserScriptsContentController = nil
-        lastInstalledScriptsSignature = nil
-        if navigator.webView === webView {
-            navigator.webView = nil
+    private func removeWindowAttachmentCallbackIfOwned(from webView: WKWebView?) {
+        guard let webView = webView as? EnhancedWKWebView,
+              webView.persistedWindowAttachmentCallbackOwner === self else {
+            return
         }
-        clearScriptCallerBinding()
+        webView.onDidMoveToWindow = nil
+        webView.persistedWindowAttachmentCallbackOwner = nil
+    }
+
+    @MainActor
+    private func installWindowAttachmentCallback(on webView: WKWebView) {
+        guard let webView = webView as? EnhancedWKWebView else { return }
+        webView.persistedWindowAttachmentCallbackOwner = self
+        webView.onDidMoveToWindow = { [weak self, weak webView] _ in
+            Task { @MainActor [weak self, weak webView] in
+                guard let self,
+                      let webView,
+                      webView.persistedWindowAttachmentCallbackOwner === self,
+                      self.navigator.ownsBoundWebView(webView) else {
+                    return
+                }
+                self.navigator.handleWindowAttachmentChanged(webView: webView)
+            }
+        }
+    }
+
+    @MainActor
+    func tearDownBindingsForDetachedWebView(_ webView: WKWebView) {
+        let ownsWebView = navigator.ownsBoundWebView(webView)
+        let ownsPendingBinding = pendingWebViewBindingWebView === webView
+        let ownsScriptBinding = scriptCallerBoundWebView === webView
+        let userContentController = webView.configuration.userContentController
+        let ownsMessageHandlers = (webView as? EnhancedWKWebView)?
+            .persistedMessageHandlerOwner === self
+        let ownsUserScripts = lastUserScriptsContentController === userContentController
+        let ownsAttachmentCallback = (webView as? EnhancedWKWebView)?
+            .persistedWindowAttachmentCallbackOwner === self
+
+        if webView.navigationDelegate === self {
+            webView.navigationDelegate = nil
+        }
+        if webView.uiDelegate === self {
+            webView.uiDelegate = nil
+        }
+#if os(iOS)
+        if webView.scrollView.delegate === self {
+            webView.scrollView.delegate = nil
+        }
+#endif
+        if ownsAttachmentCallback {
+            removeWindowAttachmentCallbackIfOwned(from: webView)
+        }
+        if ownsMessageHandlers {
+            removeTrackedMessageHandlers(from: webView)
+        }
+        if ownsUserScripts {
+            lastUserScriptsContentController = nil
+            lastInstalledScriptsSignature = nil
+        }
+        if ownsScriptBinding {
+            clearScriptCallerBinding()
+        }
+        if ownsPendingBinding {
+            cancelPendingWebViewBinding(ownedBy: webView)
+        }
+        cancelContentRulesApplication(ownedBy: webView)
+        guard ownsWebView else { return }
+
+        invalidatePageStateExtraction()
+        navigator.releaseWebViewIfOwned(webView, reason: "coordinatorDetached")
         invalidateWebViewObservations()
         schedulePaginationStateUpdate(paginationController.detach())
     }
 
     @MainActor
     private func schedulePaginationStateUpdate(_ paginationState: WebViewPaginationState) {
-        pendingPaginationStateTask?.cancel()
+        cancelPendingPaginationStateUpdate()
+        let generation = paginationStateUpdateGate.begin()
         pendingPaginationStateTask = Task { @MainActor [weak self] in
             await Task.yield()
-            guard let self else { return }
+            guard let self,
+                  !Task.isCancelled,
+                  self.paginationStateUpdateGate.accepts(generation) else {
+                return
+            }
             var newState = self.webView.state
             newState.paginationState = paginationState.applying(self.navigator.paginationStateEnrichment)
             if newState != self.webView.state {
                 self.webView.state = newState
             }
-            self.pendingPaginationStateTask = nil
+            if self.paginationStateUpdateGate.accepts(generation) {
+                self.pendingPaginationStateTask = nil
+            }
         }
     }
 
     @MainActor
     func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) {
-        pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = Task { @MainActor [weak self] in
+        cancelPendingWebViewBinding()
+        let generation = webViewBindingGate.begin()
+        pendingWebViewBindingWebView = webView
+        pendingWebViewBindingTask = Task { @MainActor [weak self, weak webView] in
             await Task.yield()
             guard let self else { return }
+            defer {
+                if self.webViewBindingGate.accepts(generation) {
+                    self.pendingWebViewBindingTask = nil
+                    self.pendingWebViewBindingWebView = nil
+                }
+            }
+            guard let webView,
+                  !Task.isCancelled,
+                  self.webViewBindingGate.accepts(generation),
+                  self.pendingWebViewBindingWebView === webView else {
+                return
+            }
             self.setWebView(webView)
+            guard self.webViewBindingGate.accepts(generation),
+                  self.pendingWebViewBindingWebView === webView else {
+                return
+            }
             self.applyPaginationConfigurationIfNeeded(reason: paginationReason)
-            self.pendingWebViewBindingTask = nil
         }
     }
 
@@ -2865,46 +3608,66 @@ public class WebViewCoordinator: NSObject {
     
     @MainActor
     func setWebView(_ webView: WKWebView) {
-        navigator.webView = webView
-        (webView as? EnhancedWKWebView)?.onDidMoveToWindow = { [weak navigator, weak webView] isAttached in
-            guard let navigator, let webView else { return }
-            Task { @MainActor in
-                navigator.handleWindowAttachmentChanged(isAttached: isAttached, webView: webView)
-            }
+        let previousWebView = navigator.webView
+        invalidateForeignContentRulesApplication(on: webView)
+        if previousWebView !== webView {
+            _ = navigator.cancelContentRulesBypass(for: previousWebView)
+            cancelPendingWebViewUnload()
+            invalidatePageStateExtraction()
+            cancelContentRulesApplication(ownedBy: previousWebView)
+            removeWindowAttachmentCallbackIfOwned(from: previousWebView)
         }
-        schedulePaginationStateUpdate(paginationController.attach(webView: webView))
-        navigator.handleWindowAttachmentChanged(isAttached: webView.window != nil || webView.superview != nil, webView: webView)
+        if let pendingWebViewBindingWebView,
+           pendingWebViewBindingWebView !== webView {
+            cancelPendingWebViewBinding()
+        }
 
         invalidateWebViewObservations()
+        navigator.claimWebView(webView)
+        installWindowAttachmentCallback(on: webView)
+        schedulePaginationStateUpdate(paginationController.attach(webView: webView))
+        navigator.handleWindowAttachmentChanged(webView: webView)
 
         urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, change in
-            guard let self else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard let maybeNewURL = change.newValue, let newURL = maybeNewURL, newURL != webView.url else { return }
-                _ = setLoading(
-                    false,
-                    pageURL: newURL,
-                    canGoBack: webView.canGoBack,
-                    canGoForward: webView.canGoForward,
-                    backList: webView.backForwardList.backList,
-                    forwardList: webView.backForwardList.forwardList)
+            guard let self,
+                  let maybeNewURL = change.newValue,
+                  let newURL = maybeNewURL else {
+                return
+            }
+            let receiptSequence = self.urlPublicationReceiptSequencer.reserve()
+            Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.handleObservedURLChange(
+                    newURL,
+                    from: webView,
+                    receiptSequence: receiptSequence
+                )
             }
         }
 
         estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
             guard let progress = change.newValue else { return }
-            Task { @MainActor [weak self] in
-                self?.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+            Task { @MainActor [weak self, weak webView] in
+                guard let self,
+                      let webView,
+                      self.ownsWebView(webView) else {
+                    return
+                }
+                self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
             }
         }
 
         isLoadingObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
             guard let isLoading = change.newValue else { return }
-            Task { @MainActor [weak self] in
-                self?.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
+            Task { @MainActor [weak self, weak webView] in
+                guard let self,
+                      let webView,
+                      self.ownsWebView(webView) else {
+                    return
+                }
+                self.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
             }
         }
 
@@ -2916,7 +3679,11 @@ public class WebViewCoordinator: NSObject {
                 keyPath: "_sampl\("edPageTopC")olor"
             ) { [weak self, weak webView] observedColor in
                 Task { @MainActor [weak self, weak webView] in
-                    guard let self, let webView else { return }
+                    guard let self,
+                          let webView,
+                          self.ownsWebView(webView) else {
+                        return
+                    }
                     if #available(iOS 15.0, *) {
                         self.applySampledPageTopColorChange(
                             webView: webView,
@@ -2973,6 +3740,40 @@ public class WebViewCoordinator: NSObject {
                 ]
             )
         }
+    }
+
+    @MainActor
+    internal func handleObservedURLChange(
+        _ newURL: URL,
+        from sourceWebView: WKWebView,
+        receiptSequence: UInt64
+    ) {
+        guard ownsWebView(sourceWebView),
+              receiptSequence > latestURLPublicationReceiptSequence else {
+            return
+        }
+        latestURLPublicationReceiptSequence = receiptSequence
+        let currentState = webView.state
+        let resolvedIsLoading = currentState.isLoading || sourceWebView.isLoading
+        let backList = sourceWebView.backForwardList.backList
+        let forwardList = sourceWebView.backForwardList.forwardList
+        guard currentState.pageURL != newURL
+                || currentState.isLoading != resolvedIsLoading
+                || currentState.canGoBack != sourceWebView.canGoBack
+                || currentState.canGoForward != sourceWebView.canGoForward
+                || currentState.backList != backList
+                || currentState.forwardList != forwardList else {
+            return
+        }
+
+        _ = setLoading(
+            resolvedIsLoading,
+            pageURL: newURL,
+            canGoBack: sourceWebView.canGoBack,
+            canGoForward: sourceWebView.canGoForward,
+            backList: backList,
+            forwardList: forwardList
+        )
     }
 
     @MainActor
@@ -3141,48 +3942,44 @@ public class WebViewCoordinator: NSObject {
 
 extension WebViewCoordinator: WKScriptMessageHandler {
     public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let sourceWebView = message.webView,
+              admitsScriptMessage(
+                from: sourceWebView,
+                userContentController: userContentController
+              ) else { return }
+
         if message.name == "swiftUIWebViewBackgroundStatus", let hasBackground = message.body as? Bool {
             webView.drawsBackground = !hasBackground
             return
         } else if message.name == "swiftUIWebViewLocationChanged" {
             guard let urlString = message.body as? String,
-                  let newURL = URL(string: urlString),
-                  let wk = navigator.webView else { return }
-            
-            Task { @MainActor in
-                _ = setLoading(
-                    webView.state.isLoading,
-                    pageURL: newURL,
-                    canGoBack: wk.canGoBack,
-                    canGoForward: wk.canGoForward,
-                    backList: wk.backForwardList.backList,
-                    forwardList: wk.backForwardList.forwardList
-                )
-            }
+                  let newURL = URL(string: urlString) else { return }
+            handleObservedURLChange(
+                newURL,
+                from: sourceWebView,
+                receiptSequence: urlPublicationReceiptSequencer.reserve()
+            )
             return
         } else if message.name == "swiftUIWebViewImageUpdated" {
-            guard let body = message.body as? [String: Any] else { return }
-            if let imageURLRaw = body["imageURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
-                Task { @MainActor in
-                    guard webView.state.pageURL == url else { return }
-                    var newState = webView.state
-                    newState.pageImageURL = imageURL
-                    let targetState = newState
-                    //                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
-                    webView.state = targetState
-                }
-            }
+            guard let body = message.body as? [String: Any],
+                  let imageURLRaw = body["imageURL"] as? String,
+                  let urlRaw = body["url"] as? String,
+                  let url = URL(string: urlRaw),
+                  let imageURL = URL(string: imageURLRaw),
+                  url == webView.state.pageURL else { return }
+            var newState = webView.state
+            newState.pageImageURL = imageURL
+            webView.state = newState
         } else if message.name == "swiftUIWebViewPageIconUpdated" {
-            guard let body = message.body as? [String: Any] else { return }
-            if let imageURLRaw = body["pageIconURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
-                Task { @MainActor in
-                    guard webView.state.pageURL == url else { return }
-                    var newState = webView.state
-                    newState.pageIconURL = imageURL
-                    let targetState = newState
-                    webView.state = targetState
-                }
-            }
+            guard let body = message.body as? [String: Any],
+                  let imageURLRaw = body["pageIconURL"] as? String,
+                  let urlRaw = body["url"] as? String,
+                  let url = URL(string: urlRaw),
+                  let imageURL = URL(string: imageURLRaw),
+                  url == webView.state.pageURL else { return }
+            var newState = webView.state
+            newState.pageIconURL = imageURL
+            webView.state = newState
         } else if message.name == "swiftUIWebViewUnhandledTap" {
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
             let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
@@ -3246,14 +4043,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 return
             }
             textSelection.wrappedValue = text
-        } else if message.name == "readerDocState" {
-            guard let body = message.body as? [String: Any] else { return }
-            if let hasReaderRenderReady = body["hasReaderRenderReady"] as? Bool,
-               webView.state.hasReaderRenderReady != hasReaderRenderReady {
-                var newState = webView.state
-                newState.hasReaderRenderReady = hasReaderRenderReady
-                webView.state = newState
-            }
         } else if message.name == "swiftUIWebViewPaginationReadback" {
             guard let body = message.body as? [String: Any] else { return }
             let refreshedState = try? paginationController.refreshReadback(reason: "runtime-pagination-readback")
@@ -3278,7 +4067,14 @@ extension WebViewCoordinator: WKScriptMessageHandler {
          }*/
         
         guard let messageHandler = messageHandlers.handlers[message.name] else { return }
-        let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
+        let message = WebViewMessage(
+            frameInfo: message.frameInfo,
+            uuid: UUID(),
+            name: message.name,
+            body: message.body,
+            receiptSequence: WebViewMessageReceiptSequencer.reserve(),
+            javaScriptBindingToken: javaScriptBindingToken(for: message.webView)
+        )
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
         Task {
             await messageHandler(message)
@@ -3290,11 +4086,17 @@ extension WebViewCoordinator: WKUIDelegate {
     /// Suppress `target=_blank` and load in same view
     /// See: https://nemecek.be/blog/1/how-to-open-target_blank-links-in-wkwebview-in-ios
     public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard ownsWebView(webView) else { return nil }
         if let frame = navigationAction.targetFrame,
            frame.isMainFrame {
             return nil
         }
-        webView.load(navigationAction.request)
+        navigator.performUnkeyedNavigation(
+            on: webView,
+            reason: "targetBlankNavigation"
+        ) {
+            webView.load(navigationAction.request)
+        }
         return nil
     }
     
@@ -3307,6 +4109,10 @@ extension WebViewCoordinator: WKUIDelegate {
     }
     
     public func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor ([URL]?) -> Void) {
+        guard ownsWebView(webView) else {
+            completionHandler(nil)
+            return
+        }
         let openPanel = NSOpenPanel()
         openPanel.allowsMultipleSelection = true
         openPanel.canChooseDirectories = false
@@ -3314,6 +4120,10 @@ extension WebViewCoordinator: WKUIDelegate {
         openPanel.resolvesAliases = true
         
         func handleResult(_ result: NSApplication.ModalResponse) {
+            guard ownsWebView(webView) else {
+                completionHandler(nil)
+                return
+            }
             if result == NSApplication.ModalResponse.OK {
                 if let url = openPanel.url {
                     completionHandler([url])
@@ -3334,11 +4144,61 @@ extension WebViewCoordinator: WKUIDelegate {
 
 extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
+    private func beginContentRulesPolicy(
+        for navigationAction: WKNavigationAction,
+        on webView: WKWebView
+    ) -> WebViewContentRulesBypassOwner? {
+        if navigationAction.navigationType == .reload,
+           let bypassOwner = navigator.consumeContentRulesBypass(for: webView) {
+            self.webView.refreshContentRules(
+                webView: webView,
+                coordinator: self,
+                contentRules: nil
+            )
+            return bypassOwner
+        }
+        _ = navigator.cancelContentRulesBypass(for: webView)
+        applyConfiguredContentRulesIfNeeded(on: webView)
+        return nil
+    }
+
+    @MainActor
+    private func rejectContentRulesPolicy(
+        ownedBy bypassOwner: WebViewContentRulesBypassOwner?,
+        on webView: WKWebView
+    ) {
+        guard let bypassOwner,
+              navigator.finishContentRulesBypass(bypassOwner),
+              !navigator.peekContentRulesBypass(for: webView) else {
+            return
+        }
+        applyConfiguredContentRulesIfNeeded(on: webView)
+    }
+
+    @MainActor
+    private func restoreConfiguredContentRulesAfterBypassIfNeeded(
+        on webView: WKWebView,
+        navigation: WKNavigation?
+    ) {
+        guard navigator.finishContentRulesBypass(
+            for: navigation,
+            on: webView
+        ) else { return }
+        guard !navigator.peekContentRulesBypass(for: webView) else { return }
+        applyConfiguredContentRulesIfNeeded(on: webView)
+    }
+
+    @MainActor
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if let enhancedWebView = webView as? EnhancedWKWebView,
-           let pendingContentID = enhancedWebView.poolPendingContentID {
-            enhancedWebView.poolReadyContentID = pendingContentID
-            enhancedWebView.poolPendingContentID = nil
+        guard ownsWebView(webView) else { return }
+        let navigationDisposition = (webView as? EnhancedWKWebView)?
+            .handleNavigationFinished(navigation) ?? .unknown
+        if navigationDisposition == .stale {
+            restoreConfiguredContentRulesAfterBypassIfNeeded(
+                on: webView,
+                navigation: navigation
+            )
+            return
         }
         navigator.cancelReaderLoadHeartbeat(reason: "didFinishNavigation")
 #if DEBUG
@@ -3378,13 +4238,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         onNavigationFinished?(newState)
 
-        if shouldReapplyContentRulesAfterLoad {
-            shouldReapplyContentRulesAfterLoad = false
-            self.webView.refreshContentRules(
-                userContentController: webView.configuration.userContentController,
-                coordinator: self
-            )
-        }
+        restoreConfiguredContentRulesAfterBypassIfNeeded(
+            on: webView,
+            navigation: navigation
+        )
 
 #if os(iOS)
         if #available(iOS 15.0, *) {
@@ -3406,17 +4263,41 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
     
     private func extractPageState(webView: WKWebView) {
-        // TODO: Also get window location to confirm state matches JS result
-        webView.evaluateJavaScript("document.title") { (response, error) in
-            if let title = response as? String {
+        let extractionGeneration = beginPageStateExtraction()
+
+        if self.webView.htmlInState {
+            webView.evaluateJavaScript("document.documentElement.outerHTML.toString()") { [weak self, weak webView] response, _ in
+                guard let self,
+                      let webView,
+                      self.isCurrentPageStateExtraction(extractionGeneration, from: webView),
+                      let html = response as? String else {
+                    return
+                }
                 var newState = self.webView.state
-                newState.pageTitle = title
+                newState.pageHTML = html
                 self.webView.state = newState
             }
         }
-        
-        webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
-            if let url = response as? String, let newURL = URL(string: url), self.webView.state.pageURL != newURL {
+
+        webView.evaluateJavaScript(webViewReaderDocumentSummaryScript) { [weak self, weak webView] response, error in
+            guard let self,
+                  let webView,
+                  self.isCurrentPageStateExtraction(extractionGeneration, from: webView),
+                  error == nil,
+                  let summary = response as? [String: Any] else {
+                return
+            }
+            let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
+                partialResult[entry.key] = String(describing: entry.value)
+            }
+            let hasMeaningfulBodyContent = summary["hasMeaningfulBodyContent"] as? Bool ?? false
+            var newState = self.webView.state
+            if let title = summary["documentTitle"] as? String {
+                newState.pageTitle = title
+            }
+            if let url = summary["documentURL"] as? String,
+               let newURL = URL(string: url),
+               newState.pageURL != newURL {
                 let now = Date()
                 readerLoadLog(
                     "webView.pageURLUpdatedFromDocument",
@@ -3424,61 +4305,17 @@ extension WebViewCoordinator: WKNavigationDelegate {
                         "documentURL": newURL.absoluteString,
                         "elapsedSinceCommit": readerLoadElapsedString(since: self.navigator.readerLoadCommittedAt, now: now),
                         "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: self.navigator.readerLoadRequestedAt, now: now),
-                        "previousPageURL": self.webView.state.pageURL.absoluteString
+                        "previousPageURL": newState.pageURL.absoluteString
                     ]
                 )
-                var newState = self.webView.state
                 newState.pageURL = newURL
-                self.webView.state = newState
             }
-        }
-        
-        if self.webView.htmlInState {
-            webView.evaluateJavaScript("document.documentElement.outerHTML.toString()") { (response, error) in
-                if let html = response as? String {
-                    var newState = self.webView.state
-                    newState.pageHTML = html
-                    self.webView.state = newState
-                }
+            let hasExactReaderRenderOwner = (summary["readerRenderGeneration"] as? String)?.isEmpty == false
+            if !hasExactReaderRenderOwner,
+               summary["hasReaderRenderReady"] as? Bool == true {
+                newState.hasReaderRenderReady = true
             }
-        }
-
-        webView.evaluateJavaScript(
-            """
-            (function() {
-                const body = document.body;
-                const html = document.documentElement;
-                const bodyStyle = body ? window.getComputedStyle(body) : null;
-                const bodyText = (body?.innerText || "").trim();
-                const bodyHTML = body?.innerHTML || "";
-                return {
-                    documentURL: document.URL.toString(),
-                    readyState: document.readyState,
-                    bodyChildElementCount: body?.childElementCount || 0,
-                    bodyTextLength: bodyText.length,
-                    bodyHTMLLength: bodyHTML.length,
-                    hasReaderRenderReady:
-                        (html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
-                        && !!document.getElementById("reader-content")
-                        && (html?.dataset?.manabiFontPending ?? null) !== '1'
-                        && bodyStyle?.visibility !== 'hidden'
-                        && bodyStyle?.display !== 'none'
-                        && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
-                    hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
-                    titleLength: (document.title || "").length
-                };
-            })();
-            """
-        ) { response, error in
-            guard error == nil, let summary = response as? [String: Any] else { return }
-            let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
-                partialResult[entry.key] = String(describing: entry.value)
-            }
-            let hasMeaningfulBodyContent = summary["hasMeaningfulBodyContent"] as? Bool ?? false
-            if let hasReaderRenderReady = summary["hasReaderRenderReady"] as? Bool,
-               self.webView.state.hasReaderRenderReady != hasReaderRenderReady {
-                var newState = self.webView.state
-                newState.hasReaderRenderReady = hasReaderRenderReady
+            if newState != self.webView.state {
                 self.webView.state = newState
             }
             if !hasMeaningfulBodyContent || (summary["hasReaderRenderReady"] as? Bool ?? false) {
@@ -3486,15 +4323,23 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
     }
-    
+
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        clearPendingPoolContent(on: webView)
+        guard ownsWebView(webView) else { return }
+        let navigationDisposition = (webView as? EnhancedWKWebView)?
+            .handleNavigationFailed(navigation) ?? .unknown
+        if navigationDisposition == .stale {
+            restoreConfiguredContentRulesAfterBypassIfNeeded(
+                on: webView,
+                navigation: navigation
+            )
+            return
+        }
+        invalidatePageStateExtraction()
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
-        Task {
-            scriptCaller?.removeAllMultiTargetFrames()
-        }
+        scriptCaller?.removeAllMultiTargetFrames()
         _ = setLoading(
             false,
             pageURL: webView.url,
@@ -3504,6 +4349,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList,
             error: error
+        )
+        restoreConfiguredContentRulesAfterBypassIfNeeded(
+            on: webView,
+            navigation: navigation
         )
         let now = Date()
         readerLoadLog(
@@ -3524,20 +4373,38 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        clearPendingPoolContent(on: webView)
+        guard ownsWebView(webView) else { return }
+        invalidatePageStateExtraction()
+        (webView as? EnhancedWKWebView)?.resetPooledContentNavigation()
         navigator.clearActiveInternalReaderLoadSignal()
+        scriptCaller?.removeAllMultiTargetFrames()
         setLoading(false, isProvisionallyNavigating: false)
+        if navigator.cancelContentRulesBypass(for: webView) {
+            applyConfiguredContentRulesIfNeeded(on: webView)
+        }
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        clearPendingPoolContent(on: webView)
+        guard ownsWebView(webView) else { return }
+        let navigationDisposition = (webView as? EnhancedWKWebView)?
+            .handleNavigationFailed(navigation) ?? .unknown
+        if navigationDisposition == .stale {
+            restoreConfiguredContentRulesAfterBypassIfNeeded(
+                on: webView,
+                navigation: navigation
+            )
+            return
+        }
+        invalidatePageStateExtraction()
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
-        Task {
-            scriptCaller?.removeAllMultiTargetFrames()
-        }
+        scriptCaller?.removeAllMultiTargetFrames()
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
+        restoreConfiguredContentRulesAfterBypassIfNeeded(
+            on: webView,
+            navigation: navigation
+        )
         let now = Date()
         readerLoadLog(
             "webView.nav.fail",
@@ -3559,17 +4426,15 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #endif
     }
 
-    private func clearPendingPoolContent(on webView: WKWebView) {
-        guard let enhancedWebView = webView as? EnhancedWKWebView else { return }
-        enhancedWebView.poolPendingContentID = nil
-        enhancedWebView.poolReadyContentID = nil
-    }
-    
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        Task {
-            scriptCaller?.removeAllMultiTargetFrames()
+        guard ownsWebView(webView) else { return }
+        if let enhancedWebView = webView as? EnhancedWKWebView,
+           enhancedWebView.admitNavigationCallback(navigation) == .stale {
+            return
         }
+        invalidatePageStateExtraction()
+        scriptCaller?.removeAllMultiTargetFrames()
 #if DEBUG
         debugPrint("# READER webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -3677,7 +4542,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        (webView as? EnhancedWKWebView)?.invalidatePoolContentForUnkeyedNavigation()
+        guard ownsWebView(webView) else { return }
+        if let enhancedWebView = webView as? EnhancedWKWebView,
+           enhancedWebView.handleProvisionalNavigationStarted(navigation) == .stale {
+            return
+        }
+        invalidatePageStateExtraction()
         navigator.nativeLookupHitTesting.removeAllTargets()
 #if DEBUG
         debugPrint("# READER webView.nav.start",
@@ -3825,12 +4695,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
+        guard ownsWebView(webView) else { return (.cancel, preferences) }
 #if DEBUG
         debugPrint("# READER webView.nav.decide",
                    "request=\(navigationAction.request.url?.absoluteString ?? "<nil>")",
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
 #endif
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
+        let contentRulesBypassOwner = isMainDocumentNavigation
+            ? beginContentRulesPolicy(for: navigationAction, on: webView)
+            : nil
         let isInternalReaderLoaderNavigation = isMainDocumentNavigation
             && canonicalContentURLForReaderLoader(navigationAction.request.url) != nil
         if isMainDocumentNavigation,
@@ -3849,18 +4723,38 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 ]
             )
             navigator.clearActiveInternalReaderLoadSignal()
+            rejectContentRulesPolicy(
+                ownedBy: contentRulesBypassOwner,
+                on: webView
+            )
             return (.cancel, preferences)
         }
-        if let decision = await onNavigationAction?(navigationAction) {
-            if isInternalReaderLoaderNavigation, decision != .allow {
-                navigator.clearActiveInternalReaderLoadSignal()
+        if let onNavigationAction {
+            let decision = await onNavigationAction(navigationAction)
+            guard ownsWebView(webView) else { return (.cancel, preferences) }
+            if let decision {
+                if isMainDocumentNavigation, decision != .allow {
+                    rejectContentRulesPolicy(
+                        ownedBy: contentRulesBypassOwner,
+                        on: webView
+                    )
+                }
+                if isInternalReaderLoaderNavigation, decision != .allow {
+                    navigator.clearActiveInternalReaderLoadSignal()
+                }
+                return (decision, preferences)
             }
-            return (decision, preferences)
         }
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 if isInternalReaderLoaderNavigation {
                     navigator.clearActiveInternalReaderLoadSignal()
+                }
+                if isMainDocumentNavigation {
+                    rejectContentRulesPolicy(
+                        ownedBy: contentRulesBypassOwner,
+                        on: webView
+                    )
                 }
                 setLoading(false, isProvisionallyNavigating: false)
                 return (.cancel, preferences)
@@ -3873,7 +4767,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         if isMainDocumentNavigation {
             let effectiveMainDocumentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
             self.webView.updateUserScripts(
-                userContentController: webView.configuration.userContentController,
+                webView: webView,
                 coordinator: self,
                 forDomain: effectiveMainDocumentURL,
                 config: config
@@ -3894,28 +4788,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
         
-        // Only apply content rules for main frame navigations.
-        if isMainDocumentNavigation {
-            if navigator.consumeContentRulesBypass() {
-                shouldReapplyContentRulesAfterLoad = true
-                self.webView.refreshContentRules(
-                    userContentController: webView.configuration.userContentController,
-                    coordinator: self,
-                    overrideRules: nil
-                )
-            } else if lastAppliedContentRules != config.contentRules {
-                self.webView.refreshContentRules(
-                    userContentController: webView.configuration.userContentController,
-                    coordinator: self
-                )
-            }
-        }
-        
         return (.allow, preferences)
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse) async -> WKNavigationResponsePolicy {
+        guard ownsWebView(webView) else { return .cancel }
         if let response = navigationResponse.response as? HTTPURLResponse {
 #if DEBUG
             debugPrint(
@@ -3967,7 +4845,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         String(describing: ObjectIdentifier(self))
     }
     public let nativeLookupHitTesting = WebViewNativeLookupHitTestStore()
-    @MainActor private var bypassContentRulesForNextNavigation = false
+    @MainActor private var contentRulesBypassGate = WebViewContentRulesBypassGate()
     @MainActor private var pendingRequestLoadGeneration: Int = 0
     @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
     @MainActor private var attachFallbackLoadGeneration: Int = 0
@@ -3996,6 +4874,52 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public var shouldLoadFallbackOnAttach = true
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
     @MainActor fileprivate var forceClearLoadingIndicatorsHandler: ((String, URL?) -> Void)?
+
+    @MainActor
+    fileprivate func ownsBoundWebView(_ sourceWebView: WKWebView) -> Bool {
+        guard webView === sourceWebView else { return false }
+        guard let enhancedWebView = sourceWebView as? EnhancedWKWebView,
+              let persistedOwner = enhancedWebView.persistedNavigatorOwner else {
+            return true
+        }
+        return persistedOwner === self
+    }
+
+    @MainActor
+    fileprivate func claimWebView(_ sourceWebView: WKWebView) {
+        if let currentWebView = webView, currentWebView !== sourceWebView {
+            releaseWebViewIfOwned(currentWebView, reason: "navigatorRebound")
+        }
+        if let enhancedWebView = sourceWebView as? EnhancedWKWebView {
+            if let previousOwner = enhancedWebView.persistedNavigatorOwner,
+               previousOwner !== self {
+                previousOwner.releaseWebViewIfOwned(
+                    sourceWebView,
+                    reason: "navigatorOwnershipTransferred"
+                )
+            }
+            enhancedWebView.persistedNavigatorOwner = self
+        }
+        webView = sourceWebView
+    }
+
+    @MainActor
+    fileprivate func releaseWebViewIfOwned(_ sourceWebView: WKWebView, reason: String) {
+        guard webView === sourceWebView else { return }
+        if let enhancedWebView = sourceWebView as? EnhancedWKWebView,
+           enhancedWebView.persistedNavigatorOwner === self {
+            enhancedWebView.persistedNavigatorOwner = nil
+        }
+        _ = cancelContentRulesBypass(for: sourceWebView)
+        nativeLookupHitTesting.removeAllTargets()
+        cancelPendingRequestLoadTask()
+        cancelAttachFallbackLoadTask(reason: reason)
+        cancelContentProcessPrewarm(reason: reason)
+        cancelPreProvisionalWarningTask()
+        cancelReaderLoadHeartbeat(reason: reason)
+        clearActiveInternalReaderLoadSignal()
+        webView = nil
+    }
 
     @MainActor
     public var debugLoadSnapshot: DebugLoadSnapshot {
@@ -4428,6 +5352,37 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    private func supersedePendingLoads(attachFallbackReason: String? = nil) {
+        if let attachFallbackReason {
+            cancelAttachFallbackLoadTask(reason: attachFallbackReason)
+        }
+        pendingRequest = nil
+        pendingHTML = nil
+        pendingHTMLContentID = nil
+        pendingDataLoad = nil
+        cancelPendingRequestLoadTask()
+    }
+
+    @MainActor
+    @discardableResult
+    fileprivate func performUnkeyedNavigation(
+        on sourceWebView: WKWebView,
+        reason: String,
+        _ start: () -> WKNavigation?
+    ) -> WKNavigation? {
+        guard ownsBoundWebView(sourceWebView),
+              let navigation = start() else {
+            return nil
+        }
+        beginPooledContentUnkeyedNavigation(
+            sourceWebView,
+            navigation: navigation
+        )
+        supersedePendingLoads(attachFallbackReason: reason)
+        return navigation
+    }
+
+    @MainActor
     private func cancelAttachFallbackLoadTask(reason: String? = nil) {
         attachFallbackLoadGeneration &+= 1
         attachFallbackLoadTask?.cancel()
@@ -4463,6 +5418,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard !Task.isCancelled else { return }
             guard self.attachFallbackLoadGeneration == generation else { return }
+            guard self.ownsBoundWebView(webView) else { return }
             if let requestedURL = self.readerLoadRequestedURL,
                requestedURL.absoluteString != fallbackURL.absoluteString,
                self.readerLoadProvisionalStartedAt == nil,
@@ -4512,7 +5468,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     "url": fallbackURL.absoluteString
                 ]
             )
-            webView.load(URLRequest(url: fallbackURL))
+            let navigation = webView.load(URLRequest(url: fallbackURL))
+            beginPooledContentUnkeyedNavigation(
+                webView,
+                navigation: navigation
+            )
             self.attachFallbackLoadTask = nil
         }
     }
@@ -4532,6 +5492,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 guard !Task.isCancelled else { return }
                 guard self.pendingRequestLoadGeneration == generation else { return }
+                guard self.ownsBoundWebView(webView) else { return }
                 if swiftUIWebViewDebugBuildEnabled
                     && (self.shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
                     debugPrint(
@@ -4558,11 +5519,19 @@ public class WebViewNavigator: NSObject, ObservableObject {
                             ] as [String : Any]
                         )
                     }
+                    let navigation: WKNavigation?
                     if let url = request.url, url.isFileURL {
-                        webView.loadFileURL(url, allowingReadAccessTo: url)
+                        navigation = webView.loadFileURL(
+                            url,
+                            allowingReadAccessTo: url
+                        )
                     } else {
-                        webView.load(request)
+                        navigation = webView.load(request)
                     }
+                    beginPooledContentUnkeyedNavigation(
+                        webView,
+                        navigation: navigation
+                    )
                     self.pendingRequestLoadGeneration &+= 1
                     self.pendingRequestLoadTask = nil
                     return
@@ -4600,7 +5569,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
             ]
         )
         webView.stopLoading()
-        webView.load(URLRequest(url: URL(string: "about:blank")!))
+        let navigation = webView.load(
+            URLRequest(url: URL(string: "about:blank")!)
+        )
+        beginPooledContentUnkeyedNavigation(
+            webView,
+            navigation: navigation
+        )
         schedulePendingRequestLoadRetry(
             request: request,
             webView: webView,
@@ -4611,6 +5586,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
+        guard ownsBoundWebView(webView) else { return }
+        guard webView.window != nil, webView.superview != nil else {
+            if swiftUIWebViewDebugBuildEnabled
+                && (shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
+                debugPrint(
+                    "# READER navigator.flushPendingRequest.deferredBeforeMutation",
+                    [
+                        "navigatorID": debugIdentifier ?? "nil",
+                        "navigatorObjectID": debugObjectID,
+                        "url": request.url?.absoluteString ?? "nil",
+                        "reason": diagnosticsReason,
+                        "windowAttached": webView.window != nil,
+                        "superviewAttached": webView.superview != nil
+                    ] as [String : Any]
+                )
+            }
+            return
+        }
         logPreIssueLoadState(for: request, reason: "issuePendingRequestLoad:\(diagnosticsReason)")
         if recoverFromStaleAboutBlankIfNeeded(
             for: request,
@@ -4662,6 +5655,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 ] as [String : Any]
             )
         }
+        if disposition != .deferUntilAttached {
+            beginPooledContentUnkeyedNavigation(webView)
+        }
         switch disposition {
         case .deferUntilAttached:
             if swiftUIWebViewDebugBuildEnabled
@@ -4711,16 +5707,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     ] as [String : Any]
                 )
             }
+            let navigation: WKNavigation?
             if webView.url == request.url {
                 markReaderLoadIssued(for: request, reason: "reload:\(diagnosticsReason)")
-                webView.reload()
+                navigation = webView.reload()
             } else if let url = request.url, url.isFileURL {
                 markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
-                webView.loadFileURL(url, allowingReadAccessTo: url)
+                navigation = webView.loadFileURL(
+                    url,
+                    allowingReadAccessTo: url
+                )
             } else {
                 markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
-                webView.load(request)
+                navigation = webView.load(request)
             }
+            beginPooledContentUnkeyedNavigation(
+                webView,
+                navigation: navigation
+            )
             self.schedulePendingRequestLoadRetry(
                 request: request,
                 webView: webView,
@@ -4731,16 +5735,29 @@ public class WebViewNavigator: NSObject, ObservableObject {
         case .loadFileURL:
             guard let url = request.url else { return }
             markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
-            webView.loadFileURL(url, allowingReadAccessTo: url)
+            let navigation = webView.loadFileURL(
+                url,
+                allowingReadAccessTo: url
+            )
+            beginPooledContentUnkeyedNavigation(
+                webView,
+                navigation: navigation
+            )
         case .loadRequest:
             markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
-            webView.load(request)
+            let navigation = webView.load(request)
+            beginPooledContentUnkeyedNavigation(
+                webView,
+                navigation: navigation
+            )
         }
         self.cancelPendingRequestLoadTask()
     }
 
     @MainActor
-    func handleWindowAttachmentChanged(isAttached: Bool, webView: WKWebView) {
+    func handleWindowAttachmentChanged(webView: WKWebView) {
+        guard ownsBoundWebView(webView) else { return }
+        let isAttached = webView.window != nil || webView.superview != nil
         let isReadyForRequest = webView.window != nil && webView.superview != nil
         if swiftUIWebViewDebugBuildEnabled
             && (shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
@@ -4759,7 +5776,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         if isAttached {
             scheduleContentProcessPrewarmIfNeeded(on: webView)
         }
-        guard isAttached, let request = pendingRequest else { return }
+        guard isReadyForRequest, let request = pendingRequest else { return }
         if swiftUIWebViewDebugBuildEnabled
             && (shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
             debugPrint(
@@ -4794,9 +5811,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
             let shouldLogDiagnostics = swiftUIWebViewPageTurnDiagnosticsEnabled
             let nextHasAttachedWebView = webView != nil
             if hasAttachedWebView != nextHasAttachedWebView {
+                // Preserve next-turn publication for SwiftUI, but derive the
+                // value at execution time because the binding may change again.
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    self.hasAttachedWebView = nextHasAttachedWebView
+                    let currentHasAttachedWebView = self.webView != nil
+                    guard self.hasAttachedWebView != currentHasAttachedWebView else {
+                        return
+                    }
+                    self.hasAttachedWebView = currentHasAttachedWebView
                 }
             }
             if swiftUIWebViewDebugBuildEnabled && (shouldLogDiagnostics || !shouldLoadFallbackOnAttach) {
@@ -4865,11 +5888,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         ] as [String : Any]
                     )
                 }
-                webView.load(
+                let navigation = webView.load(
                     pendingDataLoad.data,
                     mimeType: pendingDataLoad.mimeType,
                     characterEncodingName: pendingDataLoad.characterEncodingName,
                     baseURL: pendingDataLoad.baseURL
+                )
+                beginPooledContentUnkeyedNavigation(
+                    webView,
+                    navigation: navigation
                 )
                 self.pendingDataLoad = nil
                 return
@@ -4894,8 +5921,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         ] as [String : Any]
                     )
                 }
-                preparePoolContentLoad(on: webView, contentID: pendingHTMLContentID)
-                webView.loadHTMLString(pendingHTML.html, baseURL: pendingHTML.baseURL)
+                loadHTMLContent(
+                    pendingHTML.html,
+                    baseURL: pendingHTML.baseURL,
+                    contentID: pendingHTMLContentID,
+                    on: webView
+                )
                 self.pendingHTML = nil
                 pendingHTMLContentID = nil
                 return
@@ -4917,7 +5948,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedRequest = request
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
-        cancelAttachFallbackLoadTask(reason: "explicitRequestLoad")
+        supersedePendingLoads(attachFallbackReason: "explicitRequestLoad")
         beginReaderLoadTrace(for: request)
         if let webView = webView {
             clearPoolContentState(on: webView)
@@ -4953,10 +5984,21 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             if let url = request.url, url.isFileURL {
                 markReaderLoadIssued(for: request, reason: "navigator.loadFileURL")
-                webView.loadFileURL(url, allowingReadAccessTo: url)
+                let navigation = webView.loadFileURL(
+                    url,
+                    allowingReadAccessTo: url
+                )
+                beginPooledContentUnkeyedNavigation(
+                    webView,
+                    navigation: navigation
+                )
             } else {
                 markReaderLoadIssued(for: request, reason: "navigator.loadRequest")
-                webView.load(request)
+                let navigation = webView.load(request)
+                beginPooledContentUnkeyedNavigation(
+                    webView,
+                    navigation: navigation
+                )
             }
         } else {
             pendingRequest = request
@@ -4968,7 +6010,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedHTML = nil
-        cancelAttachFallbackLoadTask(reason: "explicitDataLoad")
+        supersedePendingLoads(attachFallbackReason: "explicitDataLoad")
         cancelReaderLoadHeartbeat(reason: "explicitDataLoad")
         cancelContentProcessPrewarm(reason: "explicitDataLoad")
         cancelPreProvisionalWarningTask()
@@ -5019,11 +6061,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "hasWindow": "\(webView.window != nil)"
             ]
         )
-        webView.load(
+        let navigation = webView.load(
             data,
             mimeType: mimeType,
             characterEncodingName: characterEncodingName,
             baseURL: baseURL
+        )
+        beginPooledContentUnkeyedNavigation(
+            webView,
+            navigation: navigation
         )
         readerLoadDirectDataReturnedAt = Date()
         readerLoadLog(
@@ -5045,6 +6091,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedDataLoad = nil
+        supersedePendingLoads(attachFallbackReason: "explicitHTMLLoad")
         if let contentID,
            let enhancedWebView = webView as? EnhancedWKWebView,
            enhancedWebView.poolReadyContentID == contentID {
@@ -5052,7 +6099,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingHTMLContentID = nil
             return
         }
-        cancelAttachFallbackLoadTask(reason: "explicitHTMLLoad")
         cancelReaderLoadHeartbeat(reason: "explicitHTMLLoad")
         cancelContentProcessPrewarm(reason: "explicitHTMLLoad")
         cancelPreProvisionalWarningTask()
@@ -5085,28 +6131,53 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingHTMLContentID = contentID
             return
         }
-        preparePoolContentLoad(on: webView, contentID: contentID)
-        webView.loadHTMLString(html, baseURL: baseURL)
+        loadHTMLContent(
+            html,
+            baseURL: baseURL,
+            contentID: contentID,
+            on: webView
+        )
     }
 
     @MainActor
-    private func preparePoolContentLoad(on webView: WKWebView, contentID: WebViewPoolContentID?) {
-        guard let enhancedWebView = webView as? EnhancedWKWebView else { return }
-        enhancedWebView.poolReadyContentID = nil
-        enhancedWebView.poolPendingContentID = contentID
+    @discardableResult
+    private func loadHTMLContent(
+        _ html: String,
+        baseURL: URL?,
+        contentID: WebViewPoolContentID?,
+        on webView: WKWebView
+    ) -> WKNavigation? {
+        let enhancedWebView = webView as? EnhancedWKWebView
+        let navigation = webView.loadHTMLString(html, baseURL: baseURL)
+        if let enhancedWebView, let navigation {
+            if let contentID {
+                enhancedWebView.beginKeyedNavigation(
+                    contentID: contentID,
+                    navigation: navigation
+                )
+            } else {
+                enhancedWebView.beginUnkeyedNavigation(
+                    navigation: navigation
+                )
+            }
+        } else if contentID == nil {
+            enhancedWebView?.beginUnkeyedNavigation()
+        }
+        return navigation
     }
 
     @MainActor
     private func clearPoolContentState(on webView: WKWebView) {
-        guard let enhancedWebView = webView as? EnhancedWKWebView else { return }
-        enhancedWebView.poolPendingContentID = nil
-        enhancedWebView.poolReadyContentID = nil
+        beginPooledContentUnkeyedNavigation(webView)
     }
     
     @MainActor
     public func reload() {
         logCompetingOperationIfNeeded("reload", metadata: [:])
-        webView?.reload()
+        guard let webView else { return }
+        performUnkeyedNavigation(on: webView, reason: "reload") {
+            webView.reload()
+        }
     }
 
     @MainActor
@@ -5134,6 +6205,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     func prepareForReloadAfterReattach() {
         logCompetingOperationIfNeeded("prepareForReloadAfterReattach", metadata: [:])
+        supersedePendingLoads()
         if let lastLoadedHTML {
             pendingHTML = lastLoadedHTML
         } else if let lastLoadedDataLoad {
@@ -5145,9 +6217,21 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     public func reloadWithoutContentRules() {
-        bypassContentRulesForNextNavigation = true
         logCompetingOperationIfNeeded("reloadWithoutContentRules", metadata: [:])
-        webView?.reload()
+        guard let webView else { return }
+        let navigation = performUnkeyedNavigation(
+            on: webView,
+            reason: "reloadWithoutContentRules"
+        ) {
+            webView.reload()
+        }
+        guard let navigation else { return }
+        contentRulesBypassGate.register(
+            WebViewContentRulesBypassOwner(
+                webViewID: ObjectIdentifier(webView),
+                navigationID: ObjectIdentifier(navigation)
+            )
+        )
     }
 
     @MainActor
@@ -5156,30 +6240,64 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    func consumeContentRulesBypass() -> Bool {
-        let value = bypassContentRulesForNextNavigation
-        bypassContentRulesForNextNavigation = false
-        return value
+    func consumeContentRulesBypass(
+        for webView: WKWebView
+    ) -> WebViewContentRulesBypassOwner? {
+        contentRulesBypassGate.consumeNext(webViewID: ObjectIdentifier(webView))
     }
 
     @MainActor
-    func peekContentRulesBypass() -> Bool {
-        bypassContentRulesForNextNavigation
+    func peekContentRulesBypass(for webView: WKWebView) -> Bool {
+        contentRulesBypassGate.isBypassing(webViewID: ObjectIdentifier(webView))
+    }
+
+    @MainActor
+    func finishContentRulesBypass(
+        for navigation: WKNavigation?,
+        on webView: WKWebView
+    ) -> Bool {
+        guard let navigation else { return false }
+        return finishContentRulesBypass(
+            WebViewContentRulesBypassOwner(
+                webViewID: ObjectIdentifier(webView),
+                navigationID: ObjectIdentifier(navigation)
+            )
+        )
+    }
+
+    @MainActor
+    func finishContentRulesBypass(_ owner: WebViewContentRulesBypassOwner) -> Bool {
+        contentRulesBypassGate.finish(owner)
+    }
+
+    @MainActor
+    func cancelContentRulesBypass(for webView: WKWebView?) -> Bool {
+        guard let webView else { return false }
+        return contentRulesBypassGate.cancelAll(webViewID: ObjectIdentifier(webView))
     }
     
     @MainActor
     public func go(_ item: WKBackForwardListItem) {
-        webView?.go(to: item)
+        guard let webView else { return }
+        performUnkeyedNavigation(on: webView, reason: "goToHistoryItem") {
+            webView.go(to: item)
+        }
     }
     
     @MainActor
     public func goBack() {
-        webView?.goBack()
+        guard let webView else { return }
+        performUnkeyedNavigation(on: webView, reason: "goBack") {
+            webView.goBack()
+        }
     }
     
     @MainActor
     public func goForward() {
-        webView?.goForward()
+        guard let webView else { return }
+        performUnkeyedNavigation(on: webView, reason: "goForward") {
+            webView.goForward()
+        }
     }
 
     @MainActor
@@ -5374,6 +6492,17 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
+    /// Exact identity of the currently installed JavaScript evaluation binding.
+    ///
+    /// A `WebViewScriptCaller` can be rebound to a replacement `WKWebView` while
+    /// asynchronous work is suspended. Callers that must finish in the document
+    /// that admitted the work should capture this token and require it when they
+    /// eventually evaluate JavaScript.
+    public struct JavaScriptBindingToken: Equatable, Hashable, Sendable {
+        fileprivate let callerID: String
+        fileprivate let generation: Int
+    }
+
     struct JavaScriptEvaluationResult: @unchecked Sendable {
         let value: Any?
 
@@ -5457,6 +6586,21 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         asyncCaller != nil
     }
 
+    /// Captures the exact currently installed JavaScript binding, if any.
+    public var currentJavaScriptBindingToken: JavaScriptBindingToken? {
+        guard asyncCaller != nil else { return nil }
+        return JavaScriptBindingToken(
+            callerID: id,
+            generation: asyncCallerReadinessGeneration
+        )
+    }
+
+    private func isCurrentJavaScriptBinding(_ token: JavaScriptBindingToken) -> Bool {
+        token.callerID == id
+            && token.generation == asyncCallerReadinessGeneration
+            && asyncCaller != nil
+    }
+
     private func reportUnboundEvaluation(
         operation: UnboundEvaluationAttempt.Operation,
         script: String
@@ -5507,6 +6651,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     
     private var multiTargetFrames = [String: WKFrameInfo]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
+    private var canonicalFrameKeyByUUID = [String: String]()
     private var lastKnownMainFrame: WKFrameInfo?
     
     //    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
@@ -5514,18 +6659,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     //    }
 
     private func canonicalizedURL(_ url: URL) -> URL {
-        if url.scheme?.lowercased() == "internal",
-           url.host?.lowercased() == "local",
-           url.path == "/load/reader",
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let readerURLValue = components.queryItems?.first(where: { $0.name == "reader-url" })?.value {
-            if let decoded = readerURLValue.removingPercentEncoding, let resolved = URL(string: decoded) {
-                return resolved
-            } else if let resolved = URL(string: readerURLValue) {
-                return resolved
-            }
-        }
-        return url
+        canonicalContentURLForReaderLoader(url) ?? url
     }
 
     private func canonicalFrameKey(for url: URL?) -> String? {
@@ -5534,6 +6668,34 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
         components?.fragment = nil
         return components?.string ?? resolved.absoluteString
+    }
+
+    private func removeRegisteredFrame(uuid: String, expectedFrame: WKFrameInfo? = nil) {
+        guard let registeredFrame = multiTargetFrames[uuid],
+              expectedFrame == nil || registeredFrame === expectedFrame else {
+            return
+        }
+        multiTargetFrames.removeValue(forKey: uuid)
+        if let canonicalKey = canonicalFrameKeyByUUID.removeValue(forKey: uuid),
+           framesByCanonicalURL[canonicalKey] === registeredFrame {
+            framesByCanonicalURL[canonicalKey] = multiTargetFrames.first(where: { candidateUUID, _ in
+                canonicalFrameKeyByUUID[candidateUUID] == canonicalKey
+            })?.value
+        }
+        if registeredFrame === lastKnownMainFrame {
+            lastKnownMainFrame = nil
+        }
+    }
+
+    private func removeRegisteredFrame(_ frame: WKFrameInfo) {
+        for uuid in multiTargetFrames.compactMap({ key, value in
+            value === frame ? key : nil
+        }) {
+            removeRegisteredFrame(uuid: uuid, expectedFrame: frame)
+        }
+        if frame === lastKnownMainFrame {
+            lastKnownMainFrame = nil
+        }
     }
 
     private func normalizeJavaScriptResult(_ value: Any?) -> Any? {
@@ -5589,12 +6751,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             await { @MainActor [weak self] in
                 guard let self else { return }
                 for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-                    if targetFrame == frame { continue }
+                    if targetFrame === frame { continue }
                     do {
                         _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
                     } catch {
                         if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                            multiTargetFrames.removeValue(forKey: uuid)
+                            removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
                         } else {
                             print(error)
                         }
@@ -5645,8 +6807,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                       nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
                 // Stale WKFrameInfo from a prior navigation can trigger "invalid frame" even after we pick a URL match.
                 // Drop the cached main frame so we fall back to the current main frame next time instead of hard‑failing.
-                if let frame, frame == lastKnownMainFrame {
-                    lastKnownMainFrame = nil
+                if let frame {
+                    removeRegisteredFrame(frame)
                 }
                 result = nil
                 handled = true
@@ -5672,16 +6834,50 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         return normalizeJavaScriptResult(result)
     }
 
+    /// Evaluates only if the caller is still bound to the exact WebView binding
+    /// captured when the operation was admitted. A replacement binding cannot
+    /// receive or authorize completion of older suspended work.
+    @discardableResult
+    public func evaluateJavaScript(
+        _ js: String,
+        arguments: [String: any Sendable]? = nil,
+        in frame: WKFrameInfo? = nil,
+        duplicateInMultiTargetFrames: Bool = false,
+        in world: WKContentWorld? = nil,
+        requiring bindingToken: JavaScriptBindingToken
+    ) async throws -> Any? {
+        guard isCurrentJavaScriptBinding(bindingToken) else {
+            throw CancellationError()
+        }
+        let result = try await evaluateJavaScript(
+            js,
+            arguments: arguments,
+            in: frame,
+            duplicateInMultiTargetFrames: duplicateInMultiTargetFrames,
+            in: world
+        )
+        guard isCurrentJavaScriptBinding(bindingToken) else {
+            throw CancellationError()
+        }
+        return result
+    }
+
     /// Evaluates in the main document and every registered content frame.
     ///
     /// Set `propagatesFrameErrors` for transactions whose later calls depend on
-    /// every frame accepting the current call. Invalid frame registrations are
-    /// always discarded before the error is either propagated or ignored.
+    /// every live frame accepting the current call. Invalid frame registrations
+    /// are discarded as proven pre-execution failures; other errors are propagated.
+    /// `continueWhile` is checked before and after each target so a superseded
+    /// transaction cannot begin evaluating additional frames. `stopAfterResult`
+    /// terminates fanout after an explicit result proves that later targets cannot
+    /// contribute without duplicating the transaction's side effects.
     public func evaluateJavaScriptInMultiTargetFrames(
         _ js: String,
         arguments: [String: any Sendable]? = nil,
         in world: WKContentWorld? = nil,
-        propagatesFrameErrors: Bool = false
+        propagatesFrameErrors: Bool = false,
+        continueWhile shouldContinue: (@MainActor () -> Bool)? = nil,
+        stopAfterResult shouldStopAfterResult: (@MainActor (Any?) -> Bool)? = nil
     ) async throws -> [Any?] {
         guard let asyncCaller else {
             reportUnboundEvaluation(
@@ -5698,16 +6894,29 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return $0
         }
 
+        func requireContinuation() throws {
+            guard shouldContinue?() != false else {
+                throw CancellationError()
+            }
+        }
+
         var results = [Any?]()
+        try requireContinuation()
         let mainResult = try await asyncCaller(
             js,
             primitiveArguments,
             nil,
             world
         ).value
-        results.append(normalizeJavaScriptResult(mainResult))
+        try requireContinuation()
+        let normalizedMainResult = normalizeJavaScriptResult(mainResult)
+        results.append(normalizedMainResult)
+        if shouldStopAfterResult?(normalizedMainResult) == true {
+            return results
+        }
 
         for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+            try requireContinuation()
             do {
                 let result = try await asyncCaller(
                     js,
@@ -5715,11 +6924,17 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     targetFrame,
                     world
                 ).value
-                results.append(normalizeJavaScriptResult(result))
+                try requireContinuation()
+                let normalizedResult = normalizeJavaScriptResult(result)
+                results.append(normalizedResult)
+                if shouldStopAfterResult?(normalizedResult) == true {
+                    return results
+                }
             } catch {
                 if let webKitError = error as? WKError,
                    webKitError.code == .javaScriptInvalidFrameTarget {
-                    multiTargetFrames.removeValue(forKey: uuid)
+                    removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
+                    continue
                 }
                 if propagatesFrameErrors {
                     throw error
@@ -5784,25 +6999,42 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 
         guard duplicateInMultiTargetFrames else { return }
         for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-            if targetFrame == frame { continue }
+            if targetFrame === frame { continue }
             unsafeCaller(js, targetFrame, world)
             if targetFrame.request.url == nil {
-                multiTargetFrames.removeValue(forKey: uuid)
+                removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
             }
         }
     }
     
-    /// Returns whether the frame was already added.
+    /// Returns whether this call changed the exact frame registration.
     @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String, canonicalURL: URL? = nil) -> Bool {
-        var inserted = true
-        if multiTargetFrames.keys.contains(uuid) && multiTargetFrames[uuid]?.request.url == frame.request.url {
-            inserted = false
+        for aliasUUID in multiTargetFrames.compactMap({ candidateUUID, candidateFrame in
+            candidateUUID != uuid && candidateFrame === frame ? candidateUUID : nil
+        }) {
+            removeRegisteredFrame(uuid: aliasUUID, expectedFrame: frame)
+        }
+        let previousFrame = multiTargetFrames[uuid]
+        let previousCanonicalKey = canonicalFrameKeyByUUID[uuid]
+        let resolvedCanonicalURL = canonicalURL ?? frame.request.url ?? frame.request.mainDocumentURL
+        let resolvedCanonicalKey = canonicalFrameKey(for: resolvedCanonicalURL)
+        let registrationChanged: Bool
+        if let previousFrame {
+            registrationChanged = previousFrame !== frame
+                || previousCanonicalKey != resolvedCanonicalKey
+            if registrationChanged {
+                removeRegisteredFrame(uuid: uuid, expectedFrame: previousFrame)
+            }
+        } else {
+            registrationChanged = true
         }
         multiTargetFrames[uuid] = frame
-        let resolvedCanonicalURL = canonicalURL ?? frame.request.mainDocumentURL ?? frame.request.url
-        if let key = canonicalFrameKey(for: resolvedCanonicalURL) {
-            framesByCanonicalURL[key] = frame
+        if let resolvedCanonicalKey {
+            canonicalFrameKeyByUUID[uuid] = resolvedCanonicalKey
+            framesByCanonicalURL[resolvedCanonicalKey] = frame
+        } else {
+            canonicalFrameKeyByUUID.removeValue(forKey: uuid)
         }
         if frame.isMainFrame {
             lastKnownMainFrame = frame
@@ -5822,10 +7054,10 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             "url=\(frame.request.url?.absoluteString ?? "<nil>")",
             "canonical=\(canonicalFrameKey(for: resolvedCanonicalURL) ?? "<nil>")",
             "isMain=\(frame.isMainFrame)",
-            "inserted=\(inserted)"
+            "registrationChanged=\(registrationChanged)"
         )
 #endif
-        return inserted
+        return registrationChanged
     }
     
     @MainActor
@@ -5841,6 +7073,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 #endif
         multiTargetFrames.removeAll()
         framesByCanonicalURL.removeAll()
+        canonicalFrameKeyByUUID.removeAll()
+        lastKnownMainFrame = nil
     }
 
     /// Returns only a canonical URL match and never falls back to another frame.
@@ -5867,6 +7101,59 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     @MainActor
     public func frame(forUUID uuid: String) -> WKFrameInfo? {
         multiTargetFrames[uuid]
+    }
+
+    /// Resolves a frame only when both its stable runtime UUID and canonical
+    /// child-document URL still identify the same registered document.
+    @MainActor
+    public func exactFrame(forUUID uuid: String, documentURL: URL?) -> WKFrameInfo? {
+        guard let expectedCanonicalKey = canonicalFrameKey(for: documentURL),
+              canonicalFrameKeyByUUID[uuid] == expectedCanonicalKey else {
+            return nil
+        }
+        return multiTargetFrames[uuid]
+    }
+
+    /// Returns the stable runtime UUID only when the exact WKFrameInfo object is
+    /// still registered for the requested canonical child document.
+    @MainActor
+    public func exactFrameIdentifier(
+        for frame: WKFrameInfo,
+        documentURL: URL? = nil
+    ) -> String? {
+        let expectedCanonicalKey = documentURL.flatMap { canonicalFrameKey(for: $0) }
+        return multiTargetFrames.first(where: { uuid, candidateFrame in
+            guard candidateFrame === frame else { return false }
+            guard let expectedCanonicalKey else { return true }
+            return canonicalFrameKeyByUUID[uuid] == expectedCanonicalKey
+        })?.key
+    }
+
+    /// Resolves a stored frame owner without rebinding it to another live frame
+    /// that happens to share its runtime UUID or canonical document URL.
+    @MainActor
+    public func exactRegisteredFrame(
+        expectedFrame: WKFrameInfo?,
+        frameIdentifier: String?,
+        documentURL: URL?
+    ) -> WKFrameInfo? {
+        guard let expectedFrame else { return nil }
+        if let frameIdentifier {
+            guard let registeredFrame = exactFrame(
+                forUUID: frameIdentifier,
+                documentURL: documentURL
+            ), registeredFrame === expectedFrame else {
+                return nil
+            }
+            return registeredFrame
+        }
+        guard exactFrameIdentifier(
+            for: expectedFrame,
+            documentURL: documentURL
+        ) != nil else {
+            return nil
+        }
+        return expectedFrame
     }
 
     @MainActor
@@ -6454,12 +7741,85 @@ enum PendingRequestLoadDisposition: Equatable {
 public class EnhancedWKWebView: WKWebView {
     var persistedUserScriptsSignature: String?
     var persistedAppliedContentRules: String?
-    var poolPendingContentID: WebViewPoolContentID?
-    var poolReadyContentID: WebViewPoolContentID?
+    var persistedContentRulesApplicationGeneration: UInt64 = 0
+    weak var persistedContentRulesApplicationOwner: WebViewCoordinator?
+    var persistedPendingContentRules: String?
+    var persistedMessageHandlerNames = Set<String>()
+    var persistedEnvironmentMessageHandlerNames: OrderedSet<String>?
+    weak var persistedMessageHandlerOwner: WebViewCoordinator?
+    weak var persistedWindowAttachmentCallbackOwner: WebViewCoordinator?
+    weak var persistedNavigatorOwner: WebViewNavigator?
+    private var poolContentNavigationGate = WebViewPoolContentNavigationGate<WKNavigation>()
 
-    func invalidatePoolContentForUnkeyedNavigation() {
-        guard poolPendingContentID == nil else { return }
-        poolReadyContentID = nil
+    var poolPendingContentID: WebViewPoolContentID? {
+        poolContentNavigationGate.pendingContentID
+    }
+
+    var poolReadyContentID: WebViewPoolContentID? {
+        get { poolContentNavigationGate.readyContentID }
+        set { poolContentNavigationGate.setReadyContentID(newValue) }
+    }
+
+    func beginKeyedNavigation(
+        contentID: WebViewPoolContentID,
+        navigation: WKNavigation
+    ) {
+        poolContentNavigationGate.beginKeyedNavigation(
+            contentID: contentID,
+            navigation: navigation
+        )
+    }
+
+    func beginUnkeyedNavigation(navigation: WKNavigation? = nil) {
+        poolContentNavigationGate.beginUnkeyedNavigation(
+            navigation: navigation
+        )
+    }
+
+    func resetPooledContentNavigation() {
+        poolContentNavigationGate.resetNavigationOwnership()
+    }
+
+    func navigationCallbackDisposition(
+        _ navigation: WKNavigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        poolContentNavigationGate.navigationCallbackDisposition(for: navigation)
+    }
+
+    @discardableResult
+    func handleProvisionalNavigationStarted(
+        _ navigation: WKNavigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        poolContentNavigationGate.handleProvisionalNavigationStarted(navigation)
+    }
+
+    @discardableResult
+    func admitNavigationCallback(
+        _ navigation: WKNavigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        poolContentNavigationGate.admitNavigationCallback(navigation)
+    }
+
+    @discardableResult
+    func handleNavigationFinished(
+        _ navigation: WKNavigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        let disposition = poolContentNavigationGate.admitNavigationCallback(navigation)
+        poolContentNavigationGate.handleNavigationFinished(navigation)
+        return disposition
+    }
+
+    @discardableResult
+    func handleNavigationFailed(
+        _ navigation: WKNavigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        let disposition = poolContentNavigationGate.admitNavigationCallback(navigation)
+        poolContentNavigationGate.handleNavigationFailed(navigation)
+        return disposition
+    }
+
+    func cancelPendingPooledContentNavigation() {
+        poolContentNavigationGate.cancelPendingNavigation()
     }
 #if os(iOS)
     var hidesTopScrollEdgeEffect = false
@@ -6641,6 +8001,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
     private var touchStartPoint: CGPoint?
     private var touchStartTime: TimeInterval?
     private var touchStartTarget: WebViewNativeLookupHitTarget?
+    private var touchStartLookupInteractionID: UUID?
     private var touchStartWasActiveTarget = false
     private var touchStartIsBlankLookupDismissal = false
     private weak var touchStartOverlay: NativeLookupHitTestOverlayView?
@@ -6673,6 +8034,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             return
         }
         let point = touch.location(in: coordinateView)
+        let lookupInteractionID = store?.captureActiveLookupInteractionID()
         let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
         guard let target = store?.hitTarget(
             at: point,
@@ -6685,6 +8047,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 touchStartPoint = point
                 touchStartTime = event.timestamp
                 touchStartTarget = nil
+                touchStartLookupInteractionID = lookupInteractionID
                 touchStartWasActiveTarget = false
                 touchStartIsBlankLookupDismissal = true
                 touchStartOverlay = nil
@@ -6724,6 +8087,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartPoint = point
         touchStartTime = event.timestamp
         touchStartTarget = target
+        touchStartLookupInteractionID = lookupInteractionID
         store?.beginNativeTouchStream(on: target)
         let activeLookupElementID = store?.activeLookupElementID?()
         let hadActiveLookup = activeLookupElementID != nil
@@ -6820,6 +8184,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             let duration = event.timestamp - startedAt
             guard movement <= Self.segmentTapMovementTolerance,
                   duration <= Self.segmentTapMaximumDuration,
+                  store?.isActiveLookupInteractionCurrent(touchStartLookupInteractionID) == true,
                   store?.closeActiveLookupFromBlankTapIfNeeded() == true else {
                 resetTrackingState()
                 state = .failed
@@ -6838,6 +8203,24 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 stage: "touchesEnded.missingTrackingState",
                 verdict: "passThrough.allowed",
                 reason: "missingTrackingState",
+                extra: [
+                    "segmentTargetTouchesReachWebKit": true,
+                ]
+            )
+            resetTrackingState()
+            state = .failed
+            return
+        }
+        guard store?.isCapturedNativeTouchCurrent(
+            target,
+            lookupInteractionID: touchStartLookupInteractionID
+        ) == true else {
+            logTouchDeliveryVerdict(
+                stage: "touchesEnded.staleNativeLookupInteraction",
+                verdict: "passThrough.allowedAfterRecognizerFailure",
+                reason: "nativeLookupPublicationOrLookupReplaced",
+                target: target,
+                coordinateView: coordinateView,
                 extra: [
                     "segmentTargetTouchesReachWebKit": true,
                 ]
@@ -6974,6 +8357,13 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         guard let target = touchStartTarget,
               let point = touchStartPoint,
               let coordinateView else { return }
+        guard store?.isCapturedNativeTouchCurrent(
+            target,
+            lookupInteractionID: touchStartLookupInteractionID
+        ) == true else {
+            touchStartOverlay?.clearPressedTarget()
+            return
+        }
         guard Self.point(point, isInside: target),
               store?.hasActiveWebTextSelection != true else {
             touchStartOverlay?.clearPressedTarget()
@@ -6985,10 +8375,12 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             touchStartOverlay?.clearPressedTarget()
             return
         }
+        let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
         let didDispatchLookup = store?.handleTap(
             on: target,
             at: point,
-            in: coordinateView.bounds.size
+            in: coordinateView.bounds.size,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ) == true
         if didDispatchLookup {
             touchStartOverlay?.clearPressedTarget(after: Self.segmentTapPressedHandoffDuration)
@@ -7004,6 +8396,7 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
         touchStartPoint = nil
         touchStartTime = nil
         touchStartTarget = nil
+        touchStartLookupInteractionID = nil
         touchStartWasActiveTarget = false
         touchStartIsBlankLookupDismissal = false
         store?.finishNativeTouchStream(reason: "resetTrackingState")
@@ -7113,6 +8506,10 @@ public class WebViewController: UIViewController {
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
     private weak var nativeLookupHitTestStore: WebViewNativeLookupHitTestStore?
     private var lastKnownWebViewSize: CGSize = .zero
+    private weak var snapshotBoundsAdjustmentWebView: EnhancedWKWebView?
+    private var snapshotBoundsAdjustmentOriginalBounds: CGRect?
+    private var snapshotBoundsAdjustmentAppliedBounds: CGRect?
+    private var snapshotBoundsAdjustmentGeneration: UInt64 = 0
     var isWebViewUnloaded = false
     var onViewDidAppear: (() -> Void)?
     var onViewWillDisappear: (() -> Void)?
@@ -7234,15 +8631,22 @@ public class WebViewController: UIViewController {
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
         guard nativeLookupHitTestStore !== store else { return }
+        if nativeLookupHitTestStore != nil {
+            nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(
+                reason: "nativeLookup.storeReplacement"
+            )
+        }
+        nativeLookupHitTestOverlayView.clearPressedTarget()
         nativeLookupHitTestStore = store
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
-        store.onPressedTargetHandoffCompleted = { [weak self] elementID in
-            self?.nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
+        store.onPressedTargetHandoffCompleted = { [weak self, weak store] elementID in
+            guard let self, nativeLookupHitTestStore === store else { return }
+            nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
         }
-        store.onExternalTouchInteractionCancelled = { [weak self] reason in
-            guard let self else { return }
+        store.onExternalTouchInteractionCancelled = { [weak self, weak store] reason in
+            guard let self, nativeLookupHitTestStore === store else { return }
             nativeLookupHitTestOverlayView.clearPressedTarget()
             nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(reason: reason)
         }
@@ -7250,6 +8654,7 @@ public class WebViewController: UIViewController {
 
     @MainActor
     func detachWebView() {
+        cancelPendingSnapshotBoundsAdjustment()
         NSLayoutConstraint.deactivate(webViewConstraints)
         webViewConstraints.removeAll()
         NSLayoutConstraint.deactivate(nativeLookupHitTestOverlayConstraints)
@@ -7281,8 +8686,10 @@ public class WebViewController: UIViewController {
     }
 
     @MainActor
-    func snapshotSizeMetrics() -> (current: CGSize, lastKnown: CGSize, shouldOverride: Bool) {
-        let current = webView.bounds.size
+    func snapshotSizeMetrics(
+        for sourceWebView: EnhancedWKWebView
+    ) -> (current: CGSize, lastKnown: CGSize, shouldOverride: Bool) {
+        let current = sourceWebView.bounds.size
         let lastKnown = lastKnownWebViewSize
         let shouldOverride = (current.width < 2 || current.height < 2)
             && lastKnown.width > 2
@@ -7291,28 +8698,86 @@ public class WebViewController: UIViewController {
     }
 
     @MainActor
-    func captureSnapshot() async -> UIImage? {
-        let metrics = snapshotSizeMetrics()
-        let originalBounds = webView.bounds
-        var didOverride = false
-        if metrics.shouldOverride {
-            webView.bounds = CGRect(origin: .zero, size: metrics.lastKnown)
-            webView.layoutIfNeeded()
-            webView.scrollView.layoutIfNeeded()
-            didOverride = true
-        }
+    func captureSnapshot(of sourceWebView: EnhancedWKWebView) async -> UIImage? {
+        let metrics = snapshotSizeMetrics(for: sourceWebView)
+        let boundsAdjustmentGeneration = beginSnapshotBoundsAdjustmentIfNeeded(
+            for: sourceWebView,
+            targetSize: metrics.lastKnown,
+            shouldAdjust: metrics.shouldOverride
+        )
         let configuration = WKSnapshotConfiguration()
-        configuration.rect = webView.bounds
+        configuration.rect = sourceWebView.bounds
         let image = await withCheckedContinuation { continuation in
-            webView.takeSnapshot(with: configuration) { image, _ in
+            sourceWebView.takeSnapshot(with: configuration) { image, _ in
                 continuation.resume(returning: image)
             }
         }
-        if didOverride {
-            webView.bounds = originalBounds
-            webView.layoutIfNeeded()
+        if let boundsAdjustmentGeneration {
+            finishSnapshotBoundsAdjustment(
+                boundsAdjustmentGeneration,
+                for: sourceWebView
+            )
         }
         return image
+    }
+
+    @MainActor
+    @discardableResult
+    func beginSnapshotBoundsAdjustmentIfNeeded(
+        for sourceWebView: EnhancedWKWebView,
+        targetSize: CGSize,
+        shouldAdjust: Bool
+    ) -> UInt64? {
+        guard shouldAdjust else { return nil }
+        cancelPendingSnapshotBoundsAdjustment()
+        snapshotBoundsAdjustmentGeneration &+= 1
+        let generation = snapshotBoundsAdjustmentGeneration
+        snapshotBoundsAdjustmentWebView = sourceWebView
+        snapshotBoundsAdjustmentOriginalBounds = sourceWebView.bounds
+        let appliedBounds = CGRect(origin: .zero, size: targetSize)
+        snapshotBoundsAdjustmentAppliedBounds = appliedBounds
+        sourceWebView.bounds = appliedBounds
+        sourceWebView.layoutIfNeeded()
+        sourceWebView.scrollView.layoutIfNeeded()
+        return generation
+    }
+
+    @MainActor
+    func finishSnapshotBoundsAdjustment(
+        _ generation: UInt64,
+        for sourceWebView: EnhancedWKWebView
+    ) {
+        guard snapshotBoundsAdjustmentGeneration == generation,
+              snapshotBoundsAdjustmentWebView === sourceWebView,
+              let originalBounds = snapshotBoundsAdjustmentOriginalBounds,
+              let appliedBounds = snapshotBoundsAdjustmentAppliedBounds else {
+            return
+        }
+        snapshotBoundsAdjustmentWebView = nil
+        snapshotBoundsAdjustmentOriginalBounds = nil
+        snapshotBoundsAdjustmentAppliedBounds = nil
+        guard sourceWebView.bounds == appliedBounds else { return }
+        sourceWebView.bounds = originalBounds
+        sourceWebView.layoutIfNeeded()
+    }
+
+    @MainActor
+    func cancelPendingSnapshotBoundsAdjustment() {
+        snapshotBoundsAdjustmentGeneration &+= 1
+        guard let sourceWebView = snapshotBoundsAdjustmentWebView,
+              let originalBounds = snapshotBoundsAdjustmentOriginalBounds,
+              let appliedBounds = snapshotBoundsAdjustmentAppliedBounds else {
+            snapshotBoundsAdjustmentWebView = nil
+            snapshotBoundsAdjustmentOriginalBounds = nil
+            snapshotBoundsAdjustmentAppliedBounds = nil
+            return
+        }
+        snapshotBoundsAdjustmentWebView = nil
+        snapshotBoundsAdjustmentOriginalBounds = nil
+        snapshotBoundsAdjustmentAppliedBounds = nil
+        guard sourceWebView.bounds == appliedBounds else { return }
+        sourceWebView.bounds = originalBounds
+        sourceWebView.layoutIfNeeded()
     }
 
     @MainActor
@@ -7607,9 +9072,7 @@ public struct WebView {
         coordinator.lifecycleConfig = lifecycleConfig
         coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
         coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator] reason, pageURL in
-            Task { @MainActor in
-                coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
-            }
+            coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
         }
         return coordinator
     }
@@ -7648,16 +9111,17 @@ extension WebView: UIViewControllerRepresentable {
         config: WebViewConfig,
         coordinator: WebViewCoordinator
     ) -> EnhancedWKWebView {
-        var web: EnhancedWKWebView?
-        if web == nil, let resolvedWebViewPool {
-            web = resolvedWebViewPool.dequeue(preferredContentID: poolContentID) {
-                makeNewWebView(config: config)
-            }
+        let createWebView = makeDetachedWebViewFactory(config: config)
+        let web: EnhancedWKWebView
+        if let resolvedWebViewPool {
+            resolvedWebViewPool.setCreationClosureIfNeeded(createWebView)
+            web = resolvedWebViewPool.dequeue(
+                preferredContentID: poolContentID,
+                createIfNeeded: createWebView
+            )
+        } else {
+            web = createWebView()
         }
-        if web == nil {
-            web = makeNewWebView(config: config)
-        }
-        guard let web else { fatalError("Couldn't instantiate WKWebView for WebView.") }
         
         web.buildMenu = buildMenu
         
@@ -7667,72 +9131,16 @@ extension WebView: UIViewControllerRepresentable {
     }
 
     @MainActor
-    private func makeNewWebView(config: WebViewConfig) -> EnhancedWKWebView {
-        let preferences = WKWebpagePreferences()
-        preferences.allowsContentJavaScript = config.javaScriptEnabled
-
-        let configuration = WKWebViewConfiguration()
-        configuration.applicationNameForUserAgent = userAgent
-        if config.usesSampledPageTopColorForUnderPageBackground,
-           manabiCanUseSampledPageTopColorBackground() {
-            configuration.enableManabiPageTopColorSampling()
-        }
-        configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
-        if config.dataDetectorsEnabled {
-            configuration.dataDetectorTypes = [.all]
-        } else {
-            configuration.dataDetectorTypes = []
-        }
-        configuration.defaultWebpagePreferences = preferences
-        configuration.processPool = webViewProcessPool
-        configuration.websiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
-
-        for (urlSchemeHandler, urlScheme) in schemeHandlers {
-            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
-        }
-
-        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
-        webView.isOpaque = config.isOpaque
-        if #available(iOS 14.0, *) {
-            let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
-                ? (config.isOpaque ? .systemBackground : .clear)
-                : UIColor(config.backgroundColor)
-            webView.backgroundColor = resolvedBackgroundColor
-            if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
-                config: config,
-                allowSampledPageTopColor: false
-            ) {
-                webView.scrollView.backgroundColor = resolvedUnderPageColor
-            }
-        } else {
-            webView.backgroundColor = config.isOpaque ? .systemBackground : .clear
-            webView.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
-        }
-        webView.scrollView.isOpaque = config.isOpaque
-#if os(iOS)
-        webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
-        applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView)
-#endif
-        if #available(iOS 15.0, *) {
-            webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: false)
-        }
-        return webView
-    }
-
-    @MainActor
     private func configureWebView(
         _ webView: EnhancedWKWebView,
         controller: WebViewController,
         context: Context
     ) {
-        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "configure-webview")
+        let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         if context.coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
             context.coordinator.lastUserScriptsContentController = webView.configuration.userContentController
             context.coordinator.lastInstalledScriptsSignature = webView.persistedUserScriptsSignature
-        }
-        if context.coordinator.lastAppliedContentRules != webView.persistedAppliedContentRules {
-            context.coordinator.lastAppliedContentRules = webView.persistedAppliedContentRules
         }
         applyCommonConfiguration(
             webView: webView,
@@ -7780,12 +9188,11 @@ extension WebView: UIViewControllerRepresentable {
         }
 
         updateUserScripts(
-            userContentController: webView.configuration.userContentController,
+            webView: webView,
             coordinator: context.coordinator,
             forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
         )
-        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "configure-webview")
         bindScriptCallerIfNeeded(to: webView, context: context)
         context.coordinator.textSelection = $textSelection
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
@@ -7852,6 +9259,7 @@ extension WebView: UIViewControllerRepresentable {
         context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
+            coordinator.cancelPendingWebViewUnload()
             #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
@@ -8005,7 +9413,7 @@ extension WebView: UIViewControllerRepresentable {
 #endif
         updateCoordinatorBindings(context: context)
         bindScriptCallerIfNeeded(to: controller.webView, context: context)
-        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        let resolvedContentRules = navigator.peekContentRulesBypass(for: controller.webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: controller.webView,
             context: context,
@@ -8013,14 +9421,12 @@ extension WebView: UIViewControllerRepresentable {
         )
         refreshDarkModeSetting(webView: controller.webView)
         updateUserScripts(
-            userContentController: controller.webView.configuration.userContentController,
+            webView: controller.webView,
             coordinator: context.coordinator,
             forDomain: resolvedUserScriptDomain(currentURL: controller.webView.url),
             config: config
         )
-        
-        //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
-        
+
         //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         
@@ -8093,6 +9499,7 @@ extension WebView: UIViewControllerRepresentable {
         // _obscuredInsets ignores sides, probably
         controller.onViewDidAppear = { [weak coordinator = context.coordinator, weak controller] in
             guard let coordinator, let controller else { return }
+            coordinator.cancelPendingWebViewUnload()
             #if DEBUG && os(iOS)
             let timestamp = String(format: "%.3f", Date().timeIntervalSince1970)
             print("# LOOKUPPERF", timestamp, "webview.viewDidAppear url=\(controller.webView.url?.absoluteString ?? "<nil>")")
@@ -8130,13 +9537,13 @@ extension WebView: UIViewControllerRepresentable {
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
         controller.clearSnapshotOverlay()
-        coordinator.navigator.nativeLookupHitTesting.removeAllTargets()
+        coordinator.cancelPendingWebViewUnload()
+        guard !controller.isWebViewUnloaded else { return }
+
         coordinator.tearDownBindingsForDetachedWebView(controller.webView)
         if let pool = coordinator.webViewPool {
-            if !controller.isWebViewUnloaded {
-                controller.detachWebView()
-                pool.enqueue(controller.webView, resetURL: coordinator.lifecycleConfig.idleLoadURL)
-            }
+            controller.detachWebView()
+            pool.enqueue(controller.webView, resetURL: coordinator.lifecycleConfig.idleLoadURL)
         } else {
             controller.view.subviews.forEach { $0.removeFromSuperview() }
         }
@@ -8250,42 +9657,105 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
     private static let segmentClickPressedHandoffDuration: TimeInterval = 0.16
 
     weak var store: WebViewNativeLookupHitTestStore?
+    private weak var interactionStore: WebViewNativeLookupHitTestStore?
     private weak var pressedOverlay: NativeLookupHitTestOverlayNSView?
+    private var interactionTarget: WebViewNativeLookupHitTarget?
+    private var interactionLookupID: UUID?
     private var mouseDownWasActiveTarget = false
 
     override func mouseDown(with event: NSEvent) {
-        guard let view else {
+        finishInteraction(clearPressedTarget: true)
+        guard let view,
+              let store else {
             state = .failed
             return
         }
         let point = view.convert(event.locationInWindow, from: nil)
-        guard let target = store?.hitTarget(at: point, in: view.bounds.size) else {
+        let coordinateViewWindowOrigin = view.convert(CGPoint.zero, to: nil)
+        guard let target = store.hitTarget(
+            at: point,
+            in: view.bounds.size,
+            coordinateViewWindowOrigin: coordinateViewWindowOrigin
+        ) else {
             state = .failed
             return
         }
+        interactionStore = store
+        interactionTarget = target
+        interactionLookupID = store.captureActiveLookupInteractionID()
         pressedOverlay = view as? NativeLookupHitTestOverlayNSView
-        mouseDownWasActiveTarget = store?.matchesActiveLookupTarget(target) == true
-        store?.onActiveTargetTouchDown?(target)
-        if store?.showsPressedTargetOverlay == true {
+        mouseDownWasActiveTarget = store.matchesActiveLookupTarget(target)
+        store.beginNativeTouchStream(on: target)
+        if store.showsPressedTargetOverlay {
             pressedOverlay?.showPressedTarget(target)
         } else {
             pressedOverlay?.clearPressedTarget()
         }
         super.mouseDown(with: event)
-        if mouseDownWasActiveTarget {
-            pressedOverlay?.clearPressedTarget()
-        } else {
-            pressedOverlay?.clearPressedTarget(after: Self.segmentClickPressedHandoffDuration)
+    }
+
+    @MainActor
+    @discardableResult
+    func completeRecognizedClick(in coordinateView: NSView) -> Bool {
+        guard state == .ended,
+              let interactionStore,
+              store === interactionStore,
+              let target = interactionTarget,
+              interactionStore.isCapturedNativeTouchCurrent(
+                target,
+                lookupInteractionID: interactionLookupID
+              ) else {
+            finishInteraction(clearPressedTarget: true)
+            return false
         }
+
+        let didComplete: Bool
+        if mouseDownWasActiveTarget {
+            interactionStore.onActiveTargetTouchDown?(target)
+            didComplete = true
+        } else {
+            let point = location(in: coordinateView)
+            let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
+            didComplete = interactionStore.handleTap(
+                on: target,
+                at: point,
+                in: coordinateView.bounds.size,
+                coordinateViewWindowOrigin: coordinateViewWindowOrigin
+            )
+        }
+
+        if didComplete, !mouseDownWasActiveTarget {
+            pressedOverlay?.clearPressedTarget(after: Self.segmentClickPressedHandoffDuration)
+        } else {
+            pressedOverlay?.clearPressedTarget()
+        }
+        finishInteraction(clearPressedTarget: false)
+        return didComplete
+    }
+
+    private func finishInteraction(clearPressedTarget: Bool) {
+        interactionStore?.finishNativeTouchStream(reason: "macClickInteractionFinished")
+        if clearPressedTarget {
+            pressedOverlay?.clearPressedTarget()
+        }
+        interactionStore = nil
+        interactionTarget = nil
+        interactionLookupID = nil
         mouseDownWasActiveTarget = false
         pressedOverlay = nil
     }
 
+    @MainActor
+    func cancelForExternalInteraction(reason _: String) {
+        finishInteraction(clearPressedTarget: true)
+        if state == .possible {
+            state = .failed
+        }
+    }
+
     override func reset() {
         super.reset()
-        pressedOverlay?.clearPressedTarget()
-        mouseDownWasActiveTarget = false
-        pressedOverlay = nil
+        finishInteraction(clearPressedTarget: true)
     }
 }
 
@@ -8314,14 +9784,23 @@ public final class WebViewHostNSView: NSView {
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
         guard nativeLookupHitTestStore !== store else { return }
+        if nativeLookupHitTestStore != nil {
+            nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(
+                reason: "nativeLookup.storeReplacement"
+            )
+        }
+        nativeLookupHitTestOverlayView.clearPressedTarget()
         nativeLookupHitTestStore = store
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
-        store.onPressedTargetHandoffCompleted = { [weak self] elementID in
-            self?.nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
+        store.onPressedTargetHandoffCompleted = { [weak self, weak store] elementID in
+            guard let self, nativeLookupHitTestStore === store else { return }
+            nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
         }
-        store.onExternalTouchInteractionCancelled = { [weak self] _ in
-            self?.nativeLookupHitTestOverlayView.clearPressedTarget()
+        store.onExternalTouchInteractionCancelled = { [weak self, weak store] reason in
+            guard let self, nativeLookupHitTestStore === store else { return }
+            nativeLookupHitTestOverlayView.clearPressedTarget()
+            nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(reason: reason)
         }
     }
 
@@ -8351,30 +9830,33 @@ public final class WebViewHostNSView: NSView {
     }
 
     @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
-        guard recognizer.state == .ended else { return }
-        _ = recognizer.store?.handleTap(at: recognizer.location(in: nativeLookupHitTestOverlayView), in: nativeLookupHitTestOverlayView.bounds.size)
+        _ = recognizer.completeRecognizedClick(in: nativeLookupHitTestOverlayView)
     }
 }
 
 extension WebView: NSViewRepresentable {
     @MainActor
     public func makeNSView(context: Context) -> WebViewHostNSView {
+        let createWebView = makeDetachedWebViewFactory(
+            config: config,
+            drawsBackground: drawsBackground
+        )
         if let resolvedWebViewPool {
-            resolvedWebViewPool.setCreationClosureIfNeeded {
-                makeNewWebView(context: context)
-            }
+            resolvedWebViewPool.setCreationClosureIfNeeded(createWebView)
         }
 
         let webView: EnhancedWKWebView
         if let resolvedWebViewPool {
-            webView = resolvedWebViewPool.dequeue(preferredContentID: poolContentID) {
-                makeNewWebView(context: context)
-            }
+            webView = resolvedWebViewPool.dequeue(
+                preferredContentID: poolContentID,
+                createIfNeeded: createWebView
+            )
         } else {
-            webView = makeNewWebView(context: context)
+            webView = createWebView()
         }
 
-        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
+        let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
             context: context,
@@ -8391,7 +9873,6 @@ extension WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
         bindScriptCallerIfNeeded(to: webView, context: context)
 
         refreshDarkModeSetting(webView: webView)
@@ -8503,40 +9984,20 @@ extension WebView: NSViewRepresentable {
     }
 
     @MainActor
-    private func makeNewWebView(context: Context) -> EnhancedWKWebView {
-        let preferences = WKWebpagePreferences()
-        preferences.allowsContentJavaScript = config.javaScriptEnabled
-
-        let configuration = WKWebViewConfiguration()
-        configuration.applicationNameForUserAgent = userAgent
-        configuration.defaultWebpagePreferences = preferences
-        configuration.websiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
-        configuration.processPool = webViewProcessPool
-        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-        configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
-
-        for (urlSchemeHandler, urlScheme) in schemeHandlers {
-            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
-        }
-
-        return EnhancedWKWebView(frame: CGRect.zero, configuration: configuration)
-    }
-    
-    @MainActor
     public func updateNSView(_ uiView: WebViewHostNSView, context: Context) {
         updateCoordinatorBindings(context: context)
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         uiView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         let webView = uiView.webView
         bindScriptCallerIfNeeded(to: webView, context: context)
-        let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
+        let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
             context: context,
             resolvedContentRules: resolvedContentRules
         )
         updateUserScripts(
-            userContentController: webView.configuration.userContentController,
+            webView: webView,
             coordinator: context.coordinator,
             forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
@@ -8568,7 +10029,6 @@ extension WebView: NSViewRepresentable {
     
     public static func dismantleNSView(_ nsView: WebViewHostNSView, coordinator: WebViewCoordinator) {
         let webView = nsView.webView
-        coordinator.navigator.nativeLookupHitTesting.removeAllTargets()
         coordinator.tearDownBindingsForDetachedWebView(webView)
         if let pool = coordinator.webViewPool {
             webView.removeFromSuperview()
@@ -8579,6 +10039,83 @@ extension WebView: NSViewRepresentable {
 #endif
 
 extension WebView {
+    /// Returns a pool-safe factory that captures only WebKit creation inputs.
+    ///
+    /// The pool can outlive the SwiftUI `WebView` value that installed it. Capturing
+    /// that value here would also capture its navigator, bindings, callbacks, and
+    /// `WebViewPrewarmer`, creating a retain cycle through the prewarmer's pool.
+    @MainActor
+    internal func makeDetachedWebViewFactory(
+        config: WebViewConfig,
+        drawsBackground: Bool = false
+    ) -> () -> EnhancedWKWebView {
+        let applicationNameForUserAgent = userAgent
+        let resolvedWebsiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
+        let resolvedSchemeHandlers = schemeHandlers
+#if os(macOS)
+        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+#endif
+
+        return {
+            let preferences = WKWebpagePreferences()
+            preferences.allowsContentJavaScript = config.javaScriptEnabled
+
+            let configuration = WKWebViewConfiguration()
+            configuration.applicationNameForUserAgent = applicationNameForUserAgent
+            configuration.defaultWebpagePreferences = preferences
+            configuration.websiteDataStore = resolvedWebsiteDataStore
+            configuration.processPool = webViewProcessPool
+            configuration.mediaTypesRequiringUserActionForPlayback =
+                config.mediaTypesRequiringUserActionForPlayback
+
+#if os(iOS)
+            if config.usesSampledPageTopColorForUnderPageBackground,
+               manabiCanUseSampledPageTopColorBackground() {
+                configuration.enableManabiPageTopColorSampling()
+            }
+            configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
+            configuration.dataDetectorTypes = config.dataDetectorsEnabled ? [.all] : []
+#elseif os(macOS)
+            configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+#endif
+
+            for (urlSchemeHandler, urlScheme) in resolvedSchemeHandlers {
+                configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+            }
+
+            let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
+#if os(iOS)
+            webView.isOpaque = config.isOpaque
+            if #available(iOS 14.0, *) {
+                let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
+                    && !manabiCanUseSampledPageTopColorBackground()
+                    ? (config.isOpaque ? .systemBackground : .clear)
+                    : UIColor(config.backgroundColor)
+                webView.backgroundColor = resolvedBackgroundColor
+                if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
+                    config: config,
+                    allowSampledPageTopColor: false
+                ) {
+                    webView.scrollView.backgroundColor = resolvedUnderPageColor
+                }
+            } else {
+                webView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+                webView.scrollView.backgroundColor = config.isOpaque ? .systemBackground : .clear
+            }
+            webView.scrollView.isOpaque = config.isOpaque
+            webView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
+            applyTopScrollEdgeEffectHidden(config.hidesTopScrollEdgeEffect, to: webView)
+            if #available(iOS 15.0, *) {
+                webView.applyUnderPageBackgroundColor(
+                    config: config,
+                    allowSampledPageTopColor: false
+                )
+            }
+#endif
+            return webView
+        }
+    }
+
     private var resolvedWebViewPool: WebViewPool? {
         webViewPrewarmer?.pool ?? webViewPool
     }
@@ -8594,15 +10131,16 @@ extension WebView {
         context: Context,
         resolvedContentRules: String?
     ) {
-        refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
-        if context.coordinator.lastAppliedContentRules != resolvedContentRules {
+        refreshMessageHandlers(webView: webView, context: context)
+        if context.coordinator.needsContentRulesApplication(
+            resolvedContentRules,
+            for: webView
+        ) {
             refreshContentRules(
-                userContentController: webView.configuration.userContentController,
+                webView: webView,
                 coordinator: context.coordinator,
-                overrideRules: resolvedContentRules
+                contentRules: resolvedContentRules
             )
-        } else if let enhancedWebView = webView as? EnhancedWKWebView {
-            enhancedWebView.persistedAppliedContentRules = resolvedContentRules
         }
         if webView.navigationDelegate !== context.coordinator {
             webView.navigationDelegate = context.coordinator
@@ -8638,9 +10176,7 @@ extension WebView {
         context.coordinator.lifecycleConfig = lifecycleConfig
         context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
         context.coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator = context.coordinator] reason, pageURL in
-            Task { @MainActor in
-                coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
-            }
+            coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
         }
         context.coordinator.hideNavigationDueToScroll = $hideNavigationDueToScroll
         context.coordinator.syncHideNavigationDueToScrollFromHost(hideNavigationDueToScroll)
@@ -8737,82 +10273,116 @@ extension WebView {
     
     @MainActor
     func refreshContentRules(
-        userContentController: WKUserContentController,
+        webView sourceWebView: WKWebView,
         coordinator: WebViewCoordinator,
-        overrideRules: String? = nil
+        contentRules requestedContentRules: String?
     ) {
-        userContentController.removeAllContentRuleLists()
-        let rules = (overrideRules ?? config.contentRules)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let contentRules = rules, !contentRules.isEmpty else {
-            coordinator.lastAppliedContentRules = nil
-            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = nil
+        let contentRules = normalizedWebViewContentRules(requestedContentRules)
+        let appliedContentRules = coordinator.appliedContentRules(for: sourceWebView)
+        let cachedRuleList = contentRules.flatMap { coordinator.compiledContentRules[$0] }
+        let pendingContentRules = if contentRules != nil,
+                                     contentRules != appliedContentRules,
+                                     cachedRuleList == nil {
+            contentRules
+        } else {
+            nil
+        }
+        guard let applicationGeneration = coordinator.beginContentRulesApplication(
+            for: sourceWebView,
+            pendingContentRules: pendingContentRules
+        ) else { return }
+
+        // A changed pending request still needs to supersede its old owner, but
+        // reverting to the already-installed rules requires no WebKit mutation.
+        if appliedContentRules == contentRules {
+            coordinator.finishContentRulesApplication(
+                applicationGeneration,
+                for: sourceWebView
+            )
             return
         }
-        if let ruleList = coordinator.compiledContentRules[contentRules] {
-            userContentController.add(ruleList)
-            coordinator.lastAppliedContentRules = contentRules
-            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = contentRules
-            return
-        }
-        WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "ContentBlockingRules",
-            encodedContentRuleList: contentRules
-        ) { ruleList, error in
-            guard let ruleList else {
-                if let error {
+
+        let userContentController = sourceWebView.configuration.userContentController
+
+        // Keep the currently installed policy active until the uncached
+        // replacement has compiled successfully. A failed or superseded compile
+        // must not create a content-blocking gap.
+        if let contentRules, cachedRuleList == nil {
+            WKContentRuleListStore.default().compileContentRuleList(
+                forIdentifier: "ContentBlockingRules",
+                encodedContentRuleList: contentRules
+            ) { [weak coordinator, weak sourceWebView, weak userContentController] ruleList, error in
+                Task { @MainActor in
+                    guard let coordinator,
+                          let sourceWebView,
+                          coordinator.acceptsContentRulesApplication(
+                            applicationGeneration,
+                            for: sourceWebView
+                          ) else {
+                        return
+                    }
+                    defer {
+                        coordinator.finishContentRulesApplication(
+                            applicationGeneration,
+                            for: sourceWebView
+                        )
+                    }
+                    guard let userContentController,
+                          sourceWebView.configuration.userContentController === userContentController else {
+                        return
+                    }
+                    guard let ruleList else {
+                        if let error {
 #if DEBUG
-                    print("# contentRules.compile error", error)
+                            print("# contentRules.compile error", error)
 #endif
+                        }
+                        return
+                    }
+                    userContentController.removeAllContentRuleLists()
+                    userContentController.add(ruleList)
+                    coordinator.compiledContentRules[contentRules] = ruleList
+                    coordinator.recordAppliedContentRules(contentRules, for: sourceWebView)
                 }
-                return
             }
-            userContentController.add(ruleList)
-            coordinator.compiledContentRules[contentRules] = ruleList
-            coordinator.lastAppliedContentRules = contentRules
-            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedAppliedContentRules = contentRules
+            return
         }
+
+        userContentController.removeAllContentRuleLists()
+        coordinator.recordAppliedContentRules(nil, for: sourceWebView)
+
+        if let contentRules, let cachedRuleList {
+            guard coordinator.acceptsContentRulesApplication(
+                applicationGeneration,
+                for: sourceWebView
+            ) else { return }
+            userContentController.add(cachedRuleList)
+            coordinator.recordAppliedContentRules(contentRules, for: sourceWebView)
+        }
+        coordinator.finishContentRulesApplication(
+            applicationGeneration,
+            for: sourceWebView
+        )
     }
-    
+
     /// Refreshes the WKScriptMessageHandlers for the WebView.
     /// - Note: `systemMessageHandlers` are constant and never change.
     ///         Only the environment's handler names are dynamic.
     /// - Performance: This function avoids unnecessary Set creation or handler updates if nothing changed.
     @MainActor
-    func refreshMessageHandlers(userContentController: WKUserContentController, context: Context) {
-        if context.coordinator.lastUserContentController !== userContentController {
-            context.coordinator.registeredMessageHandlerNames.removeAll()
-            context.coordinator.lastEnvHandlerNames = nil
-            context.coordinator.lastUserContentController = userContentController
-        }
-        // systemMessageHandlers never change, so only envHandlerNames matter.
-        let envHandlerNames = webViewMessageHandlers.handlers.keys
-        // Early exit if environment handler keys haven't changed
-        if context.coordinator.lastEnvHandlerNames == envHandlerNames {
-            return
-        }
-        context.coordinator.lastEnvHandlerNames = envHandlerNames
-        
-        // Only create sets if changes detected.
-        let requiredHandlers = Set(Self.systemMessageHandlers).union(envHandlerNames)
-        
-        // Add any missing handlers.
-        for messageHandlerName in requiredHandlers {
-            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
-            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
-        
-        // Remove any no-longer-needed handlers.
-        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(requiredHandlers) {
-            userContentController.removeScriptMessageHandler(forName: missing)
-            context.coordinator.registeredMessageHandlerNames.remove(missing)
-        }
+    func refreshMessageHandlers(webView sourceWebView: WKWebView, context: Context) {
+        guard let sourceWebView = sourceWebView as? EnhancedWKWebView else { return }
+        let environmentHandlerNames = webViewMessageHandlers.handlers.keys
+        context.coordinator.reconcileMessageHandlers(
+            on: sourceWebView,
+            requiredHandlers: Set(Self.systemMessageHandlers).union(environmentHandlerNames),
+            environmentHandlerNames: environmentHandlerNames
+        )
     }
-    
+
     @MainActor
-    func updateUserScripts(userContentController: WKUserContentController, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebViewConfig) {
+    func updateUserScripts(webView sourceWebView: WKWebView, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebViewConfig) {
+        let userContentController = sourceWebView.configuration.userContentController
         var scripts = config.userScripts
         if let domain = domain?.domainURL.host {
             scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
@@ -8826,7 +10396,7 @@ extension WebView {
 
         if coordinator.lastUserScriptsContentController === userContentController,
            coordinator.lastInstalledScriptsSignature == installedScriptsSignature {
-            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
+            (sourceWebView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
             return
         }
 
@@ -8834,17 +10404,18 @@ extension WebView {
             userContentController.removeAllUserScripts()
             coordinator.lastUserScriptsContentController = userContentController
             coordinator.lastInstalledScriptsSignature = nil
-            (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = nil
+            (sourceWebView as? EnhancedWKWebView)?.persistedUserScriptsSignature = nil
             return
         }
         
         var matchedExistingScripts = [WKUserScript]()
         if !allScripts.allSatisfy({ newScript in
             return userContentController.userScripts.contains(where: { existingScript in
+                let expectedWorld = newScript.world ?? .page
                 if newScript.source == existingScript.source
                     && newScript.injectionTime == existingScript.injectionTime
-                    && newScript.isForMainFrameOnly == existingScript.isForMainFrameOnly {
-                    //                    && newScript.world == existingScript.world { // TODO: Track associated worlds...
+                    && newScript.isForMainFrameOnly == existingScript.isForMainFrameOnly
+                    && expectedWorld.isEqual(existingScript.contentWorld) {
                     matchedExistingScripts.append(existingScript)
                     return true
                 }
@@ -8863,7 +10434,7 @@ extension WebView {
 #endif
             coordinator.lastInstalledScriptsSignature = installedScriptsSignature
         }
-        (coordinator.navigator.webView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
+        (sourceWebView as? EnhancedWKWebView)?.persistedUserScriptsSignature = installedScriptsSignature
     }
     
     @MainActor fileprivate static let systemScripts = [

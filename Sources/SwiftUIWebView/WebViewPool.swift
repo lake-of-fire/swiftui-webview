@@ -13,6 +13,176 @@ public struct WebViewPoolContentID: Equatable, Hashable, Sendable {
     }
 }
 
+/// Classifies a delegate receipt without rejecting untracked WebKit navigation.
+/// Only an exact previously admitted receipt can be proven stale.
+internal enum WebViewNavigationCallbackDisposition: Equatable {
+    case current
+    case stale
+    case unknown
+}
+
+internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
+    private final class WeakNavigation {
+        weak var value: Navigation?
+
+        init(_ value: Navigation) {
+            self.value = value
+        }
+    }
+
+    private struct PendingNavigation {
+        let contentID: WebViewPoolContentID
+        let navigation: Navigation
+    }
+
+    private var knownNavigations = [WeakNavigation]()
+    private var latestNavigation: WeakNavigation?
+    private var pendingNavigation: PendingNavigation?
+    private(set) var readyContentID: WebViewPoolContentID?
+
+    var pendingContentID: WebViewPoolContentID? {
+        pendingNavigation?.contentID
+    }
+
+    mutating func setReadyContentID(_ contentID: WebViewPoolContentID?) {
+        knownNavigations.removeAll()
+        latestNavigation = nil
+        pendingNavigation = nil
+        readyContentID = contentID
+    }
+
+    mutating func beginKeyedNavigation(
+        contentID: WebViewPoolContentID,
+        navigation: Navigation
+    ) {
+        remember(navigation)
+        latestNavigation = WeakNavigation(navigation)
+        pendingNavigation = PendingNavigation(
+            contentID: contentID,
+            navigation: navigation
+        )
+        readyContentID = nil
+    }
+
+    mutating func beginUnkeyedNavigation(navigation: Navigation? = nil) {
+        if let navigation {
+            remember(navigation)
+            latestNavigation = WeakNavigation(navigation)
+        } else {
+            compactKnownNavigations()
+            latestNavigation = nil
+        }
+        pendingNavigation = nil
+        readyContentID = nil
+    }
+
+    mutating func resetNavigationOwnership() {
+        knownNavigations.removeAll()
+        latestNavigation = nil
+        pendingNavigation = nil
+        readyContentID = nil
+    }
+
+    mutating func navigationCallbackDisposition(
+        for navigation: Navigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        guard let navigation else { return .unknown }
+        compactKnownNavigations()
+        if latestNavigation?.value === navigation {
+            return .current
+        }
+        if knownNavigations.contains(where: { $0.value === navigation }) {
+            return .stale
+        }
+        return .unknown
+    }
+
+    @discardableResult
+    mutating func handleProvisionalNavigationStarted(
+        _ navigation: Navigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        admitNavigationCallback(navigation)
+    }
+
+    @discardableResult
+    mutating func handleNavigationFinished(_ navigation: Navigation?) -> Bool {
+        guard let navigation else { return false }
+        defer { removeKnownNavigation(navigation) }
+        guard let pendingNavigation,
+              pendingNavigation.navigation === navigation else {
+            return false
+        }
+        readyContentID = pendingNavigation.contentID
+        self.pendingNavigation = nil
+        return true
+    }
+
+    @discardableResult
+    mutating func handleNavigationFailed(_ navigation: Navigation?) -> Bool {
+        guard let navigation else { return false }
+        defer { removeKnownNavigation(navigation) }
+        guard let pendingNavigation,
+              pendingNavigation.navigation === navigation else {
+            return false
+        }
+        self.pendingNavigation = nil
+        readyContentID = nil
+        return true
+    }
+
+    mutating func cancelPendingNavigation() {
+        pendingNavigation = nil
+        compactKnownNavigations()
+        // Pool reset preserves a completed content identity, but any navigation
+        // that was current before reset no longer owns delegate publication.
+        latestNavigation = nil
+    }
+
+    mutating func admitNavigationCallback(
+        _ navigation: Navigation?
+    ) -> WebViewNavigationCallbackDisposition {
+        guard let navigation else {
+            // A receiptless callback is still accepted by the delegate. Preserve
+            // earlier admitted receipts as stale so they cannot resume afterward.
+            beginUnkeyedNavigation()
+            return .unknown
+        }
+
+        let disposition = navigationCallbackDisposition(for: navigation)
+        guard disposition == .unknown else { return disposition }
+
+        // The delegate already treats an unknown main-frame callback as current.
+        // Record the same ownership decision so a previously admitted receipt is
+        // stale if it resumes after this callback.
+        pendingNavigation = nil
+        readyContentID = nil
+        remember(navigation)
+        latestNavigation = WeakNavigation(navigation)
+        return .current
+    }
+
+    private mutating func remember(_ navigation: Navigation) {
+        compactKnownNavigations()
+        if !knownNavigations.contains(where: { $0.value === navigation }) {
+            knownNavigations.append(WeakNavigation(navigation))
+        }
+    }
+
+    private mutating func compactKnownNavigations() {
+        knownNavigations.removeAll { $0.value == nil }
+        if latestNavigation?.value == nil {
+            latestNavigation = nil
+        }
+    }
+
+    private mutating func removeKnownNavigation(_ navigation: Navigation) {
+        knownNavigations.removeAll {
+            guard let value = $0.value else { return true }
+            return value === navigation
+        }
+    }
+}
+
 @MainActor
 public final class WebViewPrewarmer: ObservableObject {
     public let pool: WebViewPool
@@ -34,28 +204,12 @@ public final class WebViewPrewarmer: ObservableObject {
 
 @MainActor
 public final class WebViewPool: ObservableObject {
-    private struct RetainedWebView {
-        var webView: EnhancedWKWebView
-        var contentID: WebViewPoolContentID?
-    }
     public var warmUpCount: Int {
-        didSet {
-            if configuredTotalCountTarget == nil {
-                prepareIfPossible()
-            } else {
-                rebalanceRetainedObjects()
-            }
-        }
+        didSet { rebalanceRetainedObjects() }
     }
 
     public var keepAliveCount: Int {
-        didSet {
-            if configuredTotalCountTarget == nil {
-                prepareIfPossible()
-            } else {
-                rebalanceRetainedObjects()
-            }
-        }
+        didSet { rebalanceRetainedObjects() }
     }
 
     private var configuredTotalCountTarget: Int?
@@ -65,6 +219,10 @@ public final class WebViewPool: ObservableObject {
     public var totalCountTarget: Int? {
         get { configuredTotalCountTarget }
         set {
+            guard !isInvalidated else {
+                configuredTotalCountTarget = 0
+                return
+            }
             configuredTotalCountTarget = newValue.map { max(0, $0) }
             rebalanceRetainedObjects()
         }
@@ -75,12 +233,13 @@ public final class WebViewPool: ObservableObject {
     public var defaultResetURL: URL?
     public var debugLabel: String?
 
-    private var warmedUpObjects: [RetainedWebView] = []
+    private var warmedUpObjects = [EnhancedWKWebView]()
     private var leasedObjectIdentifiers = Set<ObjectIdentifier>()
     private var creationClosure: (() -> EnhancedWKWebView)?
     private var isInvalidated = false
 
     private var targetRetainedCount: Int {
+        guard !isInvalidated else { return 0 }
         if let configuredTotalCountTarget {
             return max(0, configuredTotalCountTarget - leasedObjectIdentifiers.count)
         }
@@ -110,14 +269,18 @@ public final class WebViewPool: ObservableObject {
 
     deinit {
         MainActor.assumeIsolated {
-            for retained in warmedUpObjects {
-                onDequeue?(retained.webView)
-                retained.webView.resetForReuse(resetURL: nil)
+            for webView in warmedUpObjects {
+                onDequeue?(webView)
+                webView.resetForReuse(resetURL: nil)
             }
             warmedUpObjects.removeAll()
         }
     }
 
+    /// Installs the long-lived factory used for proactive warming.
+    ///
+    /// The pool retains this closure until invalidation, so it should capture only
+    /// immutable WebKit creation inputs rather than a SwiftUI view or coordinator.
     public func setCreationClosureIfNeeded(_ closure: @escaping () -> EnhancedWKWebView) {
         guard !isInvalidated else {
             log(event: "creationClosure.skip.invalidated")
@@ -143,23 +306,32 @@ public final class WebViewPool: ObservableObject {
         }
         log(event: "prepare.begin")
         while warmedUpObjects.count < targetRetainedCount {
-            let webView = creationClosure()
-            webView.warmUpIfNeeded(resetURL: defaultResetURL)
-            warmedUpObjects.append(RetainedWebView(webView: webView, contentID: nil))
-            onEnqueue?(webView)
-            log(
-                event: "prepare.created",
-                extra: ["webView": webViewIdentifier(webView)]
+            retainNewWebView(
+                using: creationClosure,
+                event: "prepare.created"
             )
         }
         log(event: "prepare.end")
     }
 
+    private func retainNewWebView(
+        using factory: () -> EnhancedWKWebView,
+        event: String
+    ) {
+        let webView = factory()
+        webView.warmUpIfNeeded(resetURL: defaultResetURL)
+        warmedUpObjects.append(webView)
+        onEnqueue?(webView)
+        log(
+            event: event,
+            extra: ["webView": webViewIdentifier(webView)]
+        )
+    }
+
     private func rebalanceRetainedObjects() {
         guard !isInvalidated else { return }
         while warmedUpObjects.count > targetRetainedCount {
-            let retained = warmedUpObjects.removeLast()
-            let webView = retained.webView
+            let webView = warmedUpObjects.removeLast()
             onDequeue?(webView)
             webView.resetForReuse(resetURL: defaultResetURL)
             log(
@@ -189,23 +361,41 @@ public final class WebViewPool: ObservableObject {
             log(event: "dequeue.unpooled.invalidated")
             return createIfNeeded()
         }
-        if creationClosure == nil {
-            creationClosure = createIfNeeded
-            log(event: "dequeue.creationClosure.set")
+        // `createIfNeeded` belongs only to this checkout. Retaining an arbitrary
+        // caller fallback here can capture its SwiftUI view, navigator, bindings,
+        // and even this pool through a prewarmer. Long-lived warming uses the
+        // explicit `setCreationClosureIfNeeded(_:)` factory instead.
+        //
+        // When the retained target is empty, seed the checkout with the exact
+        // current factory before proactive top-up. Otherwise `prepareIfPossible()`
+        // could manufacture an older owner's WebView and immediately hand it to
+        // this caller, bypassing the exact construction contract below.
+        if warmedUpObjects.isEmpty,
+           targetRetainedCount > 0,
+           creationClosure != nil {
+            retainNewWebView(
+                using: createIfNeeded,
+                event: "dequeue.seededCurrent"
+            )
         }
         prepareIfPossible()
         let webView: EnhancedWKWebView
         let source: String
         if let preferredContentID,
-           let exactIndex = warmedUpObjects.firstIndex(where: { $0.contentID == preferredContentID }) {
-            webView = warmedUpObjects.remove(at: exactIndex).webView
+           let exactIndex = warmedUpObjects.firstIndex(where: {
+               $0.poolReadyContentID == preferredContentID
+           }) {
+            webView = warmedUpObjects.remove(at: exactIndex)
             source = "warmed.exactContent"
         } else if let warmed = warmedUpObjects.first {
             warmedUpObjects.removeFirst()
-            webView = warmed.webView
+            webView = warmed
             source = "warmed"
         } else {
-            webView = (creationClosure ?? createIfNeeded)()
+            // The retained factory owns proactive warming only. The caller's
+            // fallback is the exact construction contract for this checkout and
+            // may carry newer configuration or URL-scheme-handler ownership.
+            webView = createIfNeeded()
             webView.warmUpIfNeeded(resetURL: defaultResetURL)
             source = "new"
         }
@@ -226,14 +416,13 @@ public final class WebViewPool: ObservableObject {
         let effectiveResetURL = resetURL ?? defaultResetURL
         let webViewID = ObjectIdentifier(webView)
         leasedObjectIdentifiers.remove(webViewID)
-        guard !warmedUpObjects.contains(where: { $0.webView === webView }) else {
+        guard !warmedUpObjects.contains(where: { $0 === webView }) else {
             log(event: "enqueue.skip.duplicate", extra: ["webView": String(describing: webViewID)])
             return
         }
         if warmedUpObjects.count < targetRetainedCount {
             webView.resetForReuse(resetURL: effectiveResetURL)
-            let contentID = effectiveResetURL == nil ? webView.poolReadyContentID : nil
-            warmedUpObjects.append(RetainedWebView(webView: webView, contentID: contentID))
+            warmedUpObjects.append(webView)
             onEnqueue?(webView)
             log(
                 event: "enqueue.retained",
@@ -250,9 +439,9 @@ public final class WebViewPool: ObservableObject {
 
     public func removeAll(resetURL: URL? = nil) {
         let effectiveResetURL = resetURL ?? defaultResetURL
-        for retained in warmedUpObjects {
-            onDequeue?(retained.webView)
-            retained.webView.resetForReuse(resetURL: effectiveResetURL)
+        for webView in warmedUpObjects {
+            onDequeue?(webView)
+            webView.resetForReuse(resetURL: effectiveResetURL)
         }
         warmedUpObjects.removeAll()
         log(event: "removeAll")
@@ -304,17 +493,18 @@ public final class WebViewPool: ObservableObject {
 
 private extension EnhancedWKWebView {
     func resetForReuse(resetURL: URL?) {
+        cancelPendingPooledContentNavigation()
         stopLoading()
-        poolPendingContentID = nil
         if let resetURL {
-            poolReadyContentID = nil
-            load(URLRequest(url: resetURL))
+            let navigation = load(URLRequest(url: resetURL))
+            beginUnkeyedNavigation(navigation: navigation)
         }
     }
 
     func warmUpIfNeeded(resetURL: URL?) {
         if let resetURL {
-            load(URLRequest(url: resetURL))
+            let navigation = load(URLRequest(url: resetURL))
+            beginUnkeyedNavigation(navigation: navigation)
         }
     }
 }

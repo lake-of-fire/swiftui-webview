@@ -28,6 +28,18 @@ final class PendingRequestLoadDispositionTests: XCTestCase {
             ),
             .deferUntilAttached
         )
+
+        XCTAssertEqual(
+            PendingRequestLoadDisposition.resolve(
+                requestURL: url,
+                hasWindow: false,
+                hasSuperview: true,
+                currentURL: nil,
+                isLoading: false,
+                restartIfSameURL: true
+            ),
+            .deferUntilAttached
+        )
     }
 
     func testLoadsRequestWhenAttachedAndNotAlreadyLoadingSameURL() {

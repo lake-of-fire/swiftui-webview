@@ -5,6 +5,7 @@ import WebKit
 
 extension WebViewCoordinator: UIScrollViewDelegate {
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard navigator.webView?.scrollView === scrollView else { return }
         publishScrollBottomState(for: scrollView)
         lastContentOffset = scrollView.contentOffset
         accumulatedScrollOffset = 0
@@ -12,6 +13,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        guard navigator.webView?.scrollView === scrollView else { return }
         publishScrollBottomState(for: scrollView)
         guard !decelerate else { return }
         accumulatedScrollOffset = 0
@@ -19,12 +21,14 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        guard navigator.webView?.scrollView === scrollView else { return }
         publishScrollBottomState(for: scrollView)
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
     }
 
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard navigator.webView?.scrollView === scrollView else { return }
         publishScrollBottomState(for: scrollView)
         guard scrollView.isTracking || scrollView.isDragging else { return }
 
@@ -180,9 +184,14 @@ extension WebViewCoordinator: UIScrollViewDelegate {
           };
         })();
         """
-        webView.evaluateJavaScript(script) { [weak self] value, _ in
-            guard let self else { return }
-            guard let payload = value as? [String: Any] else { return }
+        webView.evaluateJavaScript(script) { [weak self, weak webView] value, _ in
+            guard let self,
+                  let webView,
+                  self.navigator.webView === webView,
+                  webView.scrollView === scrollView,
+                  let payload = value as? [String: Any] else {
+                return
+            }
             if let axisRaw = payload["axis"] as? String, axisRaw == "horizontal" {
                 self.navigationScrollAxis = .horizontal
             } else {
