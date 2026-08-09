@@ -8273,7 +8273,9 @@ public struct WebView {
         )
         coordinator.webViewPool = resolvedWebViewPool
         coordinator.lifecycleConfig = lifecycleConfig
-        coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        if let idleLoadURL = lifecycleConfig.idleLoadURL {
+            coordinator.navigator.attachFallbackURL = idleLoadURL
+        }
         coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator] reason, pageURL in
             Task { @MainActor in
                 coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
@@ -9278,7 +9280,9 @@ extension WebView {
 #endif
         context.coordinator.webViewPool = resolvedWebViewPool
         context.coordinator.lifecycleConfig = lifecycleConfig
-        context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        if let idleLoadURL = lifecycleConfig.idleLoadURL {
+            context.coordinator.navigator.attachFallbackURL = idleLoadURL
+        }
         context.coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator = context.coordinator] reason, pageURL in
             Task { @MainActor in
                 coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)

@@ -81,6 +81,19 @@ private final class TestNavigationDelegate: NSObject, WKNavigationDelegate {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testDefaultLifecycleConfigurationPreservesNavigatorFallbackURL() throws {
+        let navigator = WebViewNavigator()
+        let fallbackURL = try XCTUnwrap(URL(string: "https://fallback.invalid/reader"))
+        navigator.attachFallbackURL = fallbackURL
+
+        _ = WebView(
+            navigator: navigator,
+            state: .constant(.empty)
+        ).makeCoordinator()
+
+        XCTAssertEqual(navigator.attachFallbackURL, fallbackURL)
+    }
+
     func testReplacingFrameUUIDRemovesOldCanonicalDocumentAlias() async throws {
         let configuration = WKWebViewConfiguration()
         let messageHandler = FrameProbeMessageHandler()
