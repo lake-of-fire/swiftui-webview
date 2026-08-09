@@ -29,8 +29,178 @@ private actor DocumentCallbackTestGate {
     }
 }
 
+private final class WeakReference<Value: AnyObject> {
+    weak var value: Value?
+
+    init(_ value: Value?) {
+        self.value = value
+    }
+}
+
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testWebViewUnloadTransactionRequiresExactOwnersAndRejectsLateCompletion() throws {
+        let controller = NSObject()
+        let originalWebView = NSObject()
+        let replacementWebView = NSObject()
+        let pool = NSObject()
+        let replacementPool = NSObject()
+        var gate = WebViewUnloadTransactionGate()
+        let originalGeneration = try XCTUnwrap(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(originalWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+
+        XCTAssertTrue(gate.accepts(
+            originalGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(originalWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+        XCTAssertFalse(gate.accepts(
+            originalGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(replacementWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+        XCTAssertFalse(gate.accepts(
+            originalGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(originalWebView),
+            poolID: ObjectIdentifier(replacementPool)
+        ))
+        XCTAssertNil(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(replacementWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+        gate.cancel()
+        let replacementGeneration = try XCTUnwrap(gate.begin(
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(replacementWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+        XCTAssertFalse(gate.finish(
+            originalGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(originalWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+        XCTAssertTrue(gate.finish(
+            replacementGeneration,
+            controllerID: ObjectIdentifier(controller),
+            webViewID: ObjectIdentifier(replacementWebView),
+            poolID: ObjectIdentifier(pool)
+        ))
+    }
+
+    func testRegisteredReturnOwnerRejectsOtherWebViewsAndLaterPools() {
+        let navigator = WebViewNavigator()
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinator()
+        let laterPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let ownedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        let unrelatedWebView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        coordinator.registerReturnOwner(for: ownedWebView, pool: nil)
+        coordinator.webViewPool = laterPool
+
+        XCTAssertNil(coordinator.returnPool(for: ownedWebView))
+        XCTAssertNil(coordinator.returnPool(for: unrelatedWebView))
+        coordinator.releaseUnpooledWebViewOwner(ownedWebView)
+        XCTAssertTrue(coordinator.returnPool(for: ownedWebView) === laterPool)
+    }
+
+    func testRegisteredReturnOwnerRetainsOriginatingPoolAcrossConfigurationReplacement() {
+        let navigator = WebViewNavigator()
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinator()
+        var originalPool: WebViewPool? = WebViewPool(warmUpCount: 0, keepAliveCount: 0)
+        let retainedOriginalPool = WeakReference(originalPool)
+        let replacementPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let webView = originalPool!.dequeue {
+            EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        coordinator.registerReturnOwner(for: webView, pool: originalPool)
+        coordinator.webViewPool = replacementPool
+
+        originalPool = nil
+        XCTAssertNotNil(retainedOriginalPool.value)
+        XCTAssertTrue(coordinator.returnPool(for: webView) === retainedOriginalPool.value)
+        XCTAssertTrue(coordinator.returnWebView(
+            webView,
+            to: retainedOriginalPool.value!,
+            resetURL: nil
+        ))
+        XCTAssertNil(retainedOriginalPool.value)
+        XCTAssertEqual(replacementPool.retainedCount, 0)
+    }
+
+#if os(iOS)
+    func testDismantleTerminalizesLifecycleBeforeReturningWebView() {
+        let navigator = WebViewNavigator()
+        let pool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            webViewPool: pool,
+            lifecycleConfig: WebViewLifecycleConfig(autoUnloadOnDisappear: true)
+        )
+        let coordinator = model.makeCoordinator()
+        let webView = pool.dequeue {
+            EnhancedWKWebView(
+                frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+                configuration: WKWebViewConfiguration()
+            )
+        }
+        coordinator.registerReturnOwner(for: webView, pool: pool)
+        let controller = WebViewController(webView: webView)
+        controller.onViewDidAppear = {}
+        controller.onViewWillDisappear = {}
+        controller.onViewDidDisappear = {}
+        controller.onWillAttachToParent = {}
+        controller.onDidDetachFromParent = {}
+
+        WebView.dismantleUIViewController(controller, coordinator: coordinator)
+
+        XCTAssertTrue(controller.isWebViewUnloaded)
+        XCTAssertNil(controller.onViewDidAppear)
+        XCTAssertNil(controller.onViewWillDisappear)
+        XCTAssertNil(controller.onViewDidDisappear)
+        XCTAssertNil(controller.onWillAttachToParent)
+        XCTAssertNil(controller.onDidDetachFromParent)
+        XCTAssertEqual(pool.leasedCount, 0)
+        XCTAssertEqual(pool.retainedCount, 1)
+    }
+
+    func testHierarchyLifecycleWaitsForDetachAndReattachCanCancel() {
+        let webView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 640),
+            configuration: WKWebViewConfiguration()
+        )
+        let controller = WebViewController(webView: webView)
+        var lifecycleEvents = [String]()
+        controller.onWillAttachToParent = { lifecycleEvents.append("willAttach") }
+        controller.onDidDetachFromParent = { lifecycleEvents.append("didDetach") }
+
+        controller.willMove(toParent: nil)
+        XCTAssertTrue(lifecycleEvents.isEmpty)
+        controller.didMove(toParent: nil)
+        XCTAssertEqual(lifecycleEvents, ["didDetach"])
+        controller.willMove(toParent: UIViewController())
+        XCTAssertEqual(lifecycleEvents, ["didDetach", "willAttach"])
+    }
+#endif
+
     func testObservedURLPublicationRequiresCurrentUnpublishedURL() throws {
         let publishedURL = try XCTUnwrap(URL(string: "https://example.com/old"))
         let currentURL = try XCTUnwrap(URL(string: "https://example.com/current"))
