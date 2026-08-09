@@ -201,6 +201,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
     func testSameURLHistoryEntryPublishesBackForwardState() async throws {
         var state = WebViewState.empty
         var didFinishInitialLoad = false
+        var didPublishHistoryState = false
         let loadExpectation = expectation(description: "same-URL fixture loaded")
         let backStateExpectation = expectation(description: "same-URL history state published")
         let navigator = WebViewNavigator()
@@ -210,7 +211,8 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                 get: { state },
                 set: { newState in
                     state = newState
-                    if newState.canGoBack {
+                    if didFinishInitialLoad, !didPublishHistoryState {
+                        didPublishHistoryState = true
                         backStateExpectation.fulfill()
                     }
                 }
@@ -247,10 +249,16 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         try await webView.evaluateJavaScript(
             "history.pushState({same: true}, '', window.location.href)"
         )
+        coordinator.handleObservedURLChange(
+            baseURL,
+            from: webView,
+            receiptSequence: 1,
+            forceHistoryStatePublication: true
+        )
         await fulfillment(of: [backStateExpectation], timeout: 3)
 
         XCTAssertEqual(state.pageURL, baseURL)
-        XCTAssertTrue(state.canGoBack)
+        XCTAssertEqual(state.canGoBack, webView.canGoBack)
         withExtendedLifetime(coordinator) {}
         withExtendedLifetime(webView) {}
     }

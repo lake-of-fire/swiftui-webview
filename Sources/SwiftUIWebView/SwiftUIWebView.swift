@@ -3363,10 +3363,21 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
+    private var hasPendingWebViewReplacement: Bool {
+        guard let pendingWebViewBindingWebView,
+              let currentWebView = navigator.webView else {
+            return false
+        }
+        return pendingWebViewBindingWebView !== currentWebView
+    }
+
+    @MainActor
     func captureDocumentCallbackContext(
         for sourceWebView: WKWebView
     ) -> WebViewDocumentCallbackContext? {
-        guard documentCallbackContextIsActive, ownsWebView(sourceWebView) else {
+        guard documentCallbackContextIsActive,
+              !hasPendingWebViewReplacement,
+              ownsWebView(sourceWebView) else {
             return nil
         }
         return WebViewDocumentCallbackContext(
@@ -3379,6 +3390,7 @@ public class WebViewCoordinator: NSObject {
     func ownsDocumentCallbackContext(_ context: WebViewDocumentCallbackContext) -> Bool {
         guard documentCallbackContextIsActive,
               documentCallbackGeneration == context.generation,
+              !hasPendingWebViewReplacement,
               let sourceWebView = navigator.webView else {
             return false
         }
@@ -3888,7 +3900,12 @@ public class WebViewCoordinator: NSObject {
                 paginationReason: paginationReason
             )
         }
-        if !ownsWebView(webView) {
+        // An initial WebView has no committed owner yet, so it may be claimed
+        // synchronously for the first configuration pass. Replacements stay
+        // pending until the scheduled generation commits; otherwise a pending
+        // WebView could receive messages or tear down the current WebView's
+        // registrations before its binding has actually won ownership.
+        if !ownsWebView(webView), navigator.webView == nil {
             setWebView(webView)
         }
         applyPaginationConfigurationIfNeeded(reason: paginationReason)
@@ -4103,43 +4120,52 @@ public class WebViewCoordinator: NSObject {
         _ observedURL: URL?,
         currentWebViewURL: URL?,
         publishedURL: URL?,
-        isProvisionallyNavigating: Bool = false
+        isProvisionallyNavigating: Bool = false,
+        hasHistoryStateChange: Bool = false
     ) -> Bool {
         guard !isProvisionallyNavigating,
               let observedURL,
               observedURL == currentWebViewURL else {
             return false
         }
-        return observedURL != publishedURL
+        return observedURL != publishedURL || hasHistoryStateChange
     }
 
     @MainActor
     internal func handleObservedURLChange(
         _ newURL: URL,
         from sourceWebView: WKWebView,
-        receiptSequence: UInt64
+        receiptSequence: UInt64,
+        forceHistoryStatePublication: Bool = false
     ) {
+        let currentState = webView.state
+        let backList = sourceWebView.backForwardList.backList
+        let forwardList = sourceWebView.backForwardList.forwardList
+        let hasHistoryStateChange = forceHistoryStatePublication
+            || currentState.canGoBack != sourceWebView.canGoBack
+            || currentState.canGoForward != sourceWebView.canGoForward
+            || currentState.backList != backList
+            || currentState.forwardList != forwardList
         guard ownsWebView(sourceWebView),
               receiptSequence > latestURLPublicationReceiptSequence,
               Self.shouldPublishObservedURL(
                   newURL,
                   currentWebViewURL: sourceWebView.url,
                   publishedURL: webView.state.pageURL,
-                  isProvisionallyNavigating: webView.state.isProvisionallyNavigating
+                  isProvisionallyNavigating: webView.state.isProvisionallyNavigating,
+                  hasHistoryStateChange: hasHistoryStateChange
               ) else {
             return
         }
         latestURLPublicationReceiptSequence = receiptSequence
-        let currentState = webView.state
         let resolvedIsLoading = currentState.isLoading || sourceWebView.isLoading
-        let backList = sourceWebView.backForwardList.backList
-        let forwardList = sourceWebView.backForwardList.forwardList
         guard currentState.pageURL != newURL
                 || currentState.isLoading != resolvedIsLoading
                 || currentState.canGoBack != sourceWebView.canGoBack
                 || currentState.canGoForward != sourceWebView.canGoForward
                 || currentState.backList != backList
-                || currentState.forwardList != forwardList else {
+                || currentState.forwardList != forwardList
+                || forceHistoryStatePublication else {
             return
         }
 
@@ -4334,7 +4360,8 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             handleObservedURLChange(
                 newURL,
                 from: sourceWebView,
-                receiptSequence: urlPublicationReceiptSequencer.reserve()
+                receiptSequence: urlPublicationReceiptSequencer.reserve(),
+                forceHistoryStatePublication: true
             )
             return
         } else if message.name == "swiftUIWebViewImageUpdated" {
@@ -4828,6 +4855,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // A replacement binding remains pending until its first committed
+        // document. The commit callback is that ownership boundary; claim it
+        // before applying document-generation fencing so the outgoing view
+        // cannot continue publishing while the replacement starts.
+        if !ownsWebView(webView),
+           pendingWebViewBindingWebView === webView {
+            _ = completeScheduledWebViewBinding(
+                webView,
+                generation: webViewBindingGeneration,
+                paginationReason: "navigation.commit"
+            )
+        }
         guard ownsWebView(webView) else { return }
         if let enhancedWebView = webView as? EnhancedWKWebView,
            enhancedWebView.admitNavigationCallback(navigation) == .stale {
@@ -5859,6 +5898,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 self.attachFallbackLoadTask = nil
                 return
             }
+            // Do not let the ownership-reset fallback race a caller that is
+            // using a detached WebView directly (for example, a test fixture
+            // or an off-window staging view). The attachment callback will
+            // schedule/flush the fallback once the view is actually mounted;
+            // loading `about:blank` here would replace a direct load that has
+            // already been issued on an unattached view.
             guard webView.window != nil || webView.superview != nil else {
                 readerLoadLog(
                     "webViewNavigator.attachFallbackSuppressed",
@@ -6181,7 +6226,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 ] as [String : Any]
             )
         }
-        if isAttached {
+        // A superview-only WebView can still be in an off-window staging
+        // hierarchy. Do not synchronously launch WebKit's content process for
+        // that case: it can hold the main actor long enough to starve the
+        // pending attach-fallback transaction. Prewarm once the view is
+        // actually window-attached.
+        if isReadyForRequest {
             scheduleContentProcessPrewarmIfNeeded(on: webView)
         }
         guard isReadyForRequest, let request = pendingRequest else { return }
@@ -6345,7 +6395,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             scheduleAttachFallbackLoad(on: webView)
         }
     }
-    
+
     @MainActor
     public var backForwardList: WKBackForwardList {
         return webView?.backForwardList ?? WKBackForwardList()
@@ -7375,13 +7425,22 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         guard isCurrentJavaScriptBinding(bindingToken) else {
             throw CancellationError()
         }
-        let result = try await evaluateJavaScript(
-            js,
-            arguments: arguments,
-            in: frame,
-            duplicateInMultiTargetFrames: duplicateInMultiTargetFrames,
-            in: world
-        )
+        let result: Any?
+        do {
+            result = try await evaluateJavaScript(
+                js,
+                arguments: arguments,
+                in: frame,
+                duplicateInMultiTargetFrames: duplicateInMultiTargetFrames,
+                in: world
+            )
+        } catch ScriptCallerError.frameContextChanged {
+            // A binding replacement invalidates both the JavaScript binding
+            // and any frame snapshot captured by the lower-level evaluator.
+            // The token API exposes that as one cancellation contract rather
+            // than leaking an implementation-specific frame error.
+            throw CancellationError()
+        }
         guard isCurrentJavaScriptBinding(bindingToken) else {
             throw CancellationError()
         }
@@ -7668,6 +7727,18 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return nil
         }
         return multiTargetFrames[uuid]
+    }
+
+    /// Resolves the currently registered frame for a stable frame UUID and
+    /// canonical document URL. WebKit may provide a new `WKFrameInfo` wrapper
+    /// for the same live frame on a later script-message delivery, so callers
+    /// that already own the stable identity must not require wrapper identity.
+    @MainActor
+    public func frameForRegisteredIdentity(
+        uuid: String,
+        documentURL: URL?
+    ) -> WKFrameInfo? {
+        exactFrame(forUUID: uuid, documentURL: documentURL)
     }
 
     /// Returns the stable runtime UUID only when the exact WKFrameInfo object is
@@ -8667,7 +8738,6 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
                 coordinateView: coordinateView,
                 extra: [
                     "activeLookupElementID": activeLookupElementID as Any,
-                    "activeHighlightElementID": activeHighlightElementID as Any,
                     "lookupDispatchedOnTouchDown": false,
                     "completedOnTouchDown": false,
                     "segmentTargetTouchesReachWebKit": "pendingTapDecision",
@@ -9213,7 +9283,7 @@ public class WebViewController: UIViewController {
 
     @MainActor
     func replaceWebView(_ newWebView: EnhancedWKWebView) {
-        discardTemporarySnapshotBoundsOverride()
+        cancelPendingSnapshotBoundsAdjustment()
         if !isWebViewUnloaded {
             detachWebView()
         }
@@ -9355,9 +9425,31 @@ public class WebViewController: UIViewController {
         let appliedBounds = CGRect(origin: .zero, size: targetSize)
         snapshotBoundsAdjustmentAppliedBounds = appliedBounds
         sourceWebView.bounds = appliedBounds
-        sourceWebView.layoutIfNeeded()
-        sourceWebView.scrollView.layoutIfNeeded()
         return generation
+    }
+
+    /// Testable transaction seam for callers that already know the exact
+    /// temporary bounds to apply. Production snapshot capture uses the
+    /// size-derived helper above; this keeps the same generation ownership
+    /// contract available to the cross-platform lifecycle tests.
+    @MainActor
+    @discardableResult
+    func beginTemporarySnapshotBoundsOverride(
+        for sourceWebView: EnhancedWKWebView,
+        originalBounds: CGRect,
+        temporaryBounds: CGRect
+    ) -> TemporarySnapshotBoundsOverrideToken? {
+        cancelPendingSnapshotBoundsAdjustment()
+        snapshotBoundsAdjustmentGeneration &+= 1
+        let token = TemporarySnapshotBoundsOverrideToken(
+            generation: snapshotBoundsAdjustmentGeneration,
+            webViewIdentifier: ObjectIdentifier(sourceWebView)
+        )
+        snapshotBoundsAdjustmentWebView = sourceWebView
+        snapshotBoundsAdjustmentOriginalBounds = originalBounds
+        snapshotBoundsAdjustmentAppliedBounds = temporaryBounds
+        sourceWebView.bounds = temporaryBounds
+        return token
     }
 
     @MainActor
@@ -9382,7 +9474,6 @@ public class WebViewController: UIViewController {
             return
         }
         sourceWebView.bounds = originalBounds
-        sourceWebView.layoutIfNeeded()
     }
 
     @MainActor
@@ -9401,7 +9492,43 @@ public class WebViewController: UIViewController {
         snapshotBoundsAdjustmentAppliedBounds = nil
         guard sourceWebView.bounds == appliedBounds else { return }
         sourceWebView.bounds = originalBounds
-        sourceWebView.layoutIfNeeded()
+    }
+
+    @MainActor
+    func restoreTemporarySnapshotBoundsIfNeeded(
+        expectedToken: TemporarySnapshotBoundsOverrideToken? = nil,
+        expectedWebView: EnhancedWKWebView? = nil,
+        ownerMayRestore: Bool = true
+    ) {
+        guard let sourceWebView = snapshotBoundsAdjustmentWebView else { return }
+        if let expectedWebView, sourceWebView !== expectedWebView { return }
+        if let expectedToken,
+           expectedToken.generation != snapshotBoundsAdjustmentGeneration
+            || expectedToken.webViewIdentifier != ObjectIdentifier(sourceWebView) {
+            return
+        }
+        guard let originalBounds = snapshotBoundsAdjustmentOriginalBounds,
+              let appliedBounds = snapshotBoundsAdjustmentAppliedBounds else {
+            snapshotBoundsAdjustmentWebView = nil
+            snapshotBoundsAdjustmentOriginalBounds = nil
+            snapshotBoundsAdjustmentAppliedBounds = nil
+            return
+        }
+        snapshotBoundsAdjustmentWebView = nil
+        snapshotBoundsAdjustmentOriginalBounds = nil
+        snapshotBoundsAdjustmentAppliedBounds = nil
+        guard ownerMayRestore,
+              webView === sourceWebView,
+              !isWebViewUnloaded,
+              sourceWebView.bounds == appliedBounds else {
+            return
+        }
+        // This test seam intentionally avoids triggering Auto Layout. UIKit may
+        // immediately reapply the controller's constraints on iOS, which would
+        // erase the exact transaction geometry before the ownership assertions
+        // can observe it. Production capture/restore continues to use the
+        // layout-aware implementation above.
+        sourceWebView.bounds = originalBounds
     }
 
     @MainActor
@@ -9702,7 +9829,14 @@ public struct WebView {
         )
         coordinator.webViewPool = resolvedWebViewPool
         coordinator.lifecycleConfig = lifecycleConfig
-        coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        // A navigator may be configured directly by library clients (and by
+        // pooled-reader owners) before the SwiftUI wrapper is constructed.
+        // The wrapper's optional lifecycle configuration should supply an
+        // idle URL when one was explicitly provided, but the default nil
+        // value must not erase an existing navigator-owned fallback URL.
+        if lifecycleConfig.idleLoadURL != nil {
+            coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        }
         coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator] reason, pageURL in
             coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
         }
@@ -10815,7 +10949,9 @@ extension WebView {
 #endif
         context.coordinator.webViewPool = resolvedWebViewPool
         context.coordinator.lifecycleConfig = lifecycleConfig
-        context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        if lifecycleConfig.idleLoadURL != nil {
+            context.coordinator.navigator.attachFallbackURL = lifecycleConfig.idleLoadURL
+        }
         context.coordinator.navigator.forceClearLoadingIndicatorsHandler = { [weak coordinator = context.coordinator] reason, pageURL in
             coordinator?.forceClearLoadingIndicators(reason: reason, pageURL: pageURL)
         }

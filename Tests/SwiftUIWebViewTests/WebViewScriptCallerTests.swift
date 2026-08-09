@@ -177,6 +177,19 @@ private func drainMainDispatchQueue() async {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    private func waitForRecordedFallbackRequest(
+        on webView: RecordingLoadWebView
+    ) async throws {
+        // WKWebView may launch its WebContent process lazily. In the macOS
+        // test host that startup can temporarily hold the main actor longer
+        // than the fallback delay, so wait for the observable request rather
+        // than coupling the assertion to a fixed 50 ms sleep.
+        for _ in 0..<100 {
+            if !webView.loadedRequests.isEmpty { return }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
     func testRegisteredReturnOwnerRetainsOriginatingPoolUntilTheLeaseReturns() {
         let navigator = WebViewNavigator()
         let model = WebView(
@@ -972,6 +985,12 @@ final class WebViewScriptCallerTests: XCTestCase {
             currentWebViewURL: currentURL,
             publishedURL: currentURL
         ))
+        XCTAssertTrue(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: currentURL,
+            hasHistoryStateChange: true
+        ))
         XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
             nil,
             currentWebViewURL: currentURL,
@@ -1592,7 +1611,11 @@ final class WebViewScriptCallerTests: XCTestCase {
             .replacingOccurrences(of: "\"", with: "&quot;")
         webView.loadHTMLString(
             "<iframe srcdoc=\"\(srcdoc)\"></iframe>",
-            baseURL: URL(string: "ebook://book/container.xhtml")
+            // Use a browser-supported document origin for the runtime fixture;
+            // the canonical EPUB identity is supplied explicitly to the frame
+            // registry below, so this does not depend on an installed custom
+            // URL-scheme handler in the XCTest host.
+            baseURL: URL(string: "https://example.com/container.xhtml")
         )
 
         await fulfillment(of: [frameExpectation], timeout: 3)
@@ -1704,7 +1727,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             .replacingOccurrences(of: "\"", with: "&quot;")
         webView.loadHTMLString(
             "<iframe srcdoc=\"\(srcdoc)\"></iframe>",
-            baseURL: URL(string: "ebook://book/container.xhtml")
+            baseURL: URL(string: "https://example.com/container.xhtml")
         )
 
         await fulfillment(of: [frameExpectation], timeout: 3)
@@ -1757,7 +1780,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             .replacingOccurrences(of: "\"", with: "&quot;")
         webView.loadHTMLString(
             "<iframe srcdoc=\"\(srcdoc)\"></iframe><iframe srcdoc=\"\(srcdoc)\"></iframe>",
-            baseURL: URL(string: "ebook://book/container.xhtml")
+            baseURL: URL(string: "https://example.com/container.xhtml")
         )
 
         await fulfillment(of: [frameExpectation], timeout: 3)
@@ -1849,7 +1872,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         }
         webView.loadHTMLString(
             "<script>window.webkit.messageHandlers.frameProbe.postMessage('ready')</script>",
-            baseURL: URL(string: "ebook://book/container.xhtml")
+            baseURL: URL(string: "https://example.com/container.xhtml")
         )
 
         await fulfillment(of: [frameExpectation], timeout: 3)
@@ -3091,7 +3114,7 @@ final class WebViewScriptCallerTests: XCTestCase {
 #endif
 
         coordinator.setWebView(webView)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitForRecordedFallbackRequest(on: webView)
 
         XCTAssertEqual(webView.loadedRequests.last?.url, fallbackURL)
         XCTAssertNil(webView.poolReadyContentID)
@@ -3147,7 +3170,7 @@ final class WebViewScriptCallerTests: XCTestCase {
 #endif
 
         coordinator.setWebView(webView)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitForRecordedFallbackRequest(on: webView)
 
         XCTAssertEqual(webView.loadedRequests.last?.url, fallbackURL)
         XCTAssertNil(webView.poolPendingContentID)
