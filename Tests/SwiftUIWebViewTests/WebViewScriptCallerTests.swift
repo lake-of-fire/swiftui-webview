@@ -746,6 +746,75 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertNil(caller.unsafeCaller)
     }
 
+    func testBindingScopedEvaluationCancelsAfterCallerIsRebound() async throws {
+        let caller = WebViewScriptCaller()
+        let originalOwnerID = UUID()
+        let replacementOwnerID = UUID()
+        let evaluationStarted = expectation(description: "Original binding evaluation started")
+        let evaluationGate = DocumentCallbackTestGate()
+
+        caller.installBinding(
+            ownedBy: originalOwnerID,
+            asyncCaller: { _, _, _, _ in
+                evaluationStarted.fulfill()
+                await evaluationGate.wait()
+                return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
+            },
+            unsafeCaller: nil,
+            snapshotCapture: nil
+        )
+        let originalBindingToken = try XCTUnwrap(caller.currentJavaScriptBindingToken)
+        let evaluation = Task { @MainActor in
+            _ = try await caller.evaluateJavaScript(
+                "delayed-value",
+                requiring: originalBindingToken
+            )
+        }
+
+        await fulfillment(of: [evaluationStarted], timeout: 2)
+        caller.installBinding(
+            ownedBy: replacementOwnerID,
+            asyncCaller: { _, _, _, _ in
+                WebViewScriptCaller.JavaScriptEvaluationResult("replacement")
+            },
+            unsafeCaller: nil,
+            snapshotCapture: nil
+        )
+        await evaluationGate.release()
+
+        do {
+            _ = try await evaluation.value
+            XCTFail("Expected the replaced binding evaluation to be cancelled")
+        } catch is CancellationError {
+            // Expected: the suspended operation cannot complete under the replacement binding.
+        }
+    }
+
+    func testNativeLookupHitPreservesPublishingBindingToken() throws {
+        let caller = WebViewScriptCaller()
+        caller.installBinding(
+            ownedBy: UUID(),
+            asyncCaller: { _, _, _, _ in
+                WebViewScriptCaller.JavaScriptEvaluationResult(nil)
+            },
+            unsafeCaller: nil,
+            snapshotCapture: nil
+        )
+        let bindingToken = try XCTUnwrap(caller.currentJavaScriptBindingToken)
+        let target = WebViewNativeLookupHitTarget(
+            elementID: "term",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+            javaScriptBindingToken: bindingToken
+        )
+        let store = WebViewNativeLookupHitTestStore()
+        var receivedToken: WebViewScriptCaller.JavaScriptBindingToken?
+        store.onHit = { receivedToken = $0.javaScriptBindingToken }
+
+        store.updateTargets([target])
+        XCTAssertTrue(store.handleTap(at: CGPoint(x: 10, y: 10)))
+        XCTAssertEqual(receivedToken, bindingToken)
+    }
+
     func testRealWebViewHostSynchronizesOnlyAfterDelayedBindingAndStopsAfterTeardown() async throws {
         let caller = WebViewScriptCaller()
         let navigator = WebViewNavigator()

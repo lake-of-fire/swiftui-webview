@@ -1274,16 +1274,24 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
     fileprivate let uuid: UUID
     public let name: String
     public let body: Any
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
     public let isMainFrame: Bool
     public let requestURL: URL?
     public let mainDocumentURL: URL?
 
     @MainActor
-    public init(frameInfo: WKFrameInfo, uuid: UUID, name: String, body: Any) {
+    public init(
+        frameInfo: WKFrameInfo,
+        uuid: UUID,
+        name: String,
+        body: Any,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+    ) {
         self.frameInfo = frameInfo
         self.uuid = uuid
         self.name = name
         self.body = body
+        self.javaScriptBindingToken = javaScriptBindingToken
         self.isMainFrame = frameInfo.isMainFrame
         self.requestURL = frameInfo.request.url
         self.mainDocumentURL = frameInfo.request.mainDocumentURL
@@ -1303,6 +1311,7 @@ public struct WebViewNativeLookupHitTarget {
     public let frameInfo: WKFrameInfo?
     public let documentURL: URL?
     public let nativeLookupFrameKey: String?
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
     public let debugDistance: CGFloat?
@@ -1319,6 +1328,7 @@ public struct WebViewNativeLookupHitTarget {
         frameInfo: WKFrameInfo? = nil,
         documentURL: URL? = nil,
         nativeLookupFrameKey: String? = nil,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
         debugDistance: CGFloat? = nil,
@@ -1334,6 +1344,7 @@ public struct WebViewNativeLookupHitTarget {
         self.frameInfo = frameInfo
         self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
+        self.javaScriptBindingToken = javaScriptBindingToken
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
         self.debugDistance = debugDistance
@@ -1377,6 +1388,7 @@ public struct WebViewNativeLookupHit {
     public let frameInfo: WKFrameInfo?
     public let documentURL: URL?
     public let nativeLookupFrameKey: String?
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
 
     public init(
         elementID: String,
@@ -1393,7 +1405,8 @@ public struct WebViewNativeLookupHit {
         debugHitTestRebaseY: CGFloat? = nil,
         frameInfo: WKFrameInfo? = nil,
         documentURL: URL? = nil,
-        nativeLookupFrameKey: String? = nil
+        nativeLookupFrameKey: String? = nil,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
     ) {
         self.elementID = elementID
         self.point = point
@@ -1410,6 +1423,7 @@ public struct WebViewNativeLookupHit {
         self.frameInfo = frameInfo
         self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
+        self.javaScriptBindingToken = javaScriptBindingToken
     }
 }
 
@@ -1840,6 +1854,7 @@ public final class WebViewNativeLookupHitTestStore {
             frameInfo: candidate.target.frameInfo,
             documentURL: candidate.target.documentURL,
             nativeLookupFrameKey: candidate.target.nativeLookupFrameKey,
+            javaScriptBindingToken: candidate.target.javaScriptBindingToken,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
             debugDistance: candidate.distance,
@@ -2053,7 +2068,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestRebaseY: target.debugHitTestRebaseY,
             frameInfo: target.frameInfo,
             documentURL: target.documentURL,
-            nativeLookupFrameKey: target.nativeLookupFrameKey
+            nativeLookupFrameKey: target.nativeLookupFrameKey,
+            javaScriptBindingToken: target.javaScriptBindingToken
         ))
         return true
     }
@@ -2105,7 +2121,8 @@ public final class WebViewNativeLookupHitTestStore {
             debugHitTestRebaseY: rebased.rebaseY,
             frameInfo: target.frameInfo,
             documentURL: target.documentURL,
-            nativeLookupFrameKey: target.nativeLookupFrameKey
+            nativeLookupFrameKey: target.nativeLookupFrameKey,
+            javaScriptBindingToken: target.javaScriptBindingToken
         ))
         return true
     }
@@ -3187,6 +3204,19 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
+    private func javaScriptBindingToken(
+        for sourceWebView: WKWebView?
+    ) -> WebViewScriptCaller.JavaScriptBindingToken? {
+        guard let sourceWebView,
+              scriptCallerBoundWebView === sourceWebView,
+              let scriptCaller,
+              scriptCaller.isBindingOwned(by: scriptCallerBindingOwnerID) else {
+            return nil
+        }
+        return scriptCaller.currentJavaScriptBindingToken
+    }
+
+    @MainActor
     func installScriptCallerBinding(
         for webView: WKWebView,
         asyncCaller: @escaping WebViewScriptCaller.AsyncCaller,
@@ -3806,7 +3836,13 @@ extension WebViewCoordinator: WKScriptMessageHandler {
          }*/
         
         guard let messageHandler = messageHandlers.handlers[message.name] else { return }
-        let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
+        let message = WebViewMessage(
+            frameInfo: message.frameInfo,
+            uuid: UUID(),
+            name: message.name,
+            body: message.body,
+            javaScriptBindingToken: javaScriptBindingToken(for: sourceWebView)
+        )
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
         scheduleDocumentMessageHandler(
             messageHandler,
@@ -5870,6 +5906,11 @@ private func webViewSnapshotNativeScale(for webView: WKWebView) -> CGFloat {
 
 @MainActor
 public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject {
+    public struct JavaScriptBindingToken: Equatable, Hashable, Sendable {
+        fileprivate let callerID: String
+        fileprivate let generation: Int
+    }
+
     public struct UnboundEvaluationAttempt: Equatable, Sendable {
         public enum Operation: String, Equatable, Sendable {
             case evaluateJavaScript
@@ -5961,6 +6002,20 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     /// should use this property for the final check immediately before DOM work.
     public var canEvaluateJavaScript: Bool {
         asyncCaller != nil
+    }
+
+    public var currentJavaScriptBindingToken: JavaScriptBindingToken? {
+        guard asyncCaller != nil else { return nil }
+        return JavaScriptBindingToken(
+            callerID: id,
+            generation: asyncCallerReadinessGeneration
+        )
+    }
+
+    private func isCurrentJavaScriptBinding(_ token: JavaScriptBindingToken) -> Bool {
+        token.callerID == id
+            && token.generation == asyncCallerReadinessGeneration
+            && asyncCaller != nil
     }
 
     private func reportUnboundEvaluation(
@@ -6191,6 +6246,32 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
         return normalizeJavaScriptResult(result)
+    }
+
+    /// Evaluates only while the exact WebView binding that admitted the operation remains installed.
+    @discardableResult
+    public func evaluateJavaScript(
+        _ js: String,
+        arguments: [String: any Sendable]? = nil,
+        in frame: WKFrameInfo? = nil,
+        duplicateInMultiTargetFrames: Bool = false,
+        in world: WKContentWorld? = nil,
+        requiring bindingToken: JavaScriptBindingToken
+    ) async throws -> Any? {
+        guard isCurrentJavaScriptBinding(bindingToken) else {
+            throw CancellationError()
+        }
+        let result = try await evaluateJavaScript(
+            js,
+            arguments: arguments,
+            in: frame,
+            duplicateInMultiTargetFrames: duplicateInMultiTargetFrames,
+            in: world
+        )
+        guard isCurrentJavaScriptBinding(bindingToken) else {
+            throw CancellationError()
+        }
+        return result
     }
 
     /// Evaluates in the main document and every registered content frame.
