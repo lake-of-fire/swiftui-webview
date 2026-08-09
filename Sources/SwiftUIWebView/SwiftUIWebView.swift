@@ -2498,6 +2498,54 @@ public final class WebViewPaginationController {
     }
 }
 
+internal struct WebViewMutationGenerationGate {
+    private(set) var generation: UInt64 = 0
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        return generation
+    }
+
+    mutating func invalidate() {
+        generation &+= 1
+    }
+
+    func accepts(_ generation: UInt64) -> Bool {
+        self.generation == generation
+    }
+}
+
+internal let webViewReaderDocumentSummaryScript = """
+(function() {
+    const body = document.body;
+    const html = document.documentElement;
+    const bodyStyle = body ? window.getComputedStyle(body) : null;
+    const bodyText = (body?.innerText || "").trim();
+    const bodyHTML = body?.innerHTML || "";
+    return {
+        documentURL: document.URL.toString(),
+        documentTitle: document.title || "",
+        readerRenderGeneration:
+            html?.dataset?.mnbReaderRenderGeneration
+            ?? body?.dataset?.mnbReaderRenderGeneration
+            ?? null,
+        readyState: document.readyState,
+        bodyChildElementCount: body?.childElementCount || 0,
+        bodyTextLength: bodyText.length,
+        bodyHTMLLength: bodyHTML.length,
+        hasReaderRenderReady:
+            (html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
+            && !!document.getElementById("reader-content")
+            && (html?.dataset?.mnbFontPending ?? null) !== '1'
+            && bodyStyle?.visibility !== 'hidden'
+            && bodyStyle?.display !== 'none'
+            && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
+        hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
+        titleLength: (document.title || "").length
+    };
+})();
+"""
+
 internal struct WebViewUnloadTransactionGate {
     private var generation: UInt64 = 0
     private var activeControllerID: ObjectIdentifier?
@@ -2583,6 +2631,7 @@ public class WebViewCoordinator: NSObject {
     private var documentCallbackContextIsActive = false
     private var committedDocumentSurvivesProvisionalNavigation = false
     private var pendingDocumentCallbackTasks = [UUID: WebViewPendingDocumentCallbackTask]()
+    private var pageStateExtractionGate = WebViewMutationGenerationGate()
     private let urlPublicationReceiptSequencer = WebViewURLPublicationReceiptSequencer()
     private var latestURLPublicationReceiptSequence: UInt64 = 0
     private weak var registeredReturnWebView: EnhancedWKWebView?
@@ -2675,6 +2724,25 @@ public class WebViewCoordinator: NSObject {
         mirroredHideNavigationDueToScroll = value
     }
     var textSelection: Binding<String?>
+
+    @MainActor
+    private func invalidatePageStateExtraction() {
+        pageStateExtractionGate.invalidate()
+    }
+
+    @MainActor
+    private func beginPageStateExtraction() -> UInt64 {
+        pageStateExtractionGate.begin()
+    }
+
+    @MainActor
+    private func isCurrentPageStateExtraction(
+        _ generation: UInt64,
+        from sourceWebView: WKWebView
+    ) -> Bool {
+        pageStateExtractionGate.accepts(generation)
+            && navigator.webView === sourceWebView
+    }
 
     @MainActor
     func registerReturnOwner(for webView: EnhancedWKWebView, pool: WebViewPool?) {
@@ -3139,6 +3207,7 @@ public class WebViewCoordinator: NSObject {
             clearScriptCallerBinding()
         }
         guard navigator.webView === webView else { return }
+        invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         committedDocumentSurvivesProvisionalNavigation = false
         scriptCaller?.removeAllMultiTargetFrames()
@@ -3207,6 +3276,7 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
             cancelPendingWebViewUnload()
 #endif
+            invalidatePageStateExtraction()
             invalidateDocumentCallbackContext()
             committedDocumentSurvivesProvisionalNavigation = false
             scriptCaller?.removeAllMultiTargetFrames()
@@ -3815,79 +3885,64 @@ extension WebViewCoordinator: WKNavigationDelegate {
     }
     
     private func extractPageState(webView: WKWebView) {
-        // TODO: Also get window location to confirm state matches JS result
-        webView.evaluateJavaScript("document.title") { (response, error) in
-            if let title = response as? String {
+        let extractionGeneration = beginPageStateExtraction()
+        if self.webView.htmlInState {
+            webView.evaluateJavaScript("document.documentElement.outerHTML.toString()") { [weak self, weak webView] response, _ in
+                guard let self,
+                      let webView,
+                      self.isCurrentPageStateExtraction(extractionGeneration, from: webView),
+                      let html = response as? String else {
+                    return
+                }
                 var newState = self.webView.state
-                newState.pageTitle = title
+                newState.pageHTML = html
                 self.webView.state = newState
             }
         }
-        
-        webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
-            if let url = response as? String, let newURL = URL(string: url), self.webView.state.pageURL != newURL {
+
+        webView.evaluateJavaScript(webViewReaderDocumentSummaryScript) { [weak self, weak webView] response, error in
+            guard let self,
+                  let webView,
+                  self.isCurrentPageStateExtraction(extractionGeneration, from: webView),
+                  error == nil,
+                  let summary = response as? [String: Any] else {
+                return
+            }
+            let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
+                partialResult[entry.key] = String(describing: entry.value)
+            }
+            let hasMeaningfulBodyContent = summary["hasMeaningfulBodyContent"] as? Bool ?? false
+            var newState = self.webView.state
+            if let title = summary["documentTitle"] as? String {
+                newState.pageTitle = title
+            }
+            if let url = summary["documentURL"] as? String,
+               let newURL = URL(string: url),
+               newState.pageURL != newURL {
                 let now = Date()
                 readerLoadLog(
                     "webView.pageURLUpdatedFromDocument",
                     [
                         "documentURL": newURL.absoluteString,
-                        "elapsedSinceCommit": readerLoadElapsedString(since: self.navigator.readerLoadCommittedAt, now: now),
-                        "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: self.navigator.readerLoadRequestedAt, now: now),
-                        "previousPageURL": self.webView.state.pageURL.absoluteString
+                        "elapsedSinceCommit": readerLoadElapsedString(
+                            since: self.navigator.readerLoadCommittedAt,
+                            now: now
+                        ),
+                        "elapsedSinceNavigatorLoad": readerLoadElapsedString(
+                            since: self.navigator.readerLoadRequestedAt,
+                            now: now
+                        ),
+                        "previousPageURL": newState.pageURL.absoluteString
                     ]
                 )
-                var newState = self.webView.state
                 newState.pageURL = newURL
-                self.webView.state = newState
             }
-        }
-        
-        if self.webView.htmlInState {
-            webView.evaluateJavaScript("document.documentElement.outerHTML.toString()") { (response, error) in
-                if let html = response as? String {
-                    var newState = self.webView.state
-                    newState.pageHTML = html
-                    self.webView.state = newState
-                }
+            let hasExactReaderRenderOwner = (summary["readerRenderGeneration"] as? String)?.isEmpty == false
+            if !hasExactReaderRenderOwner,
+               summary["hasReaderRenderReady"] as? Bool == true {
+                newState.hasReaderRenderReady = true
             }
-        }
-
-        webView.evaluateJavaScript(
-            """
-            (function() {
-                const body = document.body;
-                const html = document.documentElement;
-                const bodyStyle = body ? window.getComputedStyle(body) : null;
-                const bodyText = (body?.innerText || "").trim();
-                const bodyHTML = body?.innerHTML || "";
-                return {
-                    documentURL: document.URL.toString(),
-                    readyState: document.readyState,
-                    bodyChildElementCount: body?.childElementCount || 0,
-                    bodyTextLength: bodyText.length,
-                    bodyHTMLLength: bodyHTML.length,
-                    hasReaderRenderReady:
-                        (html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
-                        && !!document.getElementById("reader-content")
-                        && (html?.dataset?.manabiFontPending ?? null) !== '1'
-                        && bodyStyle?.visibility !== 'hidden'
-                        && bodyStyle?.display !== 'none'
-                        && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
-                    hasMeaningfulBodyContent: bodyText.length > 0 || bodyHTML.replace(/\\s+/g, "").length > 0,
-                    titleLength: (document.title || "").length
-                };
-            })();
-            """
-        ) { response, error in
-            guard error == nil, let summary = response as? [String: Any] else { return }
-            let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
-                partialResult[entry.key] = String(describing: entry.value)
-            }
-            let hasMeaningfulBodyContent = summary["hasMeaningfulBodyContent"] as? Bool ?? false
-            if let hasReaderRenderReady = summary["hasReaderRenderReady"] as? Bool,
-               self.webView.state.hasReaderRenderReady != hasReaderRenderReady {
-                var newState = self.webView.state
-                newState.hasReaderRenderReady = hasReaderRenderReady
+            if newState != self.webView.state {
                 self.webView.state = newState
             }
             if !hasMeaningfulBodyContent || (summary["hasReaderRenderReady"] as? Bool ?? false) {
@@ -3900,6 +3955,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         guard navigator.webView === webView else { return }
         clearPendingPoolContent(on: webView)
+        invalidatePageStateExtraction()
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
         let preservesCommittedDocument = committedDocumentSurvivesProvisionalNavigation
@@ -3945,6 +4001,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard navigator.webView === webView else { return }
         clearPendingPoolContent(on: webView)
+        invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         committedDocumentSurvivesProvisionalNavigation = false
         navigator.clearActiveInternalReaderLoadSignal()
@@ -3957,6 +4014,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         guard navigator.webView === webView else { return }
         clearPendingPoolContent(on: webView)
+        invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         committedDocumentSurvivesProvisionalNavigation = false
         navigator.clearActiveInternalReaderLoadSignal()
@@ -3993,6 +4051,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard navigator.webView === webView else { return }
+        invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         committedDocumentSurvivesProvisionalNavigation = false
         scriptCaller?.removeAllMultiTargetFrames()
@@ -4106,6 +4165,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard navigator.webView === webView else { return }
+        invalidatePageStateExtraction()
         (webView as? EnhancedWKWebView)?.invalidatePoolContentForUnkeyedNavigation()
         committedDocumentSurvivesProvisionalNavigation = documentCallbackContextIsActive
         invalidateDocumentCallbackContext()

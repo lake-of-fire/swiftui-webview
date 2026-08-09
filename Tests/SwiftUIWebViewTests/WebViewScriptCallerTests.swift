@@ -37,8 +37,129 @@ private final class WeakReference<Value: AnyObject> {
     }
 }
 
+private final class TestNavigationDelegate: NSObject, WKNavigationDelegate {
+    private let completion: XCTestExpectation
+    private var didComplete = false
+
+    init(completion: XCTestExpectation) {
+        self.completion = completion
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        completeOnce()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        completeOnce()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        completeOnce()
+    }
+
+    private func completeOnce() {
+        guard !didComplete else { return }
+        didComplete = true
+        completion.fulfill()
+    }
+}
+
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testMutationGenerationGateRejectsSupersededPageExtraction() {
+        var gate = WebViewMutationGenerationGate()
+        let firstGeneration = gate.begin()
+        XCTAssertTrue(gate.accepts(firstGeneration))
+
+        let replacementGeneration = gate.begin()
+        XCTAssertFalse(gate.accepts(firstGeneration))
+        XCTAssertTrue(gate.accepts(replacementGeneration))
+
+        gate.invalidate()
+        XCTAssertFalse(gate.accepts(replacementGeneration))
+    }
+
+    func testReaderDocumentSummaryWaitsForFontGate() async throws {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(
+            frame: CGRect(x: 0, y: 0, width: 430, height: 932),
+            configuration: configuration
+        )
+        let loadExpectation = expectation(description: "reader summary fixture loaded")
+        let navigationDelegate = TestNavigationDelegate(completion: loadExpectation)
+        webView.navigationDelegate = navigationDelegate
+        webView.loadHTMLString(
+            """
+            <!doctype html>
+            <html data-mnb-reader-render-ready="1" data-mnb-font-pending="1">
+            <head><title>Reader Summary</title></head>
+            <body><main id="reader-content"><p>本文</p></main></body>
+            </html>
+            """,
+            baseURL: URL(string: "https://example.com/reader-summary")!
+        )
+
+        await fulfillment(of: [loadExpectation], timeout: 10)
+        let pendingSummaryResult = try await webView.evaluateJavaScript(
+            webViewReaderDocumentSummaryScript
+        ) as? [String: Any]
+        let pendingSummary = try XCTUnwrap(pendingSummaryResult)
+        XCTAssertEqual(pendingSummary["hasReaderRenderReady"] as? Bool, false)
+        XCTAssertEqual(pendingSummary["documentTitle"] as? String, "Reader Summary")
+        XCTAssertEqual(pendingSummary["documentURL"] as? String, "https://example.com/reader-summary")
+
+        try await webView.evaluateJavaScript("delete document.documentElement.dataset.mnbFontPending")
+        let readySummaryResult = try await webView.evaluateJavaScript(
+            webViewReaderDocumentSummaryScript
+        ) as? [String: Any]
+        let readySummary = try XCTUnwrap(readySummaryResult)
+        XCTAssertEqual(readySummary["hasReaderRenderReady"] as? Bool, true)
+
+        withExtendedLifetime(navigationDelegate) {}
+        withExtendedLifetime(webView) {}
+    }
+
+    func testReaderDocumentSummaryReportsExactRenderGeneration() async throws {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(
+            frame: CGRect(x: 0, y: 0, width: 430, height: 932),
+            configuration: configuration
+        )
+        let loadExpectation = expectation(description: "reader generation fixture loaded")
+        let navigationDelegate = TestNavigationDelegate(completion: loadExpectation)
+        webView.navigationDelegate = navigationDelegate
+        let generation = UUID()
+        webView.loadHTMLString(
+            """
+            <!doctype html>
+            <html
+                data-mnb-reader-render-ready="1"
+                data-mnb-reader-render-generation="\(generation.uuidString)"
+            >
+            <body><main id="reader-content"><p>本文</p></main></body>
+            </html>
+            """,
+            baseURL: URL(string: "https://example.com/reader-generation")!
+        )
+
+        await fulfillment(of: [loadExpectation], timeout: 10)
+        let summaryResult = try await webView.evaluateJavaScript(
+            webViewReaderDocumentSummaryScript
+        ) as? [String: Any]
+        let summary = try XCTUnwrap(summaryResult)
+        XCTAssertEqual(summary["hasReaderRenderReady"] as? Bool, true)
+        XCTAssertEqual(summary["readerRenderGeneration"] as? String, generation.uuidString)
+
+        withExtendedLifetime(navigationDelegate) {}
+        withExtendedLifetime(webView) {}
+    }
+
     func testWebViewUnloadTransactionRequiresExactOwnersAndRejectsLateCompletion() throws {
         let controller = NSObject()
         let originalWebView = NSObject()
