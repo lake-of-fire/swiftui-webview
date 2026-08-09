@@ -232,6 +232,17 @@ public actor WebViewActor {
     public static let shared = WebViewActor()
 }
 
+public enum WebViewDocumentContextInvalidationReason: String, Sendable {
+    case navigationCommitted
+    case webContentProcessTerminated
+    case webViewDetached
+}
+
+public enum WebViewNavigationFailureDisposition: String, Equatable, Sendable {
+    case terminal
+    case preservedCommittedDocument
+}
+
 public struct WebViewMessageHandlersKey: EnvironmentKey {
     public static let defaultValue: WebViewMessageHandlers = .init()
 }
@@ -245,13 +256,43 @@ public extension EnvironmentValues {
 
 public struct WebViewMessageHandlers: Sendable {
     public let handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void>
+    public let cancellationHandlers: OrderedDictionary<
+        String,
+        @MainActor @Sendable (WebViewMessage) -> Void
+    >
     
-    public init(_ handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void> = [:]) {
+    public init(
+        _ handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void> = [:],
+        cancellationHandlers: OrderedDictionary<
+            String,
+            @MainActor @Sendable (WebViewMessage) -> Void
+        > = [:]
+    ) {
         self.handlers = handlers
+        self.cancellationHandlers = cancellationHandlers
     }
     
-    public init(_ pairs: [(String, @Sendable (WebViewMessage) async -> Void)]) {
-        self.init(OrderedDictionary(uniqueKeysWithValues: pairs))
+    public init(
+        _ pairs: [(String, @Sendable (WebViewMessage) async -> Void)],
+        cancellationHandlers: OrderedDictionary<
+            String,
+            @MainActor @Sendable (WebViewMessage) -> Void
+        > = [:]
+    ) {
+        self.init(
+            OrderedDictionary(uniqueKeysWithValues: pairs),
+            cancellationHandlers: cancellationHandlers
+        )
+    }
+
+    static func runComposedHandlers<Message: Sendable>(
+        first: @Sendable (Message) async -> Void,
+        second: @Sendable (Message) async -> Void,
+        message: Message
+    ) async {
+        await first(message)
+        guard !Task.isCancelled else { return }
+        await second(message)
     }
     
     public func composing(_ other: WebViewMessageHandlers) -> WebViewMessageHandlers {
@@ -259,14 +300,24 @@ public struct WebViewMessageHandlers: Sendable {
         for (k, h) in other.handlers {
             if let existing = merged[k] {
                 merged[k] = { @Sendable message in
-                    await existing(message)
-                    await h(message)
+                    await Self.runComposedHandlers(first: existing, second: h, message: message)
                 }
             } else {
                 merged[k] = h
             }
         }
-        return WebViewMessageHandlers(merged)
+        var mergedCancellationHandlers = cancellationHandlers
+        for (name, handler) in other.cancellationHandlers {
+            if let existing = mergedCancellationHandlers[name] {
+                mergedCancellationHandlers[name] = { @MainActor message in
+                    existing(message)
+                    handler(message)
+                }
+            } else {
+                mergedCancellationHandlers[name] = handler
+            }
+        }
+        return WebViewMessageHandlers(merged, cancellationHandlers: mergedCancellationHandlers)
     }
     
     public static func + (lhs: WebViewMessageHandlers, rhs: WebViewMessageHandlers) -> WebViewMessageHandlers {
@@ -276,7 +327,38 @@ public struct WebViewMessageHandlers: Sendable {
     public func updating(_ name: String, handler: @Sendable @escaping (WebViewMessage) async -> Void) -> WebViewMessageHandlers {
         var copy = handlers
         copy[name] = handler
-        return WebViewMessageHandlers(copy)
+        return WebViewMessageHandlers(copy, cancellationHandlers: cancellationHandlers)
+    }
+
+    public func updatingCancellationHandler(
+        _ name: String,
+        handler: @MainActor @Sendable @escaping (WebViewMessage) -> Void
+    ) -> WebViewMessageHandlers {
+        var copy = cancellationHandlers
+        copy[name] = handler
+        return WebViewMessageHandlers(handlers, cancellationHandlers: copy)
+    }
+}
+
+struct WebViewPendingDocumentCallbackTask {
+    let task: Task<Void, Never>
+    let cancellationHandler: (@MainActor @Sendable () -> Void)?
+}
+
+struct WebViewDocumentCallbackContext: Equatable {
+    let webViewID: ObjectIdentifier
+    let generation: UInt64
+}
+
+@MainActor
+func cancelPendingWebViewDocumentCallbackTasks(
+    _ pendingTasks: inout [UUID: WebViewPendingDocumentCallbackTask]
+) {
+    let tasks = Array(pendingTasks.values)
+    pendingTasks.removeAll()
+    for pendingTask in tasks {
+        pendingTask.task.cancel()
+        pendingTask.cancellationHandler?()
     }
 }
 
@@ -1144,6 +1226,10 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var backList: [WKBackForwardListItem]
     public internal(set) var forwardList: [WKBackForwardListItem]
     public internal(set) var paginationState: WebViewPaginationState?
+
+    public mutating func markReaderRenderReady() {
+        hasReaderRenderReady = true
+    }
     
     public static let empty = WebViewState(
         isLoading: false,
@@ -2420,6 +2506,10 @@ public class WebViewCoordinator: NSObject {
     var scriptCaller: WebViewScriptCaller?
     private let scriptCallerBindingOwnerID = UUID()
     private weak var scriptCallerBoundWebView: WKWebView?
+    private var documentCallbackGeneration: UInt64 = 0
+    private var documentCallbackContextIsActive = false
+    private var committedDocumentSurvivesProvisionalNavigation = false
+    private var pendingDocumentCallbackTasks = [UUID: WebViewPendingDocumentCallbackTask]()
     var config: WebViewConfig
     var lifecycleConfig: WebViewLifecycleConfig = .default
     weak var webViewPool: WebViewPool?
@@ -2474,6 +2564,8 @@ public class WebViewCoordinator: NSObject {
     var onNavigationCommitted: ((WebViewState) -> Void)?
     var onNavigationFinished: ((WebViewState) -> Void)?
     var onNavigationFailed: ((WebViewState) -> Void)?
+    var onNavigationFailedWithDisposition: ((WebViewState, WebViewNavigationFailureDisposition) -> Void)?
+    var onDocumentContextInvalidated: (@MainActor (WebViewState, WebViewDocumentContextInvalidationReason) -> Void)?
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
@@ -2623,6 +2715,8 @@ public class WebViewCoordinator: NSObject {
         onNavigationCommitted: ((WebViewState) -> Void)?,
         onNavigationFinished: ((WebViewState) -> Void)?,
         onNavigationFailed: ((WebViewState) -> Void)?,
+        onNavigationFailedWithDisposition: ((WebViewState, WebViewNavigationFailureDisposition) -> Void)?,
+        onDocumentContextInvalidated: (@MainActor (WebViewState, WebViewDocumentContextInvalidationReason) -> Void)?,
         onURLChanged: ((WebViewState) -> Void)? = nil,
         onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
         onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
@@ -2637,6 +2731,8 @@ public class WebViewCoordinator: NSObject {
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
+        self.onNavigationFailedWithDisposition = onNavigationFailedWithDisposition
+        self.onDocumentContextInvalidated = onDocumentContextInvalidated
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
@@ -2654,6 +2750,80 @@ public class WebViewCoordinator: NSObject {
     
     deinit {
         urlObservation?.invalidate()
+    }
+
+    @MainActor
+    func captureDocumentCallbackContext(
+        for sourceWebView: WKWebView
+    ) -> WebViewDocumentCallbackContext? {
+        guard documentCallbackContextIsActive,
+              navigator.webView === sourceWebView else {
+            return nil
+        }
+        return WebViewDocumentCallbackContext(
+            webViewID: ObjectIdentifier(sourceWebView),
+            generation: documentCallbackGeneration
+        )
+    }
+
+    @MainActor
+    func ownsDocumentCallbackContext(_ context: WebViewDocumentCallbackContext) -> Bool {
+        guard documentCallbackContextIsActive,
+              documentCallbackGeneration == context.generation,
+              let sourceWebView = navigator.webView else {
+            return false
+        }
+        return ObjectIdentifier(sourceWebView) == context.webViewID
+    }
+
+    @MainActor
+    private func invalidateDocumentCallbackContext() {
+        documentCallbackGeneration &+= 1
+        documentCallbackContextIsActive = false
+        cancelPendingWebViewDocumentCallbackTasks(&pendingDocumentCallbackTasks)
+    }
+
+    @MainActor
+    private func activateDocumentCallbackContext(for sourceWebView: WKWebView) {
+        guard navigator.webView === sourceWebView else { return }
+        documentCallbackGeneration &+= 1
+        documentCallbackContextIsActive = true
+    }
+
+    @MainActor
+    private func scheduleDocumentMessageHandler(
+        _ handler: @Sendable @escaping (WebViewMessage) async -> Void,
+        message: WebViewMessage,
+        context: WebViewDocumentCallbackContext,
+        cancellationHandler: (@MainActor @Sendable (WebViewMessage) -> Void)?
+    ) {
+        let taskID = UUID()
+        let task = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  !Task.isCancelled,
+                  self.ownsDocumentCallbackContext(context) else {
+                self?.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
+                return
+            }
+            await handler(message)
+            self.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
+        }
+        pendingDocumentCallbackTasks[taskID] = WebViewPendingDocumentCallbackTask(
+            task: task,
+            cancellationHandler: cancellationHandler.map { handler in
+                { @MainActor in handler(message) }
+            }
+        )
+    }
+
+    @MainActor
+    private func publishNavigationFailure(
+        _ state: WebViewState,
+        disposition: WebViewNavigationFailureDisposition
+    ) {
+        onNavigationFailedWithDisposition?(state, disposition)
+        onNavigationFailed?(state)
     }
 
     @MainActor
@@ -2746,12 +2916,19 @@ public class WebViewCoordinator: NSObject {
         pendingWebViewBindingTask?.cancel()
         pendingWebViewBindingTask = nil
         removeMessageHandlers(for: webView)
+        if scriptCallerBoundWebView === webView {
+            clearScriptCallerBinding()
+        }
+        guard navigator.webView === webView else { return }
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
+        scriptCaller?.removeAllMultiTargetFrames()
+        onDocumentContextInvalidated?(self.webView.state, .webViewDetached)
         lastUserScriptsContentController = nil
         lastInstalledScriptsSignature = nil
         if navigator.webView === webView {
             navigator.webView = nil
         }
-        clearScriptCallerBinding()
         invalidateWebViewObservations()
         schedulePaginationStateUpdate(paginationController.detach())
     }
@@ -2806,6 +2983,13 @@ public class WebViewCoordinator: NSObject {
     
     @MainActor
     func setWebView(_ webView: WKWebView) {
+        let previousWebView = navigator.webView
+        if let previousWebView, previousWebView !== webView {
+            invalidateDocumentCallbackContext()
+            committedDocumentSurvivesProvisionalNavigation = false
+            scriptCaller?.removeAllMultiTargetFrames()
+            onDocumentContextInvalidated?(self.webView.state, .webViewDetached)
+        }
         navigator.webView = webView
         (webView as? EnhancedWKWebView)?.onDidMoveToWindow = { [weak navigator, weak webView] isAttached in
             guard let navigator, let webView else { return }
@@ -3082,6 +3266,11 @@ public class WebViewCoordinator: NSObject {
 
 extension WebViewCoordinator: WKScriptMessageHandler {
     public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let sourceWebView = message.webView,
+              sourceWebView.configuration.userContentController === userContentController,
+              let documentContext = captureDocumentCallbackContext(for: sourceWebView) else {
+            return
+        }
         if message.name == "swiftUIWebViewBackgroundStatus", let hasBackground = message.body as? Bool {
             webView.drawsBackground = !hasBackground
             return
@@ -3221,9 +3410,12 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         guard let messageHandler = messageHandlers.handlers[message.name] else { return }
         let message = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
-        Task {
-            await messageHandler(message)
-        }
+        scheduleDocumentMessageHandler(
+            messageHandler,
+            message: message,
+            context: documentContext,
+            cancellationHandler: messageHandlers.cancellationHandlers[message.name]
+        )
     }
 }
 
@@ -3430,13 +3622,19 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard navigator.webView === webView else { return }
         clearPendingPoolContent(on: webView)
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
-        Task {
+        let preservesCommittedDocument = committedDocumentSurvivesProvisionalNavigation
+        committedDocumentSurvivesProvisionalNavigation = false
+        if preservesCommittedDocument {
+            activateDocumentCallbackContext(for: webView)
+        } else {
+            invalidateDocumentCallbackContext()
             scriptCaller?.removeAllMultiTargetFrames()
         }
-        _ = setLoading(
+        let failedState = setLoading(
             false,
             pageURL: webView.url,
             isProvisionallyNavigating: false,
@@ -3445,6 +3643,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList,
             error: error
+        )
+        publishNavigationFailure(
+            failedState,
+            disposition: preservesCommittedDocument ? .preservedCommittedDocument : .terminal
         )
         let now = Date()
         readerLoadLog(
@@ -3465,19 +3667,25 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard navigator.webView === webView else { return }
         clearPendingPoolContent(on: webView)
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
         navigator.clearActiveInternalReaderLoadSignal()
-        setLoading(false, isProvisionallyNavigating: false)
+        scriptCaller?.removeAllMultiTargetFrames()
+        let terminatedState = setLoading(false, isProvisionallyNavigating: false)
+        onDocumentContextInvalidated?(terminatedState, .webContentProcessTerminated)
     }
     
     @MainActor
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard navigator.webView === webView else { return }
         clearPendingPoolContent(on: webView)
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
-        Task {
-            scriptCaller?.removeAllMultiTargetFrames()
-        }
+        scriptCaller?.removeAllMultiTargetFrames()
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
         let now = Date()
         readerLoadLog(
@@ -3492,7 +3700,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         extractPageState(webView: webView)
         
-        onNavigationFailed?(newState)
+        publishNavigationFailure(newState, disposition: .terminal)
 #if os(iOS)
         if awaitingSnapshotReload {
             cancelSnapshotReload()
@@ -3508,9 +3716,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        Task {
-            scriptCaller?.removeAllMultiTargetFrames()
-        }
+        guard navigator.webView === webView else { return }
+        invalidateDocumentCallbackContext()
+        committedDocumentSurvivesProvisionalNavigation = false
+        scriptCaller?.removeAllMultiTargetFrames()
+        activateDocumentCallbackContext(for: webView)
 #if DEBUG
         debugPrint("# READER webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -3602,6 +3812,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         newState.pageHTML = nil
         newState.hasReaderRenderReady = false
         newState.error = nil
+        onDocumentContextInvalidated?(newState, .navigationCommitted)
         onNavigationCommitted?(newState)
 #if os(iOS)
         webView.applyUnderPageFallbackBackgroundColor(config: config)
@@ -3618,7 +3829,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard navigator.webView === webView else { return }
         (webView as? EnhancedWKWebView)?.invalidatePoolContentForUnkeyedNavigation()
+        committedDocumentSurvivesProvisionalNavigation = documentCallbackContextIsActive
+        invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
 #if DEBUG
         debugPrint("# READER webView.nav.start",
@@ -7423,6 +7637,8 @@ public struct WebView {
     let onNavigationCommitted: ((WebViewState) -> Void)?
     let onNavigationFinished: ((WebViewState) -> Void)?
     let onNavigationFailed: ((WebViewState) -> Void)?
+    let onNavigationFailedWithDisposition: ((WebViewState, WebViewNavigationFailureDisposition) -> Void)?
+    let onDocumentContextInvalidated: (@MainActor (WebViewState, WebViewDocumentContextInvalidationReason) -> Void)?
     let onURLChanged: ((WebViewState) -> Void)?
     let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     let onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
@@ -7456,6 +7672,11 @@ public struct WebView {
                 onNavigationCommitted: ((WebViewState) -> Void)? = nil,
                 onNavigationFinished: ((WebViewState) -> Void)? = nil,
                 onNavigationFailed: ((WebViewState) -> Void)? = nil,
+                onNavigationFailedWithDisposition: ((WebViewState, WebViewNavigationFailureDisposition) -> Void)? = nil,
+                onDocumentContextInvalidated: (@MainActor (
+                    WebViewState,
+                    WebViewDocumentContextInvalidationReason
+                ) -> Void)? = nil,
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
                 onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
@@ -7481,6 +7702,8 @@ public struct WebView {
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
+        self.onNavigationFailedWithDisposition = onNavigationFailedWithDisposition
+        self.onDocumentContextInvalidated = onDocumentContextInvalidated
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
@@ -7505,6 +7728,8 @@ public struct WebView {
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
+            onNavigationFailedWithDisposition: onNavigationFailedWithDisposition,
+            onDocumentContextInvalidated: onDocumentContextInvalidated,
             onURLChanged: onURLChanged,
             onNavigationAction: onNavigationAction,
             onScrollBottomStateChanged: onScrollBottomStateChanged,
@@ -8485,6 +8710,8 @@ extension WebView {
         context.coordinator.onNavigationCommitted = onNavigationCommitted
         context.coordinator.onNavigationFinished = onNavigationFinished
         context.coordinator.onNavigationFailed = onNavigationFailed
+        context.coordinator.onNavigationFailedWithDisposition = onNavigationFailedWithDisposition
+        context.coordinator.onDocumentContextInvalidated = onDocumentContextInvalidated
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
         context.coordinator.onScrollBottomStateChanged = onScrollBottomStateChanged
