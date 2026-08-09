@@ -94,6 +94,78 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertEqual(navigator.attachFallbackURL, fallbackURL)
     }
 
+#if os(iOS)
+    func testCancellingSnapshotBoundsAdjustmentRestoresOwnedBounds() throws {
+        let originalBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let temporarySize = CGSize(width: 320, height: 640)
+        let webView = EnhancedWKWebView(frame: originalBounds, configuration: WKWebViewConfiguration())
+        webView.bounds = originalBounds
+        let controller = WebViewController(webView: webView)
+
+        XCTAssertNotNil(controller.beginSnapshotBoundsAdjustmentIfNeeded(
+            for: webView,
+            targetSize: temporarySize,
+            shouldAdjust: true
+        ))
+        XCTAssertEqual(webView.bounds.size, temporarySize)
+
+        controller.cancelPendingSnapshotBoundsAdjustment()
+
+        XCTAssertEqual(webView.bounds, originalBounds)
+    }
+
+    func testCancellingSnapshotBoundsAdjustmentPreservesNewerLayout() throws {
+        let originalBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let replacementBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let webView = EnhancedWKWebView(frame: originalBounds, configuration: WKWebViewConfiguration())
+        webView.bounds = originalBounds
+        let controller = WebViewController(webView: webView)
+
+        XCTAssertNotNil(controller.beginSnapshotBoundsAdjustmentIfNeeded(
+            for: webView,
+            targetSize: CGSize(width: 320, height: 640),
+            shouldAdjust: true
+        ))
+        webView.bounds = replacementBounds
+
+        controller.cancelPendingSnapshotBoundsAdjustment()
+
+        XCTAssertEqual(webView.bounds, replacementBounds)
+    }
+
+    func testStaleSnapshotCompletionCannotConsumeNewerAdjustment() throws {
+        let firstBounds = CGRect(x: 0, y: 0, width: 1, height: 1)
+        let secondBounds = CGRect(x: 0, y: 0, width: 2, height: 2)
+        let webView = EnhancedWKWebView(frame: firstBounds, configuration: WKWebViewConfiguration())
+        webView.bounds = firstBounds
+        let controller = WebViewController(webView: webView)
+
+        let firstGeneration = try XCTUnwrap(controller.beginSnapshotBoundsAdjustmentIfNeeded(
+            for: webView,
+            targetSize: CGSize(width: 320, height: 640),
+            shouldAdjust: true
+        ))
+        controller.cancelPendingSnapshotBoundsAdjustment()
+        webView.bounds = secondBounds
+        let secondGeneration = try XCTUnwrap(controller.beginSnapshotBoundsAdjustmentIfNeeded(
+            for: webView,
+            targetSize: CGSize(width: 390, height: 844),
+            shouldAdjust: true
+        ))
+
+        controller.finishSnapshotBoundsAdjustment(
+            firstGeneration,
+            for: webView,
+            ownerMayRestore: false
+        )
+        XCTAssertEqual(webView.bounds.size, CGSize(width: 390, height: 844))
+
+        controller.finishSnapshotBoundsAdjustment(secondGeneration, for: webView)
+        XCTAssertEqual(webView.bounds, secondBounds)
+    }
+#endif
+
+
     func testReplacingFrameUUIDRemovesOldCanonicalDocumentAlias() async throws {
         let configuration = WKWebViewConfiguration()
         let messageHandler = FrameProbeMessageHandler()
