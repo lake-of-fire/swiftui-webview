@@ -6009,6 +6009,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
+    private var canonicalFrameKeyByUUID = [String: String]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
     private var lastKnownMainFrame: WKFrameInfo?
     
@@ -6037,6 +6038,23 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
         components?.fragment = nil
         return components?.string ?? resolved.absoluteString
+    }
+
+    private func removeRegisteredFrame(uuid: String, expectedFrame: WKFrameInfo? = nil) {
+        guard let registeredFrame = multiTargetFrames[uuid],
+              expectedFrame == nil || registeredFrame === expectedFrame else {
+            return
+        }
+        multiTargetFrames.removeValue(forKey: uuid)
+        if let canonicalKey = canonicalFrameKeyByUUID.removeValue(forKey: uuid),
+           framesByCanonicalURL[canonicalKey] === registeredFrame {
+            framesByCanonicalURL[canonicalKey] = multiTargetFrames.first(where: { candidateUUID, _ in
+                canonicalFrameKeyByUUID[candidateUUID] == canonicalKey
+            })?.value
+        }
+        if lastKnownMainFrame === registeredFrame {
+            lastKnownMainFrame = nil
+        }
     }
 
     private func normalizeJavaScriptResult(_ value: Any?) -> Any? {
@@ -6097,7 +6115,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
                     } catch {
                         if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                            multiTargetFrames.removeValue(forKey: uuid)
+                            removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
                         } else {
                             print(error)
                         }
@@ -6222,7 +6240,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             } catch {
                 if let webKitError = error as? WKError,
                    webKitError.code == .javaScriptInvalidFrameTarget {
-                    multiTargetFrames.removeValue(forKey: uuid)
+                    removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
                 }
                 if propagatesFrameErrors {
                     throw error
@@ -6290,7 +6308,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             if targetFrame == frame { continue }
             unsafeCaller(js, targetFrame, world)
             if targetFrame.request.url == nil {
-                multiTargetFrames.removeValue(forKey: uuid)
+                removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
             }
         }
     }
@@ -6302,9 +6320,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         if multiTargetFrames.keys.contains(uuid) && multiTargetFrames[uuid]?.request.url == frame.request.url {
             inserted = false
         }
+        removeRegisteredFrame(uuid: uuid)
         multiTargetFrames[uuid] = frame
         let resolvedCanonicalURL = canonicalURL ?? frame.request.mainDocumentURL ?? frame.request.url
         if let key = canonicalFrameKey(for: resolvedCanonicalURL) {
+            canonicalFrameKeyByUUID[uuid] = key
             framesByCanonicalURL[key] = frame
         }
         if frame.isMainFrame {
@@ -6343,6 +6363,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
 #endif
         multiTargetFrames.removeAll()
+        canonicalFrameKeyByUUID.removeAll()
         framesByCanonicalURL.removeAll()
     }
 
@@ -6370,6 +6391,25 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     @MainActor
     public func frame(forUUID uuid: String) -> WKFrameInfo? {
         multiTargetFrames[uuid]
+    }
+
+    /// Resolves a frame only when its runtime UUID and canonical document URL
+    /// still identify the same registration.
+    @MainActor
+    public func exactFrame(forUUID uuid: String, documentURL: URL?) -> WKFrameInfo? {
+        guard let expectedCanonicalKey = canonicalFrameKey(for: documentURL),
+              canonicalFrameKeyByUUID[uuid] == expectedCanonicalKey else {
+            return nil
+        }
+        return multiTargetFrames[uuid]
+    }
+
+    @MainActor
+    public func frameForRegisteredIdentity(
+        uuid: String,
+        documentURL: URL?
+    ) -> WKFrameInfo? {
+        exactFrame(forUUID: uuid, documentURL: documentURL)
     }
 
     @MainActor

@@ -29,6 +29,17 @@ private actor DocumentCallbackTestGate {
     }
 }
 
+private final class FrameProbeMessageHandler: NSObject, WKScriptMessageHandler {
+    var onMessage: ((WKScriptMessage) -> Void)?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        onMessage?(message)
+    }
+}
+
 private final class WeakReference<Value: AnyObject> {
     weak var value: Value?
 
@@ -70,6 +81,63 @@ private final class TestNavigationDelegate: NSObject, WKNavigationDelegate {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testReplacingFrameUUIDRemovesOldCanonicalDocumentAlias() async throws {
+        let configuration = WKWebViewConfiguration()
+        let messageHandler = FrameProbeMessageHandler()
+        configuration.userContentController.add(messageHandler, name: "frameProbe")
+        let webView = WKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+            configuration: configuration
+        )
+        let frameExpectation = expectation(description: "child frame registration")
+        var childFrame: WKFrameInfo?
+        messageHandler.onMessage = { message in
+            guard !message.frameInfo.isMainFrame else { return }
+            childFrame = message.frameInfo
+            frameExpectation.fulfill()
+        }
+        webView.loadHTMLString(
+            "<iframe srcdoc=\"<script>window.webkit.messageHandlers.frameProbe.postMessage('ready')</script>\"></iframe>",
+            baseURL: URL(string: "https://example.com/container.xhtml")
+        )
+
+        await fulfillment(of: [frameExpectation], timeout: 3)
+        let frame = try XCTUnwrap(childFrame)
+        let caller = WebViewScriptCaller()
+        let originalURL = URL(string: "ebook://book/original.xhtml")!
+        let replacementURL = URL(string: "ebook://book/replacement.xhtml")!
+
+        XCTAssertTrue(caller.addMultiTargetFrame(
+            frame,
+            uuid: "runtime-frame",
+            canonicalURL: originalURL
+        ))
+        XCTAssertEqual(caller.exactFrame(
+            forUUID: "runtime-frame",
+            documentURL: originalURL
+        ), frame)
+        XCTAssertNil(caller.exactFrame(
+            forUUID: "runtime-frame",
+            documentURL: replacementURL
+        ))
+        _ = caller.addMultiTargetFrame(
+            frame,
+            uuid: "runtime-frame",
+            canonicalURL: replacementURL
+        )
+
+        XCTAssertNil(caller.exactFrame(for: originalURL))
+        XCTAssertEqual(caller.exactFrame(for: replacementURL), frame)
+        XCTAssertNil(caller.frameForRegisteredIdentity(
+            uuid: "runtime-frame",
+            documentURL: originalURL
+        ))
+        XCTAssertEqual(caller.frameForRegisteredIdentity(
+            uuid: "runtime-frame",
+            documentURL: replacementURL
+        ), frame)
+    }
+
     func testMutationGenerationGateRejectsSupersededPageExtraction() {
         var gate = WebViewMutationGenerationGate()
         let firstGeneration = gate.begin()
