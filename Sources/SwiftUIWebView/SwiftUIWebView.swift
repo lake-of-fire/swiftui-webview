@@ -2660,6 +2660,8 @@ public class WebViewCoordinator: NSObject {
     private var pendingPaginationApplyTask: Task<Void, Never>?
     private var pendingPaginationStateTask: Task<Void, Never>?
     private var pendingWebViewBindingTask: Task<Void, Never>?
+    private weak var pendingWebViewBindingWebView: WKWebView?
+    private var webViewBindingGeneration: UInt64 = 0
     private let progressUpdateMinimumInterval: CFTimeInterval = 0.12
     private let progressUpdateMinimumDelta: Double = 0.01
 #if os(iOS)
@@ -3044,6 +3046,7 @@ public class WebViewCoordinator: NSObject {
         for sourceWebView: WKWebView
     ) -> WebViewDocumentCallbackContext? {
         guard documentCallbackContextIsActive,
+              !hasPendingWebViewReplacement,
               navigator.webView === sourceWebView else {
             return nil
         }
@@ -3057,10 +3060,20 @@ public class WebViewCoordinator: NSObject {
     func ownsDocumentCallbackContext(_ context: WebViewDocumentCallbackContext) -> Bool {
         guard documentCallbackContextIsActive,
               documentCallbackGeneration == context.generation,
+              !hasPendingWebViewReplacement,
               let sourceWebView = navigator.webView else {
             return false
         }
         return ObjectIdentifier(sourceWebView) == context.webViewID
+    }
+
+    @MainActor
+    private var hasPendingWebViewReplacement: Bool {
+        guard let pendingWebViewBindingWebView,
+              let currentWebView = navigator.webView else {
+            return false
+        }
+        return pendingWebViewBindingWebView !== currentWebView
     }
 
     @MainActor
@@ -3139,10 +3152,19 @@ public class WebViewCoordinator: NSObject {
         pendingPaginationApplyTask = nil
         pendingPaginationStateTask?.cancel()
         pendingPaginationStateTask = nil
-        pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = nil
         lastEmittedProgress = nil
         lastProgressUpdateTime = 0
+    }
+
+    @MainActor
+    private func cancelPendingWebViewBinding(ownedBy webView: WKWebView? = nil) {
+        if let webView, pendingWebViewBindingWebView !== webView {
+            return
+        }
+        webViewBindingGeneration &+= 1
+        pendingWebViewBindingTask?.cancel()
+        pendingWebViewBindingTask = nil
+        pendingWebViewBindingWebView = nil
     }
 
     @MainActor
@@ -3200,8 +3222,7 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     func tearDownBindingsForDetachedWebView(_ webView: WKWebView?) {
-        pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = nil
+        cancelPendingWebViewBinding(ownedBy: webView)
         removeMessageHandlers(for: webView)
         if scriptCallerBoundWebView === webView {
             clearScriptCallerBinding()
@@ -3237,15 +3258,42 @@ public class WebViewCoordinator: NSObject {
     }
 
     @MainActor
-    func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) {
-        pendingWebViewBindingTask?.cancel()
-        pendingWebViewBindingTask = Task { @MainActor [weak self] in
+    @discardableResult
+    func scheduleWebViewBinding(_ webView: WKWebView, paginationReason: String) -> UInt64 {
+        cancelPendingWebViewBinding()
+        webViewBindingGeneration &+= 1
+        let generation = webViewBindingGeneration
+        pendingWebViewBindingWebView = webView
+        pendingWebViewBindingTask = Task { @MainActor [weak self, weak webView] in
             await Task.yield()
-            guard let self else { return }
-            self.setWebView(webView)
-            self.applyPaginationConfigurationIfNeeded(reason: paginationReason)
-            self.pendingWebViewBindingTask = nil
+            guard let self, let webView, !Task.isCancelled else { return }
+            _ = self.completeScheduledWebViewBinding(
+                webView,
+                generation: generation,
+                paginationReason: paginationReason
+            )
         }
+        return generation
+    }
+
+    @MainActor
+    @discardableResult
+    func completeScheduledWebViewBinding(
+        _ webView: WKWebView,
+        generation: UInt64,
+        paginationReason: String
+    ) -> Bool {
+        guard generation == webViewBindingGeneration,
+              pendingWebViewBindingWebView === webView else {
+            return false
+        }
+        if navigator.webView !== webView {
+            setWebView(webView)
+        }
+        applyPaginationConfigurationIfNeeded(reason: paginationReason)
+        pendingWebViewBindingTask = nil
+        pendingWebViewBindingWebView = nil
+        return true
     }
 
     @MainActor
@@ -3271,6 +3319,10 @@ public class WebViewCoordinator: NSObject {
     
     @MainActor
     func setWebView(_ webView: WKWebView) {
+        if let pendingWebViewBindingWebView,
+           pendingWebViewBindingWebView !== webView {
+            cancelPendingWebViewBinding()
+        }
         let previousWebView = navigator.webView
         if let previousWebView, previousWebView !== webView {
 #if os(iOS)

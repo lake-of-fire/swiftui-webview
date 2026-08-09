@@ -428,6 +428,75 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertFalse(replacementContext.map(coordinator.ownsDocumentCallbackContext) ?? true)
     }
 
+    func testDetachingCurrentWebViewDoesNotCancelPendingReplacement() {
+        let navigator = WebViewNavigator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let currentWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+
+        coordinator.setWebView(currentWebView)
+        let generation = coordinator.scheduleWebViewBinding(
+            replacementWebView,
+            paginationReason: "test-replacement"
+        )
+        coordinator.tearDownBindingsForDetachedWebView(currentWebView)
+
+        XCTAssertTrue(coordinator.completeScheduledWebViewBinding(
+            replacementWebView,
+            generation: generation,
+            paginationReason: "test-replacement"
+        ))
+        XCTAssertTrue(navigator.webView === replacementWebView)
+    }
+
+    func testScheduledWebViewBindingRejectsSupersededGeneration() {
+        let navigator = WebViewNavigator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let firstWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+
+        let firstGeneration = coordinator.scheduleWebViewBinding(
+            firstWebView,
+            paginationReason: "first"
+        )
+        let replacementGeneration = coordinator.scheduleWebViewBinding(
+            replacementWebView,
+            paginationReason: "replacement"
+        )
+
+        XCTAssertFalse(coordinator.completeScheduledWebViewBinding(
+            firstWebView,
+            generation: firstGeneration,
+            paginationReason: "first"
+        ))
+        XCTAssertTrue(coordinator.completeScheduledWebViewBinding(
+            replacementWebView,
+            generation: replacementGeneration,
+            paginationReason: "replacement"
+        ))
+        XCTAssertTrue(navigator.webView === replacementWebView)
+    }
+
+    func testPendingReplacementSuspendsOutgoingDocumentCallbacks() {
+        let navigator = WebViewNavigator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let currentWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+
+        coordinator.setWebView(currentWebView)
+        coordinator.webView(currentWebView, didCommit: nil)
+        let currentContext = coordinator.captureDocumentCallbackContext(for: currentWebView)
+        XCTAssertNotNil(currentContext)
+
+        coordinator.scheduleWebViewBinding(
+            replacementWebView,
+            paginationReason: "replacement"
+        )
+
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: currentWebView))
+        XCTAssertFalse(currentContext.map(coordinator.ownsDocumentCallbackContext) ?? true)
+    }
+
     func testProvisionalFailureReactivatesSurvivingCommittedDocument() {
         let navigator = WebViewNavigator()
         var disposition: WebViewNavigationFailureDisposition?
