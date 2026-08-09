@@ -2498,6 +2498,18 @@ public final class WebViewPaginationController {
     }
 }
 
+private final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextSequence: UInt64 = 0
+
+    func reserve() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        nextSequence &+= 1
+        return nextSequence
+    }
+}
+
 @MainActor
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
@@ -2510,6 +2522,8 @@ public class WebViewCoordinator: NSObject {
     private var documentCallbackContextIsActive = false
     private var committedDocumentSurvivesProvisionalNavigation = false
     private var pendingDocumentCallbackTasks = [UUID: WebViewPendingDocumentCallbackTask]()
+    private let urlPublicationReceiptSequencer = WebViewURLPublicationReceiptSequencer()
+    private var latestURLPublicationReceiptSequence: UInt64 = 0
     var config: WebViewConfig
     var lifecycleConfig: WebViewLifecycleConfig = .default
     weak var webViewPool: WebViewPool?
@@ -3003,17 +3017,19 @@ public class WebViewCoordinator: NSObject {
         invalidateWebViewObservations()
 
         urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, change in
-            guard let self else { return }
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard let maybeNewURL = change.newValue, let newURL = maybeNewURL, newURL != webView.url else { return }
-                _ = setLoading(
-                    false,
-                    pageURL: newURL,
-                    canGoBack: webView.canGoBack,
-                    canGoForward: webView.canGoForward,
-                    backList: webView.backForwardList.backList,
-                    forwardList: webView.backForwardList.forwardList)
+            guard let self,
+                  let maybeNewURL = change.newValue,
+                  let newURL = maybeNewURL else {
+                return
+            }
+            let receiptSequence = self.urlPublicationReceiptSequencer.reserve()
+            Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView else { return }
+                self.handleObservedURLChange(
+                    newURL,
+                    from: webView,
+                    receiptSequence: receiptSequence
+                )
             }
         }
 
@@ -3053,6 +3069,58 @@ public class WebViewCoordinator: NSObject {
         }
         installScrollBottomStateObservations(for: webView.scrollView)
 #endif
+    }
+
+    internal nonisolated static func shouldPublishObservedURL(
+        _ observedURL: URL?,
+        currentWebViewURL: URL?,
+        publishedURL: URL?,
+        isProvisionallyNavigating: Bool = false,
+        hasHistoryStateChange: Bool = false
+    ) -> Bool {
+        guard !isProvisionallyNavigating,
+              let observedURL,
+              observedURL == currentWebViewURL else {
+            return false
+        }
+        return observedURL != publishedURL || hasHistoryStateChange
+    }
+
+    @MainActor
+    internal func handleObservedURLChange(
+        _ newURL: URL,
+        from sourceWebView: WKWebView,
+        receiptSequence: UInt64,
+        forceHistoryStatePublication: Bool = false
+    ) {
+        let currentState = webView.state
+        let backList = sourceWebView.backForwardList.backList
+        let forwardList = sourceWebView.backForwardList.forwardList
+        let hasHistoryStateChange = forceHistoryStatePublication
+            || currentState.canGoBack != sourceWebView.canGoBack
+            || currentState.canGoForward != sourceWebView.canGoForward
+            || currentState.backList != backList
+            || currentState.forwardList != forwardList
+        guard navigator.webView === sourceWebView,
+              receiptSequence > latestURLPublicationReceiptSequence,
+              Self.shouldPublishObservedURL(
+                  newURL,
+                  currentWebViewURL: sourceWebView.url,
+                  publishedURL: currentState.pageURL,
+                  isProvisionallyNavigating: currentState.isProvisionallyNavigating,
+                  hasHistoryStateChange: hasHistoryStateChange
+              ) else {
+            return
+        }
+        latestURLPublicationReceiptSequence = receiptSequence
+        _ = setLoading(
+            currentState.isLoading || sourceWebView.isLoading,
+            pageURL: newURL,
+            canGoBack: sourceWebView.canGoBack,
+            canGoForward: sourceWebView.canGoForward,
+            backList: backList,
+            forwardList: forwardList
+        )
     }
 
 #if os(iOS)

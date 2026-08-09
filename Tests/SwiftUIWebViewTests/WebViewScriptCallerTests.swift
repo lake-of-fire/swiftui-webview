@@ -31,6 +31,40 @@ private actor DocumentCallbackTestGate {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testObservedURLPublicationRequiresCurrentUnpublishedURL() throws {
+        let publishedURL = try XCTUnwrap(URL(string: "https://example.com/old"))
+        let currentURL = try XCTUnwrap(URL(string: "https://example.com/current"))
+        let staleURL = try XCTUnwrap(URL(string: "https://example.com/stale"))
+
+        XCTAssertTrue(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            staleURL,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: currentURL
+        ))
+        XCTAssertTrue(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: currentURL,
+            hasHistoryStateChange: true
+        ))
+        XCTAssertFalse(WebViewCoordinator.shouldPublishObservedURL(
+            currentURL,
+            currentWebViewURL: currentURL,
+            publishedURL: publishedURL,
+            isProvisionallyNavigating: true
+        ))
+    }
+
     func testDocumentCallbackInvalidationCancelsWorkAndSettlesOnce() async {
         let gate = DocumentCallbackTestGate()
         let started = expectation(description: "callback started")
