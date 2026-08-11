@@ -815,6 +815,43 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertEqual(receivedToken, bindingToken)
     }
 
+    func testReaderLoaderCanonicalizationPreservesEscapedReservedCharacters() throws {
+        let contentURL = try XCTUnwrap(URL(
+            string: "ebook://book/chapter%2Fpart.xhtml?literal=%2523#selection"
+        ))
+        let encodedContentURL = try XCTUnwrap(
+            contentURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
+        )
+        let loaderURL = try XCTUnwrap(URL(
+            string: "internal://local/load/reader?reader-url=\(encodedContentURL)"
+        ))
+
+        XCTAssertEqual(
+            canonicalContentURLForReaderLoader(loaderURL)?.absoluteString,
+            contentURL.absoluteString
+        )
+    }
+
+    func testReaderLoaderCanonicalizationSupportsLegacyDoubleEncoding() throws {
+        let contentURL = try XCTUnwrap(URL(
+            string: "ebook://book/chapter%2Fpart.xhtml?literal=%2523#selection"
+        ))
+        let encodedContentURL = try XCTUnwrap(
+            contentURL.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
+        )
+        let doubleEncodedContentURL = try XCTUnwrap(
+            encodedContentURL.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
+        )
+        let loaderURL = try XCTUnwrap(URL(
+            string: "internal://local/load/reader?reader-url=\(doubleEncodedContentURL)"
+        ))
+
+        XCTAssertEqual(
+            canonicalContentURLForReaderLoader(loaderURL)?.absoluteString,
+            contentURL.absoluteString
+        )
+    }
+
     func testRealWebViewHostSynchronizesOnlyAfterDelayedBindingAndStopsAfterTeardown() async throws {
         let caller = WebViewScriptCaller()
         let navigator = WebViewNavigator()

@@ -177,7 +177,7 @@ private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
 }
 
 @inline(__always)
-private func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
+func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     guard let url,
           url.scheme?.lowercased() == "internal",
           url.host?.lowercased() == "local",
@@ -187,10 +187,15 @@ private func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     else {
         return nil
     }
-    if let decoded = readerURLValue.removingPercentEncoding, let resolved = URL(string: decoded) {
+    if let resolved = URL(string: readerURLValue), resolved.scheme != nil {
         return resolved
     }
-    return URL(string: readerURLValue)
+    guard let decoded = readerURLValue.removingPercentEncoding,
+          let resolved = URL(string: decoded),
+          resolved.scheme != nil else {
+        return nil
+    }
+    return resolved
 }
 
 @inline(__always)
