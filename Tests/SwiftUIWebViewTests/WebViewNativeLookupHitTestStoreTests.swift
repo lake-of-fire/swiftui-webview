@@ -70,6 +70,185 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(closeCount, 1)
     }
 
+    func testActiveTargetMatcherRejectsTheSameElementFromAnotherDocument() {
+        let store = WebViewNativeLookupHitTestStore()
+        let firstDocumentURL = URL(string: "ebook://book/chapter-1.xhtml")!
+        let secondDocumentURL = URL(string: "ebook://book/chapter-2.xhtml")!
+        let firstTarget = WebViewNativeLookupHitTarget(
+            elementID: "shared-section-local-id",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+            documentURL: firstDocumentURL
+        )
+        let secondTarget = WebViewNativeLookupHitTarget(
+            elementID: "shared-section-local-id",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+            documentURL: secondDocumentURL
+        )
+        store.activeLookupElementID = { "shared-section-local-id" }
+        store.activeLookupTargetMatches = { target in
+            target.documentURL == firstDocumentURL
+        }
+
+        XCTAssertTrue(store.matchesActiveLookupTarget(firstTarget))
+        XCTAssertFalse(store.matchesActiveLookupTarget(secondTarget))
+    }
+
+    func testLookupInteractionOwnershipRejectsReplacementAndClose() {
+        let store = WebViewNativeLookupHitTestStore()
+        var activeLookupID: UUID? = UUID()
+        store.activeLookupInteractionID = { activeLookupID }
+
+        let capturedLookupID = store.captureActiveLookupInteractionID()
+        XCTAssertTrue(store.isActiveLookupInteractionCurrent(capturedLookupID))
+
+        activeLookupID = UUID()
+        XCTAssertFalse(store.isActiveLookupInteractionCurrent(capturedLookupID))
+
+        activeLookupID = nil
+        XCTAssertFalse(store.isActiveLookupInteractionCurrent(capturedLookupID))
+    }
+
+    func testHitPublicationIdentityBecomesStaleAfterFrameReplacement() throws {
+        let store = WebViewNativeLookupHitTestStore()
+        var dispatchedHit: WebViewNativeLookupHit?
+        store.onHit = { dispatchedHit = $0 }
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "segment",
+                    rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "frame"
+        )
+
+        XCTAssertTrue(store.handleTap(at: CGPoint(x: 10, y: 10)))
+        let publicationID = try XCTUnwrap(dispatchedHit?.nativeLookupPublicationID)
+        XCTAssertTrue(store.isPublicationCurrent(publicationID))
+
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "segment",
+                    rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "frame"
+        )
+
+        XCTAssertFalse(store.isPublicationCurrent(publicationID))
+    }
+
+    func testCapturedTapRejectsReplacedPublicationAndDisabledStore() throws {
+        let store = WebViewNativeLookupHitTestStore()
+        var dispatchedElementIDs = [String]()
+        store.onHit = { dispatchedElementIDs.append($0.elementID) }
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "segment",
+                    rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "frame"
+        )
+        let staleTarget = try XCTUnwrap(store.hitTarget(at: CGPoint(x: 10, y: 10)))
+
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "segment",
+                    rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "frame"
+        )
+
+        XCTAssertFalse(store.handleTap(on: staleTarget, at: CGPoint(x: 10, y: 10)))
+        XCTAssertTrue(dispatchedElementIDs.isEmpty)
+
+        store.isEnabled = false
+        let externalTarget = WebViewNativeLookupHitTarget(
+            elementID: "external",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)]
+        )
+        XCTAssertFalse(store.handleTap(on: externalTarget, at: CGPoint(x: 10, y: 10)))
+        XCTAssertTrue(dispatchedElementIDs.isEmpty)
+    }
+
+    func testUnrelatedFrameReplacementPreservesPublicationIdentity() throws {
+        let store = WebViewNativeLookupHitTestStore()
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "source",
+                    rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "source-frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "source-frame"
+        )
+        let sourceTarget = try XCTUnwrap(store.hitTarget(at: CGPoint(x: 10, y: 10)))
+        let publicationID = try XCTUnwrap(sourceTarget.nativeLookupPublicationID)
+
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "destination",
+                    rects: [CGRect(x: 40, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "destination-frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "destination-frame"
+        )
+
+        XCTAssertTrue(store.isPublicationCurrent(publicationID))
+    }
+
+    func testCapturedNativeTouchRequiresPublicationAndLookupOwnership() throws {
+        let store = WebViewNativeLookupHitTestStore()
+        var activeLookupID: UUID? = UUID()
+        store.activeLookupInteractionID = { activeLookupID }
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "segment",
+                rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                nativeLookupFrameKey: "frame"
+            )
+        ])
+        let target = try XCTUnwrap(store.hitTarget(at: CGPoint(x: 10, y: 10)))
+        let capturedLookupID = store.captureActiveLookupInteractionID()
+        store.beginNativeTouchStream(on: target)
+
+        XCTAssertTrue(
+            store.isCapturedNativeTouchCurrent(target, lookupInteractionID: capturedLookupID)
+        )
+
+        activeLookupID = UUID()
+        XCTAssertFalse(
+            store.isCapturedNativeTouchCurrent(target, lookupInteractionID: capturedLookupID)
+        )
+
+        activeLookupID = capturedLookupID
+        store.updateTargets(
+            [
+                WebViewNativeLookupHitTarget(
+                    elementID: "segment",
+                    rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+                    nativeLookupFrameKey: "frame"
+                )
+            ],
+            replacingNativeLookupFrameKey: "frame"
+        )
+        XCTAssertFalse(
+            store.isCapturedNativeTouchCurrent(target, lookupInteractionID: capturedLookupID)
+        )
+    }
+
     func testTargetPublicationProbeDoesNotNotifyForRedundantEmptyClear() {
         let store = WebViewNativeLookupHitTestStore()
         var notificationCount = 0
