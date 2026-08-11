@@ -1274,11 +1274,22 @@ public struct WebViewState: Equatable, Sendable {
     }
 }
 
+@MainActor
+private enum WebViewMessageReceiptSequencer {
+    private static var nextSequence: UInt64 = 0
+
+    static func reserve() -> UInt64 {
+        nextSequence &+= 1
+        return nextSequence
+    }
+}
+
 public struct WebViewMessage: Equatable, @unchecked Sendable {
     public let frameInfo: WKFrameInfo
     fileprivate let uuid: UUID
     public let name: String
     public let body: Any
+    public let receiptSequence: UInt64?
     public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
     public let isMainFrame: Bool
     public let requestURL: URL?
@@ -1290,12 +1301,14 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
         uuid: UUID,
         name: String,
         body: Any,
+        receiptSequence: UInt64? = nil,
         javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
     ) {
         self.frameInfo = frameInfo
         self.uuid = uuid
         self.name = name
         self.body = body
+        self.receiptSequence = receiptSequence
         self.javaScriptBindingToken = javaScriptBindingToken
         self.isMainFrame = frameInfo.isMainFrame
         self.requestURL = frameInfo.request.url
@@ -3959,6 +3972,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             uuid: UUID(),
             name: message.name,
             body: message.body,
+            receiptSequence: WebViewMessageReceiptSequencer.reserve(),
             javaScriptBindingToken: javaScriptBindingToken(for: sourceWebView)
         )
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
