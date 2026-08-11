@@ -882,6 +882,23 @@ final class WebViewScriptCallerTests: XCTestCase {
     }
 #endif
 
+#if os(iOS)
+    @MainActor
+    func testWebViewCoordinateOriginUsesVisibleBoundsOrigin() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1_024, height: 768))
+        let webView = WKWebView(frame: CGRect(x: 450, y: 86, width: 550, height: 640))
+        window.addSubview(webView)
+        // UIKit conversion is expressed in the view's bounds coordinate
+        // space. This mimics the shifted bounds used by the iPad reader host.
+        webView.bounds.origin = CGPoint(x: 450, y: 86)
+
+        XCTAssertEqual(
+            webViewCoordinateOriginInWindow(webView),
+            CGPoint(x: 450, y: 86)
+        )
+    }
+#endif
+
     func testLegacyCanonicalFrameResolutionFailsClosedForDistinctDuplicateFrames() {
         let firstFrame = NSObject()
         let secondFrame = NSObject()
@@ -1875,7 +1892,10 @@ final class WebViewScriptCallerTests: XCTestCase {
             baseURL: URL(string: "https://example.com/container.xhtml")
         )
 
-        await fulfillment(of: [frameExpectation], timeout: 3)
+        // A full test run creates many WebContent processes before reaching
+        // this fixture. Keep requiring a real main-frame message, but allow
+        // process startup to settle under that accumulated simulator load.
+        await fulfillment(of: [frameExpectation], timeout: 10)
         let frame = try XCTUnwrap(mainFrame)
         let caller = WebViewScriptCaller()
         XCTAssertTrue(caller.addMultiTargetFrame(

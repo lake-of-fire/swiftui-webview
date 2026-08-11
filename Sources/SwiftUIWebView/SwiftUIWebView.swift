@@ -6903,9 +6903,14 @@ private func webViewSnapshotNativeScale(for webView: WKWebView) -> CGFloat {
 }
 
 @MainActor
-private func webViewCoordinateOriginInWindow(_ webView: WKWebView) -> CGPoint? {
+func webViewCoordinateOriginInWindow(_ webView: WKWebView) -> CGPoint? {
 #if os(iOS)
-    return webView.convert(.zero, to: nil)
+    // A WKWebView can have a non-zero bounds origin while embedded in a
+    // paginated/split reader host. Converting the local zero point then
+    // reports a point outside the visible bounds (observed as window origin),
+    // rather than the visible viewport's top-leading coordinate.
+    guard webView.window != nil else { return nil }
+    return webView.convert(webView.bounds, to: nil).origin
 #elseif os(macOS)
     guard let window = webView.window,
           let contentView = window.contentView else { return nil }
