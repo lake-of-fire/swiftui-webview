@@ -1526,6 +1526,7 @@ public final class WebViewNativeLookupHitTestStore {
 #if DEBUG
     private var targetRevision: UInt64 = 0
     private var targetChangeObservers: [UUID: () -> Void] = [:]
+    private var uiTestTargetPublicationProbeTextStorage = "none"
     public var onTargetsChanged: (() -> Void)?
 #endif
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
@@ -1693,6 +1694,16 @@ public final class WebViewNativeLookupHitTestStore {
             "lookupPayloadCount=\(payloadTargets.count)",
             "surfaces=\(payloadTargets.prefix(8).joined(separator: "|"))",
         ].joined(separator: ";")
+    }
+
+    /// Last target publication admitted by the reader. Its value is formatted by
+    /// the reader and is exposed only through the existing DEBUG UI-test probe.
+    public var uiTestTargetPublicationProbeText: String {
+        uiTestTargetPublicationProbeTextStorage
+    }
+
+    public func recordUITestTargetPublicationProbeText(_ text: String) {
+        uiTestTargetPublicationProbeTextStorage = String(text.prefix(512))
     }
 
     @discardableResult
