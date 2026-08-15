@@ -163,7 +163,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                 loadExpectation.fulfill()
             }
         )
-        let coordinator = webViewModel.makeCoordinator()
+        let coordinator = webViewModel.makeCoordinatorForTesting()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         let webView = EnhancedWKWebView(
@@ -223,7 +223,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                 loadExpectation.fulfill()
             }
         )
-        let coordinator = webViewModel.makeCoordinator()
+        let coordinator = webViewModel.makeCoordinatorForTesting()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         let webView = EnhancedWKWebView(
@@ -287,7 +287,7 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
                 loadExpectation.fulfill()
             }
         )
-        let coordinator = webViewModel.makeCoordinator()
+        let coordinator = webViewModel.makeCoordinatorForTesting()
         let detachedWebView = EnhancedWKWebView(
             frame: CGRect(x: 0, y: 0, width: 430, height: 932),
             configuration: WKWebViewConfiguration()
