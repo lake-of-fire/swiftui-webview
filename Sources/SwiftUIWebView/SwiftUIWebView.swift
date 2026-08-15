@@ -10331,22 +10331,23 @@ extension WebView: UIViewControllerRepresentable {
         }
 #endif
         updateCoordinatorBindings(context: context)
-
         bindScriptCallerIfNeeded(to: controller.webView, context: context)
+
         let resolvedContentRules = navigator.peekContentRulesBypass(for: controller.webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: mountedWebView,
             context: context,
             resolvedContentRules: resolvedContentRules
         )
+
         refreshDarkModeSetting(webView: mountedWebView)
+
         updateUserScripts(
             webView: controller.webView,
             coordinator: context.coordinator,
             forDomain: resolvedUserScriptDomain(currentURL: mountedWebView.url),
             config: config
         )
-
         //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
         
         
@@ -10376,7 +10377,6 @@ extension WebView: UIViewControllerRepresentable {
             containerView: controller.view,
             coordinator: context.coordinator
         )
-        
         // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
         let topSafeAreaInset = controller.view.window?.safeAreaInsets.top ?? 0
@@ -10887,6 +10887,7 @@ extension WebView: NSViewRepresentable {
         let webView = uiView.webView
 
         bindScriptCallerIfNeeded(to: webView, context: context)
+
         let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
