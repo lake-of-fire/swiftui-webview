@@ -89,7 +89,7 @@ final class WebViewScriptCallerTests: XCTestCase {
         _ = WebView(
             navigator: navigator,
             state: .constant(.empty)
-        ).makeCoordinator()
+        ).makeCoordinatorForTesting()
 
         XCTAssertEqual(navigator.attachFallbackURL, fallbackURL)
     }
@@ -372,7 +372,7 @@ final class WebViewScriptCallerTests: XCTestCase {
     func testRegisteredReturnOwnerRejectsOtherWebViewsAndLaterPools() {
         let navigator = WebViewNavigator()
         let model = WebView(navigator: navigator, state: .constant(.empty))
-        let coordinator = model.makeCoordinator()
+        let coordinator = model.makeCoordinatorForTesting()
         let laterPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
         let ownedWebView = EnhancedWKWebView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 640),
@@ -394,7 +394,7 @@ final class WebViewScriptCallerTests: XCTestCase {
     func testRegisteredReturnOwnerRetainsOriginatingPoolAcrossConfigurationReplacement() {
         let navigator = WebViewNavigator()
         let model = WebView(navigator: navigator, state: .constant(.empty))
-        let coordinator = model.makeCoordinator()
+        let coordinator = model.makeCoordinatorForTesting()
         var originalPool: WebViewPool? = WebViewPool(warmUpCount: 0, keepAliveCount: 0)
         let retainedOriginalPool = WeakReference(originalPool)
         let replacementPool = WebViewPool(warmUpCount: 0, keepAliveCount: 1)
@@ -429,7 +429,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             webViewPool: pool,
             lifecycleConfig: WebViewLifecycleConfig(autoUnloadOnDisappear: true)
         )
-        let coordinator = model.makeCoordinator()
+        let coordinator = model.makeCoordinatorForTesting()
         let webView = pool.dequeue {
             EnhancedWKWebView(
                 frame: CGRect(x: 0, y: 0, width: 320, height: 640),
@@ -562,7 +562,7 @@ final class WebViewScriptCallerTests: XCTestCase {
 
     func testDocumentContextRejectsReplacementAndNewNavigationGeneration() {
         let navigator = WebViewNavigator()
-        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinatorForTesting()
         let firstWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
@@ -583,7 +583,7 @@ final class WebViewScriptCallerTests: XCTestCase {
 
     func testDetachingCurrentWebViewDoesNotCancelPendingReplacement() {
         let navigator = WebViewNavigator()
-        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinatorForTesting()
         let currentWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
@@ -604,7 +604,7 @@ final class WebViewScriptCallerTests: XCTestCase {
 
     func testScheduledWebViewBindingRejectsSupersededGeneration() {
         let navigator = WebViewNavigator()
-        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinatorForTesting()
         let firstWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
@@ -632,7 +632,7 @@ final class WebViewScriptCallerTests: XCTestCase {
 
     func testPendingReplacementSuspendsOutgoingDocumentCallbacks() {
         let navigator = WebViewNavigator()
-        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinator()
+        let coordinator = WebView(navigator: navigator, state: .constant(.empty)).makeCoordinatorForTesting()
         let currentWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         let replacementWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
@@ -657,7 +657,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             navigator: navigator,
             state: .constant(.empty),
             onNavigationFailedWithDisposition: { _, value in disposition = value }
-        ).makeCoordinator()
+        ).makeCoordinatorForTesting()
         let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
         coordinator.setWebView(webView)
@@ -680,7 +680,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             navigator: navigator,
             state: .constant(.empty),
             onNavigationFailedWithDisposition: { _, value in disposition = value }
-        ).makeCoordinator()
+        ).makeCoordinatorForTesting()
         let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
         coordinator.setWebView(webView)
@@ -860,7 +860,7 @@ final class WebViewScriptCallerTests: XCTestCase {
             state: .constant(.empty),
             scriptCaller: caller
         )
-        let coordinator = webViewModel.makeCoordinator()
+        let coordinator = webViewModel.makeCoordinatorForTesting()
         let mountedWebView = EnhancedWKWebView(
             frame: CGRect(x: 0, y: 0, width: 640, height: 480),
             configuration: WKWebViewConfiguration()

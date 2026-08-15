@@ -8500,12 +8500,26 @@ public struct WebView {
     
     @MainActor
     public func makeCoordinator() -> WebViewCoordinator {
+        makeCoordinator(messageHandlers: webViewMessageHandlers)
+    }
+
+    @MainActor
+    func makeCoordinatorForTesting(
+        messageHandlers: WebViewMessageHandlers = .init()
+    ) -> WebViewCoordinator {
+        makeCoordinator(messageHandlers: messageHandlers)
+    }
+
+    @MainActor
+    private func makeCoordinator(
+        messageHandlers: WebViewMessageHandlers
+    ) -> WebViewCoordinator {
         let coordinator = WebViewCoordinator(
             webView: self,
             navigator: navigator,
             scriptCaller: scriptCaller,
             config: config,
-            messageHandlers: webViewMessageHandlers,
+            messageHandlers: messageHandlers,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
@@ -8917,21 +8931,24 @@ extension WebView: UIViewControllerRepresentable {
         }
 #endif
         updateCoordinatorBindings(context: context)
+
         bindScriptCallerIfNeeded(to: controller.webView, context: context)
+
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
             webView: controller.webView,
             context: context,
             resolvedContentRules: resolvedContentRules
         )
+
         refreshDarkModeSetting(webView: controller.webView)
+
         updateUserScripts(
             userContentController: controller.webView.configuration.userContentController,
             coordinator: context.coordinator,
             forDomain: resolvedUserScriptDomain(currentURL: controller.webView.url),
             config: config
         )
-        
         //        refreshContentRules(userContentController: controller.webView.configuration.userContentController, coordinator: context.coordinator)
         
         //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
@@ -9499,23 +9516,26 @@ extension WebView: NSViewRepresentable {
     @MainActor
     public func updateNSView(_ uiView: WebViewHostNSView, context: Context) {
         updateCoordinatorBindings(context: context)
+
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         uiView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         let webView = uiView.webView
+
         bindScriptCallerIfNeeded(to: webView, context: context)
+
         let resolvedContentRules = navigator.peekContentRulesBypass() ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
             context: context,
             resolvedContentRules: resolvedContentRules
         )
+
         updateUserScripts(
             userContentController: webView.configuration.userContentController,
             coordinator: context.coordinator,
             forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
         )
-        
         // Can't disable on macOS.
         //        uiView.scrollView.bounces = bounces
         //        uiView.scrollView.alwaysBounceVertical = bounces
@@ -9523,13 +9543,20 @@ extension WebView: NSViewRepresentable {
         refreshDarkModeSetting(webView: webView)
         
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-        webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
-        if #available(macOS 11.0, *) {
-            webView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
-        } else {
-            webView.layer?.backgroundColor = NSColor.clear.cgColor
+        if (webView.value(forKey: "drawsBackground") as? Bool) != resolvedDrawsBackground {
+            webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         }
-        
+        if #available(macOS 11.0, *) {
+            let backgroundColor = NSColor(config.backgroundColor).cgColor
+            if webView.layer?.backgroundColor != backgroundColor {
+                webView.layer?.backgroundColor = backgroundColor
+            }
+        } else {
+            let backgroundColor = NSColor.clear.cgColor
+            if webView.layer?.backgroundColor != backgroundColor {
+                webView.layer?.backgroundColor = backgroundColor
+            }
+        }
     }
     
     public static func dismantleNSView(_ nsView: WebViewHostNSView, coordinator: WebViewCoordinator) {
@@ -9570,10 +9597,18 @@ extension WebView {
         } else if let enhancedWebView = webView as? EnhancedWKWebView {
             enhancedWebView.persistedAppliedContentRules = resolvedContentRules
         }
-        webView.navigationDelegate = context.coordinator
-        webView.uiDelegate = context.coordinator
-        webView.pageZoom = config.pageZoom
-        webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        if webView.navigationDelegate !== context.coordinator {
+            webView.navigationDelegate = context.coordinator
+        }
+        if webView.uiDelegate !== context.coordinator {
+            webView.uiDelegate = context.coordinator
+        }
+        if webView.pageZoom != config.pageZoom {
+            webView.pageZoom = config.pageZoom
+        }
+        if webView.allowsBackForwardNavigationGestures != config.allowsBackForwardNavigationGestures {
+            webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
+        }
         context.coordinator.schedulePaginationConfigurationApply(reason: "apply-common-configuration", for: webView)
     }
 
