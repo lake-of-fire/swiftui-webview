@@ -12,7 +12,7 @@ final class WebViewScrollOwnershipTests: XCTestCase {
             navigator: navigator,
             state: .constant(.empty)
         )
-        let coordinator = webViewModel.makeCoordinator()
+        let coordinator = webViewModel.makeCoordinatorForTesting()
         let currentWebView = WKWebView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 480),
             configuration: WKWebViewConfiguration()
