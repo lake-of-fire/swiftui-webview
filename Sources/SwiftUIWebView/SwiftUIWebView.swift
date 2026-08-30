@@ -6827,24 +6827,47 @@ public struct WebViewSnapshotImage: @unchecked Sendable {
     public let scale: CGFloat
     /// Source rect in WKWebView view-coordinate points.
     public let capturedRect: CGRect
+    /// Source rect in top-frame DOM viewport CSS points when captured through the DOM overload.
+    public let domViewportRect: CGRect?
 
-    public init(cgImage: CGImage, bounds: CGRect, scale: CGFloat, capturedRect: CGRect) {
+    public init(
+        cgImage: CGImage,
+        bounds: CGRect,
+        scale: CGFloat,
+        capturedRect: CGRect,
+        domViewportRect: CGRect? = nil
+    ) {
         self.cgImage = cgImage
         self.bounds = bounds
         self.scale = scale
         self.capturedRect = capturedRect
+        self.domViewportRect = domViewportRect
     }
 }
 
 @MainActor
 private func makeWebViewSnapshotCapture(
     for webView: WKWebView
-) -> @MainActor @Sendable (CGRect?) async throws -> WebViewSnapshotImage {
-    return { [weak webView] requestedRect in
+) -> WebViewScriptCaller.SnapshotCapture {
+    return { [weak webView] request in
         guard let webView else {
             throw WebViewScriptCallerSnapshotError.unavailable
         }
 
+        let requestedRect: CGRect?
+        let requestedDOMViewport: CGRect?
+        switch request {
+        case .viewRect(let rect):
+            requestedRect = rect
+            requestedDOMViewport = nil
+        case .domViewportRect(let rect, let viewportRect):
+            requestedRect = try WebViewScriptCaller.resolvedViewRect(
+                forDOMViewportRect: rect,
+                viewportRect: viewportRect,
+                in: webView.bounds
+            )
+            requestedDOMViewport = viewportRect
+        }
         let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: webView.bounds)
         let configuration = makeWebViewSnapshotConfiguration(capturedRect: capturedRect)
 
@@ -6878,7 +6901,14 @@ private func makeWebViewSnapshotCapture(
             cgImage: cgImage,
             bounds: bounds,
             scale: scale,
-            capturedRect: capturedRect
+            capturedRect: capturedRect,
+            domViewportRect: requestedDOMViewport.map {
+                WebViewScriptCaller.resolvedDOMViewportRect(
+                    forViewRect: capturedRect,
+                    viewportRect: $0,
+                    in: webView.bounds
+                )
+            }
         )
     }
 }
@@ -6997,9 +7027,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         WKFrameInfo?,
         WKContentWorld?
     ) -> Void
-    typealias SnapshotCapture = @MainActor @Sendable (
-        CGRect?
-    ) async throws -> WebViewSnapshotImage
+    enum SnapshotRequest: Sendable {
+        case viewRect(CGRect?)
+        case domViewportRect(CGRect, viewportRect: CGRect)
+    }
+    typealias SnapshotCapture = @MainActor @Sendable (SnapshotRequest) async throws -> WebViewSnapshotImage
     typealias CoordinateOriginInWindow = @MainActor @Sendable () -> CGPoint?
 
     public let id = UUID().uuidString
@@ -7572,7 +7604,81 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         guard let snapshotCapture else {
             throw WebViewScriptCallerSnapshotError.unavailable
         }
-        return try await snapshotCapture(rect)
+        return try await snapshotCapture(.viewRect(rect))
+    }
+
+    /// Captures a rect expressed in top-frame DOM viewport coordinates.
+    ///
+    /// `viewportRect` is the top frame's visual viewport in the same CSS-point coordinate space as
+    /// `domViewportRect`. This maps page zoom and visual-viewport offsets into WKWebView view points.
+    @MainActor
+    public func captureSnapshot(
+        domViewportRect: CGRect,
+        viewportRect: CGRect
+    ) async throws -> WebViewSnapshotImage {
+        guard let snapshotCapture else {
+            throw WebViewScriptCallerSnapshotError.unavailable
+        }
+        return try await snapshotCapture(
+            .domViewportRect(domViewportRect, viewportRect: viewportRect)
+        )
+    }
+
+    nonisolated static func resolvedViewRect(
+        forDOMViewportRect domRect: CGRect,
+        viewportRect: CGRect,
+        in bounds: CGRect
+    ) throws -> CGRect {
+        guard domRect.origin.x.isFinite,
+              domRect.origin.y.isFinite,
+              domRect.width.isFinite,
+              domRect.height.isFinite,
+              viewportRect.origin.x.isFinite,
+              viewportRect.origin.y.isFinite,
+              viewportRect.width.isFinite,
+              viewportRect.height.isFinite,
+              bounds.origin.x.isFinite,
+              bounds.origin.y.isFinite,
+              bounds.width.isFinite,
+              bounds.height.isFinite,
+              domRect.width > 0,
+              domRect.height > 0,
+              viewportRect.width > 0,
+              viewportRect.height > 0,
+              bounds.width > 0,
+              bounds.height > 0
+        else {
+            throw WebViewScriptCallerSnapshotError.emptyRect
+        }
+        let scaleX = bounds.width / viewportRect.width
+        let mapped = CGRect(
+            x: bounds.minX + (domRect.minX - viewportRect.minX) * scaleX,
+            y: bounds.minY + (domRect.minY - viewportRect.minY) * scaleX,
+            width: domRect.width * scaleX,
+            height: domRect.height * scaleX
+        )
+        guard mapped.origin.x.isFinite,
+              mapped.origin.y.isFinite,
+              mapped.width.isFinite,
+              mapped.height.isFinite
+        else {
+            throw WebViewScriptCallerSnapshotError.emptyRect
+        }
+        return try resolvedSnapshotRect(mapped, in: bounds)
+    }
+
+    nonisolated static func resolvedDOMViewportRect(
+        forViewRect viewRect: CGRect,
+        viewportRect: CGRect,
+        in bounds: CGRect
+    ) -> CGRect {
+        let scaleX = viewportRect.width / bounds.width
+        return CGRect(
+            x: viewportRect.minX + (viewRect.minX - bounds.minX) * scaleX,
+            y: viewportRect.minY + (viewRect.minY - bounds.minY) * scaleX,
+            width: viewRect.width * scaleX,
+            height: viewRect.height * scaleX
+        )
     }
 
     nonisolated static func resolvedSnapshotRect(_ requestedRect: CGRect?, in bounds: CGRect) throws -> CGRect {
