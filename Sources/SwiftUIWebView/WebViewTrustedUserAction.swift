@@ -245,9 +245,9 @@ final class WebViewTrustedUserActionAdmissionStore {
     }
 }
 
-@MainActor
 enum WebViewTrustedUserActionBroker {
     static let handlerName = "swiftUIWebViewTrustedUserAction"
+    @MainActor
     static let world = WKContentWorld.world(
         name: "com.manabi.swiftui-webview.trusted-user-action"
     )
@@ -266,6 +266,7 @@ enum WebViewTrustedUserActionBroker {
     /// native UI or as controls created and retained wholly by the isolated
     /// world. Reader-mode output is expected to enforce the reserved namespace
     /// and native handlers still validate document and semantic scope.
+    @MainActor
     static let userScript = WebViewUserScript(
         source: """
         (() => {
