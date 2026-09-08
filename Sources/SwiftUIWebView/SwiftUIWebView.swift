@@ -2979,7 +2979,9 @@ public class WebViewCoordinator: NSObject {
     private var documentCallbackContextIsActive = false
     private let trustedUserActionAdmissions =
         WebViewTrustedUserActionAdmissionStore()
-    private var committedDocumentSurvivesProvisionalNavigation = false
+    // Existence of the displayed committed document is independent from its
+    // temporarily suspended callback admission during provisional navigation.
+    private var hasCommittedDocument = false
     private var pendingDocumentCallbackTasks = [UUID: WebViewPendingDocumentCallbackTask]()
     private var webViewBindingGeneration: UInt64 = 0
     private var paginationStateGeneration: UInt64 = 0
@@ -3964,7 +3966,7 @@ public class WebViewCoordinator: NSObject {
 
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
-        committedDocumentSurvivesProvisionalNavigation = false
+        hasCommittedDocument = false
         scriptCaller?.removeAllMultiTargetFrames()
         onDocumentContextInvalidated?(self.webView.state, .webViewDetached)
         navigator.releaseWebViewIfOwned(webView, reason: "coordinatorDetached")
@@ -4101,7 +4103,7 @@ public class WebViewCoordinator: NSObject {
         if previousWebView !== webView {
             if previousWebView != nil {
                 invalidateDocumentCallbackContext()
-                committedDocumentSurvivesProvisionalNavigation = false
+                hasCommittedDocument = false
                 scriptCaller?.removeAllMultiTargetFrames()
                 onDocumentContextInvalidated?(self.webView.state, .webViewDetached)
             }
@@ -4914,8 +4916,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         invalidatePageStateExtraction()
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
-        let preservesCommittedDocument = committedDocumentSurvivesProvisionalNavigation
-        committedDocumentSurvivesProvisionalNavigation = false
+        let preservesCommittedDocument = hasCommittedDocument
         if preservesCommittedDocument {
             activateDocumentCallbackContext(for: webView)
         } else {
@@ -4962,7 +4963,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         guard ownsWebView(webView) else { return }
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
-        committedDocumentSurvivesProvisionalNavigation = false
+        hasCommittedDocument = false
         (webView as? EnhancedWKWebView)?.resetPooledContentNavigation()
         navigator.clearActiveInternalReaderLoadSignal()
         scriptCaller?.removeAllMultiTargetFrames()
@@ -4987,7 +4988,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
-        committedDocumentSurvivesProvisionalNavigation = false
+        hasCommittedDocument = false
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
         scriptCaller?.removeAllMultiTargetFrames()
@@ -5038,7 +5039,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
-        committedDocumentSurvivesProvisionalNavigation = false
+        hasCommittedDocument = true
         scriptCaller?.removeAllMultiTargetFrames()
         activateDocumentCallbackContext(for: webView)
 #if DEBUG
@@ -5155,7 +5156,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         invalidatePageStateExtraction()
-        committedDocumentSurvivesProvisionalNavigation = documentCallbackContextIsActive
         invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
 #if DEBUG

@@ -1106,6 +1106,38 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: mountedWebView))
     }
 
+    func testSupersededProvisionalFailurePreservesTheCommittedDocument() throws {
+        let navigator = WebViewNavigator()
+        let caller = WebViewScriptCaller()
+        var dispositions: [WebViewNavigationFailureDisposition] = []
+        let model = WebView(
+            navigator: navigator,
+            state: .constant(.empty),
+            scriptCaller: caller,
+            onNavigationFailedWithDisposition: { _, disposition in dispositions.append(disposition) }
+        )
+        let coordinator = model.makeCoordinatorForTesting()
+        let mounted = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        coordinator.scheduleWebViewBinding(mounted, paginationReason: "test.superseded-provisional")
+        coordinator.webView(mounted, didCommit: nil)
+        let frameGeneration = caller.frameContextGenerationForTesting
+        let receipts = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let first = try XCTUnwrap(receipts.loadHTMLString("<p>first</p>", baseURL: nil))
+        let replacement = try XCTUnwrap(receipts.loadHTMLString("<p>replacement</p>", baseURL: nil))
+        mounted.beginUnkeyedNavigation(navigation: first)
+        coordinator.webView(mounted, didStartProvisionalNavigation: first)
+        mounted.beginUnkeyedNavigation(navigation: replacement)
+        coordinator.webView(mounted, didFailProvisionalNavigation: first,
+                            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+        XCTAssertTrue(dispositions.isEmpty)
+        coordinator.webView(mounted, didStartProvisionalNavigation: replacement)
+        coordinator.webView(mounted, didFailProvisionalNavigation: replacement,
+                            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost))
+        XCTAssertEqual(dispositions, [.preservedCommittedDocument])
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: mounted))
+        XCTAssertEqual(caller.frameContextGenerationForTesting, frameGeneration)
+    }
+
     func testInitialProvisionalFailureDoesNotInventACommittedDocumentContext() {
         let navigator = WebViewNavigator()
         var disposition: WebViewNavigationFailureDisposition?
