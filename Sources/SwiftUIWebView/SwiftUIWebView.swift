@@ -6196,6 +6196,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
+    private var trackedWordTargetFrameUUIDs = Set<String>()
     private var canonicalFrameKeyByUUID = [String: String]()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
     private var lastKnownMainFrame: WKFrameInfo?
@@ -6233,6 +6234,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return
         }
         multiTargetFrames.removeValue(forKey: uuid)
+        trackedWordTargetFrameUUIDs.remove(uuid)
         if let canonicalKey = canonicalFrameKeyByUUID.removeValue(forKey: uuid),
            framesByCanonicalURL[canonicalKey] === registeredFrame {
             framesByCanonicalURL[canonicalKey] = multiTargetFrames.first(where: { candidateUUID, _ in
@@ -6563,6 +6565,21 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 #endif
         return inserted
     }
+
+    /// Registers a frame that owns a Manabi tracked-word document. General
+    /// multi-target frames such as ebook viewer shells are deliberately not
+    /// included in tracked-status mutation delivery.
+    @MainActor
+    @discardableResult
+    public func addTrackedWordTargetFrame(
+        _ frame: WKFrameInfo,
+        uuid: String,
+        canonicalURL: URL? = nil
+    ) -> Bool {
+        let inserted = addMultiTargetFrame(frame, uuid: uuid, canonicalURL: canonicalURL)
+        trackedWordTargetFrameUUIDs.insert(uuid)
+        return inserted
+    }
     
     @MainActor
     public func removeAllMultiTargetFrames() {
@@ -6576,6 +6593,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
 #endif
         multiTargetFrames.removeAll()
+        trackedWordTargetFrameUUIDs.removeAll()
         canonicalFrameKeyByUUID.removeAll()
         framesByCanonicalURL.removeAll()
     }
@@ -6623,6 +6641,18 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         documentURL: URL?
     ) -> WKFrameInfo? {
         exactFrame(forUUID: uuid, documentURL: documentURL)
+    }
+
+    /// Resolves every still-registered target together with the runtime UUID
+    /// that the target document must acknowledge. Callers can then deliver an
+    /// incremental mutation to each exact frame without using broad fanout.
+    @MainActor
+    public func registeredTrackedWordFrameIdentities() -> [(uuid: String, frame: WKFrameInfo)] {
+        trackedWordTargetFrameUUIDs
+            .compactMap { uuid in
+                multiTargetFrames[uuid].map { (uuid: uuid, frame: $0) }
+            }
+            .sorted { $0.uuid < $1.uuid }
     }
 
     @MainActor
