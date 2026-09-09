@@ -1,0 +1,94 @@
+name: Main-frame alias retention qualification v2
+on:
+  push:
+    branches: [audit/main-frame-alias-retention-20260909]
+    paths: [.github/workflows/main-frame-alias-retention-v2.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7c215fda231605a5e428f00f225dea2872d84d0c
+          fetch-depth: 0
+      - id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7c215fda231605a5e428f00f225dea2872d84d0c
+          test "$(git rev-parse HEAD^{tree})" = 96352e74f4b9d81d2c1eba998f22fc6450b666c2
+          test "$(git ls-remote origin refs/heads/fix/invalid-frame-retirement-20260909 | cut -f1)" = 7c215fda231605a5e428f00f225dea2872d84d0c
+          python3 - <<'PY'
+          import base64
+          from pathlib import Path
+          p = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
+          text = p.read_text()
+          old = """        if lastKnownMainFrame === registeredFrame {
+              lastKnownMainFrame = nil
+          }
+          """.replace("          ", "")
+          # The literal above is written with workflow indentation stripped by YAML;
+          # use an explicit source spelling to avoid indentation ambiguity.
+          old = "        if lastKnownMainFrame === registeredFrame {\n            lastKnownMainFrame = nil\n        }\n"
+          new = "        if lastKnownMainFrame === registeredFrame {\n            // Removing one UUID alias must not discard the main-frame fallback\n            // while the exact same main handle remains registered elsewhere.\n            lastKnownMainFrame = multiTargetFrames.values.first(where: {\n                $0 === registeredFrame && $0.isMainFrame\n            })\n        }\n"
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          test_b64 = 'aW1wb3J0IEZvdW5kYXRpb24KaW1wb3J0IFdlYktpdAppbXBvcnQgWENUZXN0CkB0ZXN0YWJsZSBpbXBvcnQgU3dpZnRVSVdlYlZpZXcKCnByaXZhdGUgZmluYWwgY2xhc3MgTWFpbkFsaWFzUHJvYmU6IE5TT2JqZWN0LCBXS1NjcmlwdE1lc3NhZ2VIYW5kbGVyIHsKICAgIHZhciBvbk1lc3NhZ2U6ICgoV0tTY3JpcHRNZXNzYWdlKSAtPiBWb2lkKT8KICAgIGZ1bmMgdXNlckNvbnRlbnRDb250cm9sbGVyKF8gdXNlckNvbnRlbnRDb250cm9sbGVyOiBXS1VzZXJDb250ZW50Q29udHJvbGxlciwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGRpZFJlY2VpdmUgbWVzc2FnZTogV0tTY3JpcHRNZXNzYWdlKSB7IG9uTWVzc2FnZT8obWVzc2FnZSkgfQp9CgpATWFpbkFjdG9yCmZpbmFsIGNsYXNzIFdlYlZpZXdNYWluRnJhbWVBbGlhc1JldGVudGlvblRlc3RzOiBYQ1Rlc3RDYXNlIHsKICAgIHByaXZhdGUgZnVuYyBmcmFtZXMoKSBhc3luYyB0aHJvd3MgLT4gKFdLV2ViVmlldywgV0tGcmFtZUluZm8sIFdLRnJhbWVJbmZvKSB7CiAgICAgICAgbGV0IHJlYWR5ID0gZXhwZWN0YXRpb24oZGVzY3JpcHRpb246ICJtYWluIGFuZCBjaGlsZCBmcmFtZXMiKQogICAgICAgIHJlYWR5LmV4cGVjdGVkRnVsZmlsbG1lbnRDb3VudCA9IDIKICAgICAgICB2YXIgbWFpbjogV0tGcmFtZUluZm8/CiAgICAgICAgdmFyIGNoaWxkOiBXS0ZyYW1lSW5mbz8KICAgICAgICBsZXQgcHJvYmUgPSBNYWluQWxpYXNQcm9iZSgpCiAgICAgICAgcHJvYmUub25NZXNzYWdlID0geyBtZXNzYWdlIGluCiAgICAgICAgICAgIGlmIG1lc3NhZ2UuZnJhbWVJbmZvLmlzTWFpbkZyYW1lIHsKICAgICAgICAgICAgICAgIGd1YXJkIG1haW4gPT0gbmlsIGVsc2UgeyByZXR1cm4gfQogICAgICAgICAgICAgICAgbWFpbiA9IG1lc3NhZ2UuZnJhbWVJbmZvCiAgICAgICAgICAgIH0gZWxzZSB7CiAgICAgICAgICAgICAgICBndWFyZCBjaGlsZCA9PSBuaWwgZWxzZSB7IHJldHVybiB9CiAgICAgICAgICAgICAgICBjaGlsZCA9IG1lc3NhZ2UuZnJhbWVJbmZvCiAgICAgICAgICAgIH0KICAgICAgICAgICAgcmVhZHkuZnVsZmlsbCgpCiAgICAgICAgfQogICAgICAgIGxldCBjb25maWd1cmF0aW9uID0gV0tXZWJWaWV3Q29uZmlndXJhdGlvbigpCiAgICAgICAgY29uZmlndXJhdGlvbi51c2VyQ29udGVudENvbnRyb2xsZXIuYWRkKHByb2JlLCBuYW1lOiAibWFpbkFsaWFzUHJvYmUiKQogICAgICAgIGxldCB2aWV3ID0gV0tXZWJWaWV3KGZyYW1lOiBDR1JlY3QoeDogMCwgeTogMCwgd2lkdGg6IDMyMCwgaGVpZ2h0OiA0ODApLCBjb25maWd1cmF0aW9uOiBjb25maWd1cmF0aW9uKQogICAgICAgIHZpZXcubG9hZEhUTUxTdHJpbmcoIiIiCiAgICAgICAgICAgIDxzY3JpcHQ+d2luZG93LndlYmtpdC5tZXNzYWdlSGFuZGxlcnMubWFpbkFsaWFzUHJvYmUucG9zdE1lc3NhZ2UoJ21haW4nKTwvc2NyaXB0PgogICAgICAgICAgICA8aWZyYW1lIHNyY2RvYz0iPHNjcmlwdD53aW5kb3cud2Via2l0Lm1lc3NhZ2VIYW5kbGVycy5tYWluQWxpYXNQcm9iZS5wb3N0TWVzc2FnZSgnY2hpbGQnKTwvc2NyaXB0PiI+PC9pZnJhbWU+CiAgICAgICAgICAgICIiIiwgYmFzZVVSTDogVVJMKHN0cmluZzogImh0dHBzOi8vZXhhbXBsZS5pbnZhbGlkL21haW4tYWxpYXMiKSkKICAgICAgICBhd2FpdCBmdWxmaWxsbWVudChvZjogW3JlYWR5XSwgdGltZW91dDogMTApCiAgICAgICAgY29uZmlndXJhdGlvbi51c2VyQ29udGVudENvbnRyb2xsZXIucmVtb3ZlU2NyaXB0TWVzc2FnZUhhbmRsZXIoZm9yTmFtZTogIm1haW5BbGlhc1Byb2JlIikKICAgICAgICByZXR1cm4gKHZpZXcsIHRyeSBYQ1RVbndyYXAobWFpbiksIHRyeSBYQ1RVbndyYXAoY2hpbGQpKQogICAgfQoKICAgIGZ1bmMgdGVzdFJlcGxhY2luZ09uZU9mVHdvTWFpbkFsaWFzZXNQcmVzZXJ2ZXNNYWluRmFsbGJhY2soKSBhc3luYyB0aHJvd3MgewogICAgICAgIGxldCAodmlldywgbWFpbiwgY2hpbGQpID0gdHJ5IGF3YWl0IGZyYW1lcygpCiAgICAgICAgZGVmZXIgeyB3aXRoRXh0ZW5kZWRMaWZldGltZSh2aWV3KSB7fSB9CiAgICAgICAgbGV0IGNhbGxlciA9IFdlYlZpZXdTY3JpcHRDYWxsZXIoKQogICAgICAgIGNhbGxlci5hZGRNdWx0aVRhcmdldEZyYW1lKG1haW4sIHV1aWQ6ICJtYWluLWEiLCBjYW5vbmljYWxVUkw6IFVSTChzdHJpbmc6ICJlYm9vazovL2Jvb2svYSIpKQogICAgICAgIGNhbGxlci5hZGRNdWx0aVRhcmdldEZyYW1lKG1haW4sIHV1aWQ6ICJtYWluLWIiLCBjYW5vbmljYWxVUkw6IFVSTChzdHJpbmc6ICJlYm9vazovL2Jvb2svYiIpKQogICAgICAgIFhDVEFzc2VydFRydWUoY2FsbGVyLm1haW5GcmFtZUluZm8gPT09IG1haW4pCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUoY2hpbGQsIHV1aWQ6ICJtYWluLWEiLCBjYW5vbmljYWxVUkw6IFVSTChzdHJpbmc6ICJlYm9vazovL2Jvb2svY2hpbGQiKSkKICAgICAgICBYQ1RBc3NlcnRUcnVlKGNhbGxlci5tYWluRnJhbWVJbmZvID09PSBtYWluKQogICAgICAgIFhDVEFzc2VydFRydWUoY2FsbGVyLmZyYW1lKGZvcjogbmlsKSA9PT0gbWFpbikKICAgICAgICBYQ1RBc3NlcnRUcnVlKGNhbGxlci5mcmFtZShmb3JVVUlEOiAibWFpbi1iIikgPT09IG1haW4pCiAgICB9CgogICAgZnVuYyB0ZXN0UmVwbGFjaW5nRmluYWxNYWluQWxpYXNDbGVhcnNGYWxsYmFjaygpIGFzeW5jIHRocm93cyB7CiAgICAgICAgbGV0ICh2aWV3LCBtYWluLCBjaGlsZCkgPSB0cnkgYXdhaXQgZnJhbWVzKCkKICAgICAgICBkZWZlciB7IHdpdGhFeHRlbmRlZExpZmV0aW1lKHZpZXcpIHt9IH0KICAgICAgICBsZXQgY2FsbGVyID0gV2ViVmlld1NjcmlwdENhbGxlcigpCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUobWFpbiwgdXVpZDogIm1haW4tYSIpCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUobWFpbiwgdXVpZDogIm1haW4tYiIpCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUoY2hpbGQsIHV1aWQ6ICJtYWluLWEiKQogICAgICAgIFhDVEFzc2VydFRydWUoY2FsbGVyLm1haW5GcmFtZUluZm8gPT09IG1haW4pCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUoY2hpbGQsIHV1aWQ6ICJtYWluLWIiKQogICAgICAgIFhDVEFzc2VydE5pbChjYWxsZXIubWFpbkZyYW1lSW5mbykKICAgIH0KCiAgICBmdW5jIHRlc3RSZW1vdmVBbGxTdGlsbENsZWFyc0FsaWFzZWRNYWluRmFsbGJhY2soKSBhc3luYyB0aHJvd3MgewogICAgICAgIGxldCAodmlldywgbWFpbiwgXykgPSB0cnkgYXdhaXQgZnJhbWVzKCkKICAgICAgICBkZWZlciB7IHdpdGhFeHRlbmRlZExpZmV0aW1lKHZpZXcpIHt9IH0KICAgICAgICBsZXQgY2FsbGVyID0gV2ViVmlld1NjcmlwdENhbGxlcigpCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUobWFpbiwgdXVpZDogIm1haW4tYSIpCiAgICAgICAgY2FsbGVyLmFkZE11bHRpVGFyZ2V0RnJhbWUobWFpbiwgdXVpZDogIm1haW4tYiIpCiAgICAgICAgY2FsbGVyLnJlbW92ZUFsbE11bHRpVGFyZ2V0RnJhbWVzKCkKICAgICAgICBYQ1RBc3NlcnROaWwoY2FsbGVyLm1haW5GcmFtZUluZm8pCiAgICAgICAgWENUQXNzZXJ0TmlsKGNhbGxlci5mcmFtZShmb3JVVUlEOiAibWFpbi1hIikpCiAgICAgICAgWENUQXNzZXJ0TmlsKGNhbGxlci5mcmFtZShmb3JVVUlEOiAibWFpbi1iIikpCiAgICB9Cn0K'
+          Path('Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift').write_bytes(base64.b64decode(test_b64))
+          PY
+          git add Sources/SwiftUIWebView/SwiftUIWebView.swift Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift
+          git diff --cached --check
+          test "$(git hash-object Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift)" = fe06dd68ed312ade5e7d2424279c055f368a53f0
+          swiftc -frontend -parse Sources/SwiftUIWebView/SwiftUIWebView.swift
+          git config user.name 'OpenAI assistant'
+          git config user.email noreply@openai.com
+          git commit -m 'Preserve main-frame fallback while an alias remains'
+          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  baseline:
+    needs: publish
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce on unchanged prior head
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift "$RUNNER_TEMP/alias-tests.swift"
+          git checkout --detach 7c215fda231605a5e428f00f225dea2872d84d0c
+          cp "$RUNNER_TEMP/alias-tests.swift" Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift
+          set +e
+          swift test -j 4 --filter WebViewMainFrameAliasRetentionTests > "$RUNNER_TEMP/baseline.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$code" -ne 0
+          grep -q "Executed 3 tests" "$RUNNER_TEMP/baseline.log"
+          grep -q "0 unexpected" "$RUNNER_TEMP/baseline.log"
+          git diff --exit-code -- Sources Package.swift Package.resolved
+  candidate:
+    needs: publish
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          persist-credentials: false
+      - name: Full exact-source suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test -j 4
+          swift test -j 4 -c release
+          ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address
+          test -z "$(git status --porcelain --untracked-files=all)"
