@@ -1,0 +1,117 @@
+name: Final invalid-frame retirement qualification
+on:
+  push:
+    branches: [audit/invalid-frame-retirement-20260909]
+    paths: [.github/workflows/invalid-frame-final.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 58dfd82d638db94df20fd5b73d32de9f91e005ab
+          fetch-depth: 0
+      - id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/final-retirement-publication
+          test "$(git rev-parse HEAD^{tree})" = 0be1076d36d18d8ca31e567a8dad523f6c2de981
+          python3 - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          from pathlib import Path
+          sha = 'a51ea347138c4eb862a29c88f8e180fb848bed79'
+          request = urllib.request.Request(f'https://api.github.com/repos/lake-of-fire/swiftui-webview/git/blobs/{sha}', headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          data = base64.b64decode(json.load(urllib.request.urlopen(request))['content'])
+          assert hashlib.sha256(data).hexdigest() == '89e4018556911bacbacd0a593442b9afffa2aa0d0ced0b12ad5a6790d34ad412'
+          Path('/tmp/last-target.patch').write_bytes(data)
+          PY
+          git apply --index /tmp/last-target.patch
+          git diff --cached --check
+          test "$(git write-tree)" = 149d6a3a00e04498eb84a0a7caf68e2e903684aa
+          git config user.name 'OpenAI assistant'
+          git config user.email noreply@openai.com
+          git commit -m 'Revalidate the final fanout registration before admitting its result'
+          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
+          git rev-parse HEAD HEAD^{tree} > /tmp/final-retirement-publication/identity.txt
+          git ls-tree -r HEAD > /tmp/final-retirement-publication/tree.txt
+          git diff --full-index --binary 30f1589c334b491cb7eb6fa749481558e46aff11 HEAD > /tmp/final-retirement-publication/increment.patch
+          echo '0a8b9ceefe19e506f246b3e6b294ff3ae6b2280959e3a8ab89f450a2218398d2  /tmp/final-retirement-publication/increment.patch' | sha256sum -c -
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: final-retirement-publication
+          path: /tmp/final-retirement-publication
+          retention-days: 30
+  native:
+    needs: publish
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [baseline, first-candidate, final-candidate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test exact final source or unchanged-runtime control
+        env:
+          ARM: ${{ matrix.arm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/final-retirement-$ARM"
+          mkdir -p "$E"
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          swift --version > "$E/swift-version.txt"
+          xcodebuild -version > "$E/xcode-version.txt"
+          test "$(git rev-parse HEAD^{tree})" = 149d6a3a00e04498eb84a0a7caf68e2e903684aa
+          if [[ "$ARM" != final-candidate ]]; then
+            cp Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift "$RUNNER_TEMP/final-retirement-tests.swift"
+            if [[ "$ARM" == baseline ]]; then
+              git checkout --detach 30f1589c334b491cb7eb6fa749481558e46aff11
+            else
+              git checkout --detach 58dfd82d638db94df20fd5b73d32de9f91e005ab
+            fi
+            cp "$RUNNER_TEMP/final-retirement-tests.swift" Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift
+            git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+            git diff --exit-code -- Sources Package.swift Package.resolved
+            set +e
+            swift test -j 4 --filter WebViewInvalidFrameRetirementTests > "$E/control.log" 2>&1
+            code=$?
+            set -e
+            echo "$code" > "$E/control.exit"
+            test "$code" -ne 0
+            grep -q 'Executed 16 tests' "$E/control.log"
+            grep -q '0 unexpected' "$E/control.log"
+            grep -q "Test Suite 'WebViewInvalidFrameRetirementTests' failed" "$E/control.log"
+            git diff --exit-code -- Sources Package.swift Package.resolved
+          else
+            git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+            git ls-tree -r HEAD > "$E/tree.txt"
+            swift test -j 4 > "$E/debug.log" 2>&1
+            swift test -j 4 -c release > "$E/release.log" 2>&1
+            ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address > "$E/asan.log" 2>&1
+            test -z "$(git status --porcelain)"
+          fi
+          git status --porcelain > "$E/final-status.txt"
+          cp Package.resolved "$E/Package.resolved"
+          git hash-object Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift > "$E/test-blob.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: final-retirement-${{ matrix.arm }}
+          path: ${{ runner.temp }}/final-retirement-${{ matrix.arm }}
+          retention-days: 30
