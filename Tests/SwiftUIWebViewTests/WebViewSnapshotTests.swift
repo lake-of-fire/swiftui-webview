@@ -53,6 +53,52 @@ final class WebViewSnapshotTests: XCTestCase {
         }
     }
 
+    func testDOMViewportRectMapsPageZoomAndVisualViewportOffsetIntoViewPoints() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 600, height: 400)
+        let viewport = CGRect(x: 20, y: 30, width: 400, height: CGFloat(800) / 3)
+        let domRect = CGRect(x: 100, y: 80, width: 200, height: 100)
+
+        let rect = try WebViewScriptCaller.resolvedViewRect(
+            forDOMViewportRect: domRect,
+            viewportRect: viewport,
+            in: bounds
+        )
+
+        XCTAssertEqual(rect.minX, 120, accuracy: 0.001)
+        XCTAssertEqual(rect.minY, 75, accuracy: 0.001)
+        XCTAssertEqual(rect.width, 300, accuracy: 0.001)
+        XCTAssertEqual(rect.height, 150, accuracy: 0.001)
+        let roundTrip = WebViewScriptCaller.resolvedDOMViewportRect(
+            forViewRect: rect,
+            viewportRect: viewport,
+            in: bounds
+        )
+        XCTAssertEqual(roundTrip.minX, domRect.minX, accuracy: 0.001)
+        XCTAssertEqual(roundTrip.minY, domRect.minY, accuracy: 0.001)
+        XCTAssertEqual(roundTrip.width, domRect.width, accuracy: 0.001)
+        XCTAssertEqual(roundTrip.height, domRect.height, accuracy: 0.001)
+    }
+
+    func testDOMViewportRectClampsToViewBoundsAndRejectsInvalidViewport() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 600, height: 400)
+        let clipped = try WebViewScriptCaller.resolvedViewRect(
+            forDOMViewportRect: CGRect(x: 350, y: 240, width: 100, height: 100),
+            viewportRect: CGRect(x: 0, y: 0, width: 400, height: CGFloat(800) / 3),
+            in: bounds
+        )
+
+        XCTAssertEqual(clipped, CGRect(x: 525, y: 360, width: 75, height: 40))
+        XCTAssertThrowsError(
+            try WebViewScriptCaller.resolvedViewRect(
+                forDOMViewportRect: CGRect(x: 0, y: 0, width: 10, height: 10),
+                viewportRect: CGRect(x: 0, y: 0, width: CGFloat.nan, height: 100),
+                in: bounds
+            )
+        ) { error in
+            XCTAssertEqual(error as? WebViewScriptCallerSnapshotError, .emptyRect)
+        }
+    }
+
     func testResolvedSnapshotScaleUsesReturnedPixelWidth() throws {
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let context = CGContext(
