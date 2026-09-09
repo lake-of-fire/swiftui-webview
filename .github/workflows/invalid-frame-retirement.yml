@@ -1,0 +1,189 @@
+name: Invalid frame retirement before and after
+on:
+  push:
+    branches: [audit/invalid-frame-retirement-20260909]
+    paths: [.github/workflows/invalid-frame-retirement.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 30f1589c334b491cb7eb6fa749481558e46aff11
+      - id: publish
+        name: Reconstruct and publish exact two-file source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/retirement-publication
+          test "$(git rev-parse HEAD^{tree})" = a8baa23ea883bd243d0cd0893a6f8988f074c142
+          python3 - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          from pathlib import Path
+          sha = 'e2efce0c66ef13250a8bd53a481ec3a3f6589304'
+          req = urllib.request.Request(f'https://api.github.com/repos/lake-of-fire/swiftui-webview/git/blobs/{sha}', headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          obj = json.load(urllib.request.urlopen(req))
+          raw = base64.b64decode(obj['content'])
+          assert hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == sha
+          Path('Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift').write_bytes(raw)
+          p = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
+          s = p.read_text()
+          def replace(old, new):
+              global s
+              assert s.count(old) == 1, old
+              s = s.replace(old, new)
+          anchor = '    private func normalizeJavaScriptResult(_ value: Any?) -> Any? {'
+          replace(anchor, '''    /// Retire only the exact handle rejected by the current provider. The same
+              /// handle may have several UUID/URL aliases; leaving any alias admits it
+              /// again. A different frame registered while evaluation suspended survives.
+              private func removeInvalidJavaScriptFrame(_ frame: WKFrameInfo) {
+                  let aliases = multiTargetFrames.compactMap { uuid, registeredFrame in
+                      registeredFrame === frame ? uuid : nil
+                  }
+                  for uuid in aliases {
+                      removeRegisteredFrame(uuid: uuid, expectedFrame: frame)
+                  }
+                  if lastKnownMainFrame === frame { lastKnownMainFrame = nil }
+              }
+          
+          ''' + anchor)
+          replace('''            try validateJavaScriptOperation(token)
+                      throw error
+          ''', '''            try validateJavaScriptOperation(token)
+                      let nsError = error as NSError
+                      if let frame,
+                         nsError.domain == WKError.errorDomain,
+                         nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
+                          removeInvalidJavaScriptFrame(frame)
+                      }
+                      throw error
+          ''')
+          replace('''                if targetFrame == frame { continue }
+                          do {
+          ''', '''                if targetFrame == frame { continue }
+                          // The loop owns a snapshot. An earlier call may have retired
+                          // this alias or replaced its registration while suspended.
+                          guard multiTargetFrames[uuid] === targetFrame else { continue }
+                          do {
+          ''')
+          replace('''                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
+                                  removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
+                              } else {
+                                  print(error)
+                              }
+          ''', '''                    if (error as NSError).domain != WKError.errorDomain
+                                  || (error as NSError).code != WKError.javaScriptInvalidFrameTarget.rawValue {
+                                  print(error)
+                              }
+          ''')
+          replace('''                // Stale WKFrameInfo from a prior navigation can trigger "invalid frame" even after we pick a URL match.
+                          // Drop the cached main frame so we fall back to the current main frame next time instead of hard‑failing.
+                          if let frame, frame == lastKnownMainFrame {
+                              lastKnownMainFrame = nil
+                          }
+          ''', '''                // The dispatch boundary already retired the exact invalid
+                          // handle and its aliases. Preserve the legacy primary nil policy.
+          ''')
+          replace('''        for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                      do {
+          ''', '''        for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                      guard multiTargetFrames[uuid] === targetFrame else {
+                          // Optional fanout may skip a retired snapshot entry. A strict
+                          // transaction must not claim every target accepted the call.
+                          if propagatesFrameErrors { throw CancellationError() }
+                          continue
+                      }
+                      do {
+          ''')
+          replace('''                if let webKitError = error as? WKError,
+                             webKitError.code == .javaScriptInvalidFrameTarget {
+                              removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
+                          }
+          ''', '')
+          p.write_text(s)
+          PY
+          git add Sources/SwiftUIWebView/SwiftUIWebView.swift Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift
+          test "$(git write-tree)" = 0be1076d36d18d8ca31e567a8dad523f6c2de981
+          test "$(git diff --cached --name-only | wc -l)" = 2
+          git diff --cached --check
+          git diff --cached --full-index --binary > /tmp/retirement-publication/increment.patch
+          echo 'e148f50de43fe06ac16af047745e73f4d67f332d72f7d13a41e6f1da2f0d114d  /tmp/retirement-publication/increment.patch' | sha256sum -c -
+          git config user.name 'OpenAI assistant'
+          git config user.email noreply@openai.com
+          git commit -m 'Retire invalid JavaScript frame aliases and fence fanout snapshots'
+          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
+          git rev-parse HEAD HEAD^{tree} > /tmp/retirement-publication/identity.txt
+          git ls-tree -r HEAD > /tmp/retirement-publication/tree.txt
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retirement-publication
+          path: /tmp/retirement-publication
+          retention-days: 30
+  native:
+    needs: publish
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Exact native source and baseline failure checks
+        env:
+          ARM: ${{ matrix.arm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/retirement-$ARM"
+          mkdir -p "$E"
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          swift --version | tee "$E/swift-version.txt"
+          xcodebuild -version | tee "$E/xcode-version.txt"
+          test "$(git rev-parse HEAD^{tree})" = 0be1076d36d18d8ca31e567a8dad523f6c2de981
+          if [[ "$ARM" == baseline ]]; then
+            cp Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift "$RUNNER_TEMP/retirement-tests.swift"
+            git checkout --detach 30f1589c334b491cb7eb6fa749481558e46aff11
+            cp "$RUNNER_TEMP/retirement-tests.swift" Tests/SwiftUIWebViewTests/WebViewInvalidFrameRetirementTests.swift
+            git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+            git diff --exit-code
+            set +e
+            swift test -j 4 --filter WebViewInvalidFrameRetirementTests > "$E/baseline.log" 2>&1
+            code=$?
+            set -e
+            echo "$code" > "$E/baseline.exit"
+            test "$code" -ne 0
+            grep -q 'Executed 14 tests' "$E/baseline.log"
+            grep -q '0 unexpected' "$E/baseline.log"
+            grep -q "Test Suite 'WebViewInvalidFrameRetirementTests' failed" "$E/baseline.log"
+            git status --porcelain > "$E/final-status.txt"
+            git diff --exit-code
+          else
+            git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+            git ls-tree -r HEAD > "$E/tree.txt"
+            swift test -j 4 > "$E/debug.log" 2>&1
+            swift test -j 4 -c release > "$E/release.log" 2>&1
+            ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address > "$E/asan.log" 2>&1
+            git status --porcelain > "$E/final-status.txt"
+            test -z "$(git status --porcelain)"
+          fi
+          cp Package.resolved "$E/Package.resolved"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retirement-${{ matrix.arm }}
+          path: ${{ runner.temp }}/retirement-${{ matrix.arm }}
+          retention-days: 30
