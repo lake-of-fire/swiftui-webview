@@ -6565,6 +6565,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     targetFrame,
                     world
                 ).value
+                // The last target can disappear too; there may be no next
+                // iteration to detect replacement or removal during its await.
+                guard multiTargetFrames[uuid] === targetFrame else {
+                    if propagatesFrameErrors { throw CancellationError() }
+                    continue
+                }
                 results.append(normalizeJavaScriptResult(result))
             } catch {
                 if error is CancellationError { throw error }

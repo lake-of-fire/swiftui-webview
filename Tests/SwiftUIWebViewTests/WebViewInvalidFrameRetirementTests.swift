@@ -282,6 +282,7 @@ final class WebViewInvalidFrameRetirementTests: XCTestCase {
         let source = RetirementSource()
         let caller = caller(source)
         aliases(caller, frame: frames.first)
+        defer { source.handler = nil }
         source.handler = { frame, _ in
             if frame != nil { caller.removeAllMultiTargetFrames() }
             return .init(nil)
@@ -298,4 +299,38 @@ final class WebViewInvalidFrameRetirementTests: XCTestCase {
     }
     func testOptionalFanoutDoesNotDispatchClearedSnapshotEntries() async throws { try await clearedSnapshot(.optional) }
     func testStrictFanoutRejectsClearedSnapshotEntries() async throws { try await clearedSnapshot(.strict) }
+
+    private func lastTargetReplacement(strict: Bool) async throws {
+        let frames = try await frames()
+        defer { withExtendedLifetime(frames.view) {} }
+        for replace in [false, true] {
+            let source = RetirementSource()
+            let caller = caller(source)
+            caller.addTrackedWordTargetFrame(frames.first, uuid: "first", canonicalURL: firstURL)
+            defer { source.handler = nil }
+            source.handler = { frame, _ in
+                if frame != nil {
+                    caller.removeAllMultiTargetFrames()
+                    if replace {
+                        caller.addTrackedWordTargetFrame(frames.second, uuid: "first", canonicalURL: self.firstURL)
+                    }
+                }
+                return .init(NSString(string: frame == nil ? "main" : "obsolete"))
+            }
+            do {
+                let values = try await caller.evaluateJavaScriptInMultiTargetFrames("plain", propagatesFrameErrors: strict)
+                XCTAssertFalse(strict, "Strict fanout accepted an obsolete last result")
+                XCTAssertEqual(values.compactMap { $0 as? String }, ["main"])
+            } catch { XCTAssertTrue(strict && error is CancellationError) }
+            XCTAssertEqual(source.count(frames.first), 1)
+            XCTAssertEqual(source.count(frames.second), 0, "A replacement is not part of the old snapshot")
+            if replace {
+                XCTAssertTrue(caller.frame(forUUID: "first") === frames.second)
+                XCTAssertTrue(caller.exactFrame(for: firstURL) === frames.second)
+            } else { XCTAssertNil(caller.frame(forUUID: "first")) }
+        }
+    }
+
+    func testOptionalFanoutOmitsAStaleLastResult() async throws { try await lastTargetReplacement(strict: false) }
+    func testStrictFanoutRejectsAStaleLastResult() async throws { try await lastTargetReplacement(strict: true) }
 }
