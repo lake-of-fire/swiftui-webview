@@ -6296,6 +6296,19 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
+    /// Retire only the exact handle rejected by the current provider. The same
+    /// handle may have several UUID/URL aliases; leaving any alias admits it
+    /// again. A different frame registered while evaluation suspended survives.
+    private func removeInvalidJavaScriptFrame(_ frame: WKFrameInfo) {
+        let aliases = multiTargetFrames.compactMap { uuid, registeredFrame in
+            registeredFrame === frame ? uuid : nil
+        }
+        for uuid in aliases {
+            removeRegisteredFrame(uuid: uuid, expectedFrame: frame)
+        }
+        if lastKnownMainFrame === frame { lastKnownMainFrame = nil }
+    }
+
     private func normalizeJavaScriptResult(_ value: Any?) -> Any? {
         switch value {
         case nil, is NSNull:
@@ -6335,6 +6348,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             // Validate errors too: stale failures must not trigger recovery or
             // remove registrations owned by a replacement binding.
             try validateJavaScriptOperation(token)
+            let nsError = error as NSError
+            if let frame,
+               nsError.domain == WKError.errorDomain,
+               nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
+                removeInvalidJavaScriptFrame(frame)
+            }
             throw error
         }
         try validateJavaScriptOperation(token)
@@ -6381,14 +6400,16 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         if duplicateInMultiTargetFrames {
             for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
                 if targetFrame == frame { continue }
+                // The loop owns a snapshot. An earlier call may have retired
+                // this alias or replaced its registration while suspended.
+                guard multiTargetFrames[uuid] === targetFrame else { continue }
                 do {
                     _ = try await evaluateBoundJavaScript(asyncCaller, bindingToken,
                         js, primitiveArguments, targetFrame, world)
                 } catch {
                     if error is CancellationError { throw error }
-                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                        removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
-                    } else {
+                    if (error as NSError).domain != WKError.errorDomain
+                        || (error as NSError).code != WKError.javaScriptInvalidFrameTarget.rawValue {
                         print(error)
                     }
                 }
@@ -6440,11 +6461,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 }
             } else if nsError.domain == WKError.errorDomain,
                       nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
-                // Stale WKFrameInfo from a prior navigation can trigger "invalid frame" even after we pick a URL match.
-                // Drop the cached main frame so we fall back to the current main frame next time instead of hard‑failing.
-                if let frame, frame == lastKnownMainFrame {
-                    lastKnownMainFrame = nil
-                }
+                // The dispatch boundary already retired the exact invalid
+                // handle and its aliases. Preserve the legacy primary nil policy.
                 result = nil
                 handled = true
                 debugPrint(
@@ -6533,6 +6551,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         results.append(normalizeJavaScriptResult(mainResult))
 
         for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+            guard multiTargetFrames[uuid] === targetFrame else {
+                // Optional fanout may skip a retired snapshot entry. A strict
+                // transaction must not claim every target accepted the call.
+                if propagatesFrameErrors { throw CancellationError() }
+                continue
+            }
             do {
                 let result = try await evaluateBoundJavaScript(
                     asyncCaller, bindingToken,
@@ -6544,10 +6568,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 results.append(normalizeJavaScriptResult(result))
             } catch {
                 if error is CancellationError { throw error }
-                if let webKitError = error as? WKError,
-                   webKitError.code == .javaScriptInvalidFrameTarget {
-                    removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
-                }
                 if propagatesFrameErrors {
                     throw error
                 }
