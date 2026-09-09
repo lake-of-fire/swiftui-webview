@@ -23,6 +23,13 @@ private final class SnapshotGate {
 @MainActor
 private final class DelayedSnapshotWebView: WKWebView {
     var started: XCTestExpectation?
+    // AppKit may ignore a zero-size bounds setter. Override the reported
+    // geometry explicitly for that invalidation case rather than assuming it.
+    var reportedBounds: CGRect?
+    override var bounds: CGRect {
+        get { reportedBounds ?? super.bounds }
+        set { super.bounds = newValue }
+    }
     var reply: (@MainActor @Sendable (SnapshotTestImage?, (any Error)?) -> Void)?
     var requestedRect: CGRect?
     override func takeSnapshot(with configuration: WKSnapshotConfiguration?,
@@ -113,7 +120,8 @@ final class WebViewSnapshotFencingTests: XCTestCase {
         let image = try platformImage()
         let task = Task { try await self.capture(caller, domRequest: true) }
         await fulfillment(of: [try XCTUnwrap(webView.started)], timeout: 2)
-        webView.bounds.size.width = 0
+        webView.reportedBounds = CGRect(x: 0, y: 0, width: 0, height: 400)
+        XCTAssertEqual(webView.bounds.width, 0)
         webView.complete(image)
         await requireCancellation(task)
     }
