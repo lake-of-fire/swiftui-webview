@@ -1,0 +1,145 @@
+name: Aggregate frame result qualification
+on:
+  push:
+    branches: [audit/aggregate-result-review-20260909]
+    paths: [.github/workflows/aggregate-result-review.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3f729c9aada4f3783c1b72b21f8b18cdad9e3bd9
+          fetch-depth: 0
+      - id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/aggregate-publication"
+          mkdir -p "$E"
+          test "$(git rev-parse HEAD^{tree})" = 149d6a3a00e04498eb84a0a7caf68e2e903684aa
+          test "$(git ls-remote origin refs/heads/fix/invalid-frame-retirement-20260909 | cut -f1)" = 3f729c9aada4f3783c1b72b21f8b18cdad9e3bd9
+          python3 - <<'PY'
+          import base64, hashlib, json, os, urllib.request
+          from pathlib import Path
+          sha = '6838b3ccc4715a5e5f17d087965601231bac421b'
+          request = urllib.request.Request(f'https://api.github.com/repos/lake-of-fire/swiftui-webview/git/blobs/{sha}', headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          data = base64.b64decode(json.load(urllib.request.urlopen(request))['content'])
+          assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
+          Path('Tests/SwiftUIWebViewTests/WebViewAggregateFrameResultTests.swift').write_bytes(data)
+          p = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
+          text = p.read_text()
+          start = text.index('    public func evaluateJavaScriptInMultiTargetFrames(')
+          end = text.index('    @MainActor\n    public func captureSnapshot', start)
+          part = text[start:end]
+          old = '        var results = [Any?]()'
+          assert part.count(old) == 1
+          part = part.replace(old, old+'\n        var frameResults: [(uuid: String, frame: WKFrameInfo, value: Any?)] = []')
+          old = '                results.append(normalizeJavaScriptResult(result))'
+          assert part.count(old) == 1
+          part = part.replace(old, '                frameResults.append((uuid, targetFrame, normalizeJavaScriptResult(result)))')
+          old = '        return results\n    }\n'
+          new = '''        // An earlier successful target may be retired during a later await.
+                  // Revalidate the whole collected result set at the non-suspending
+                  // return boundary, not only each target immediately after its call.
+                  for entry in frameResults {
+                      guard multiTargetFrames[entry.uuid] === entry.frame else {
+                          if propagatesFrameErrors { throw CancellationError() }
+                          continue
+                      }
+                      results.append(entry.value)
+                  }
+                  return results
+              }
+          '''
+          # Strip the extra ten characters used to indent continuation lines in this literal.
+          lines = new.splitlines(keepends=True)
+          new = lines[0] + ''.join(line[10:] if line.startswith('          ') else line for line in lines[1:])
+          assert part.count(old) == 1
+          p.write_text(text[:start]+part.replace(old,new)+text[end:])
+          PY
+          git add Sources/SwiftUIWebView/SwiftUIWebView.swift Tests/SwiftUIWebViewTests/WebViewAggregateFrameResultTests.swift
+          git diff --cached --check
+          test "$(git write-tree)" = 96352e74f4b9d81d2c1eba998f22fc6450b666c2
+          git diff --cached --full-index --binary > "$E/increment.patch"
+          echo "dd2a8c124ad943a66cb59dbe7a85a98b14d62f586f7e6d0665e05b5e453620a3  $E/increment.patch" | sha256sum -c -
+          git config user.name 'OpenAI assistant'
+          git config user.email noreply@openai.com
+          git commit -m 'Revalidate every collected frame result after the last fanout await'
+          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
+          git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+          git ls-tree -r HEAD > "$E/tree.txt"
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aggregate-publication
+          path: ${{ runner.temp }}/aggregate-publication
+          retention-days: 30
+  native:
+    needs: publish
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arm: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test immutable candidate or unchanged-production negative control
+        env:
+          ARM: ${{ matrix.arm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/aggregate-$ARM"
+          mkdir -p "$E"
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          swift --version > "$E/swift-version.txt"
+          xcodebuild -version > "$E/xcode-version.txt"
+          test "$(git rev-parse HEAD^{tree})" = 96352e74f4b9d81d2c1eba998f22fc6450b666c2
+          if [[ "$ARM" == baseline ]]; then
+            cp Tests/SwiftUIWebViewTests/WebViewAggregateFrameResultTests.swift "$RUNNER_TEMP/aggregate-tests.swift"
+            git checkout --detach 3f729c9aada4f3783c1b72b21f8b18cdad9e3bd9
+            cp "$RUNNER_TEMP/aggregate-tests.swift" Tests/SwiftUIWebViewTests/WebViewAggregateFrameResultTests.swift
+            git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+            git diff --exit-code -- Sources Package.swift Package.resolved
+            set +e
+            swift test -j 4 --filter WebViewAggregateFrameResultTests > "$E/control.log" 2>&1
+            code=$?
+            set -e
+            echo "$code" > "$E/control.exit"
+            test "$code" -ne 0
+            grep -q 'Executed 8 tests' "$E/control.log"
+            grep -q '0 unexpected' "$E/control.log"
+            grep -q "Test Suite 'WebViewAggregateFrameResultTests' failed" "$E/control.log"
+            git diff --exit-code -- Sources Package.swift Package.resolved
+          else
+            git rev-parse HEAD HEAD^{tree} > "$E/identity.txt"
+            git ls-tree -r HEAD > "$E/tree.txt"
+            swift test -j 4 > "$E/debug.log" 2>&1
+            swift test -j 4 -c release > "$E/release.log" 2>&1
+            ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address > "$E/asan.log" 2>&1
+            test -z "$(git status --porcelain --untracked-files=all)"
+          fi
+          git status --porcelain --untracked-files=all > "$E/final-status.txt"
+          cp Package.resolved "$E/Package.resolved"
+          git hash-object Tests/SwiftUIWebViewTests/WebViewAggregateFrameResultTests.swift > "$E/test-blob.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aggregate-${{ matrix.arm }}
+          path: ${{ runner.temp }}/aggregate-${{ matrix.arm }}
+          retention-days: 30
