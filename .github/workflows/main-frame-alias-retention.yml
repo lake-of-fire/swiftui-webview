@@ -1,0 +1,173 @@
+name: Main-frame alias retention qualification
+on:
+  push:
+    branches: [audit/main-frame-alias-retention-20260909]
+    paths: [.github/workflows/main-frame-alias-retention.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.publish.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 7c215fda231605a5e428f00f225dea2872d84d0c
+          fetch-depth: 0
+      - id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7c215fda231605a5e428f00f225dea2872d84d0c
+          test "$(git rev-parse HEAD^{tree})" = 96352e74f4b9d81d2c1eba998f22fc6450b666c2
+          test "$(git ls-remote origin refs/heads/fix/invalid-frame-retirement-20260909 | cut -f1)" = 7c215fda231605a5e428f00f225dea2872d84d0c
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
+          text = p.read_text()
+          old = '''        if lastKnownMainFrame === registeredFrame {
+              lastKnownMainFrame = nil
+          }
+          '''.replace('          ', '')
+          new = '''        if lastKnownMainFrame === registeredFrame {
+              // Removing one UUID alias must not discard the main-frame fallback
+              // while the exact same main handle remains registered elsewhere.
+              lastKnownMainFrame = multiTargetFrames.values.first(where: {
+                  $0 === registeredFrame && $0.isMainFrame
+              })
+          }
+          '''.replace('          ', '')
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          Path('Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift').write_text(r'''import Foundation
+          import WebKit
+          import XCTest
+          @testable import SwiftUIWebView
+
+          private final class MainAliasProbe: NSObject, WKScriptMessageHandler {
+              var onMessage: ((WKScriptMessage) -> Void)?
+              func userContentController(_ userContentController: WKUserContentController,
+                                         didReceive message: WKScriptMessage) { onMessage?(message) }
+          }
+
+          @MainActor
+          final class WebViewMainFrameAliasRetentionTests: XCTestCase {
+              private func frames() async throws -> (WKWebView, WKFrameInfo, WKFrameInfo) {
+                  let ready = expectation(description: "main and child frames")
+                  ready.expectedFulfillmentCount = 2
+                  var main: WKFrameInfo?
+                  var child: WKFrameInfo?
+                  let probe = MainAliasProbe()
+                  probe.onMessage = { message in
+                      if message.frameInfo.isMainFrame {
+                          guard main == nil else { return }
+                          main = message.frameInfo
+                      } else {
+                          guard child == nil else { return }
+                          child = message.frameInfo
+                      }
+                      ready.fulfill()
+                  }
+                  let configuration = WKWebViewConfiguration()
+                  configuration.userContentController.add(probe, name: "mainAliasProbe")
+                  let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: configuration)
+                  view.loadHTMLString("""
+                      <script>window.webkit.messageHandlers.mainAliasProbe.postMessage('main')</script>
+                      <iframe srcdoc="<script>window.webkit.messageHandlers.mainAliasProbe.postMessage('child')</script>"></iframe>
+                      """, baseURL: URL(string: "https://example.invalid/main-alias"))
+                  await fulfillment(of: [ready], timeout: 10)
+                  configuration.userContentController.removeScriptMessageHandler(forName: "mainAliasProbe")
+                  return (view, try XCTUnwrap(main), try XCTUnwrap(child))
+              }
+
+              func testReplacingOneOfTwoMainAliasesPreservesMainFallback() async throws {
+                  let (view, main, child) = try await frames()
+                  defer { withExtendedLifetime(view) {} }
+                  let caller = WebViewScriptCaller()
+                  caller.addMultiTargetFrame(main, uuid: "main-a", canonicalURL: URL(string: "ebook://book/a"))
+                  caller.addMultiTargetFrame(main, uuid: "main-b", canonicalURL: URL(string: "ebook://book/b"))
+                  XCTAssertTrue(caller.mainFrameInfo === main)
+                  caller.addMultiTargetFrame(child, uuid: "main-a", canonicalURL: URL(string: "ebook://book/child"))
+                  XCTAssertTrue(caller.mainFrameInfo === main)
+                  XCTAssertTrue(caller.frame(for: nil) === main)
+                  XCTAssertTrue(caller.frame(forUUID: "main-b") === main)
+              }
+
+              func testReplacingFinalMainAliasClearsFallback() async throws {
+                  let (view, main, child) = try await frames()
+                  defer { withExtendedLifetime(view) {} }
+                  let caller = WebViewScriptCaller()
+                  caller.addMultiTargetFrame(main, uuid: "main-a")
+                  caller.addMultiTargetFrame(main, uuid: "main-b")
+                  caller.addMultiTargetFrame(child, uuid: "main-a")
+                  XCTAssertTrue(caller.mainFrameInfo === main)
+                  caller.addMultiTargetFrame(child, uuid: "main-b")
+                  XCTAssertNil(caller.mainFrameInfo)
+              }
+
+              func testRemoveAllStillClearsAliasedMainFallback() async throws {
+                  let (view, main, _) = try await frames()
+                  defer { withExtendedLifetime(view) {} }
+                  let caller = WebViewScriptCaller()
+                  caller.addMultiTargetFrame(main, uuid: "main-a")
+                  caller.addMultiTargetFrame(main, uuid: "main-b")
+                  caller.removeAllMultiTargetFrames()
+                  XCTAssertNil(caller.mainFrameInfo)
+                  XCTAssertNil(caller.frame(forUUID: "main-a"))
+                  XCTAssertNil(caller.frame(forUUID: "main-b"))
+              }
+          }
+          '''.replace('          ', ''))
+          PY
+          git add Sources/SwiftUIWebView/SwiftUIWebView.swift Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift
+          git diff --cached --check
+          swiftc -frontend -parse Sources/SwiftUIWebView/SwiftUIWebView.swift
+          git config user.name 'OpenAI assistant'
+          git config user.email noreply@openai.com
+          git commit -m 'Preserve main-frame fallback while an alias remains'
+          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
+          printf 'commit=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  baseline:
+    needs: publish
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce on unchanged prior head
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift "$RUNNER_TEMP/alias-tests.swift"
+          git checkout --detach 7c215fda231605a5e428f00f225dea2872d84d0c
+          cp "$RUNNER_TEMP/alias-tests.swift" Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift
+          set +e
+          swift test -j 4 --filter WebViewMainFrameAliasRetentionTests > "$RUNNER_TEMP/baseline.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$code" -ne 0
+          grep -q "Executed 3 tests" "$RUNNER_TEMP/baseline.log"
+          grep -q "0 unexpected" "$RUNNER_TEMP/baseline.log"
+          git diff --exit-code -- Sources Package.swift Package.resolved
+  candidate:
+    needs: publish
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.commit }}
+          persist-credentials: false
+      - name: Full exact-source suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test -j 4
+          swift test -j 4 -c release
+          ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address
+          test -z "$(git status --porcelain --untracked-files=all)"
