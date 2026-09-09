@@ -6292,7 +6292,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             })?.value
         }
         if lastKnownMainFrame === registeredFrame {
-            lastKnownMainFrame = nil
+            // Removing one UUID alias must not discard the main-frame fallback
+            // while the exact same main handle remains registered elsewhere.
+            lastKnownMainFrame = multiTargetFrames.values.first(where: {
+                $0 === registeredFrame && $0.isMainFrame
+            })
         }
     }
 
