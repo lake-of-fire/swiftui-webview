@@ -6541,6 +6541,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
 
         var results = [Any?]()
+        var frameResults: [(uuid: String, frame: WKFrameInfo, value: Any?)] = []
         let mainResult = try await evaluateBoundJavaScript(
             asyncCaller, bindingToken,
             js,
@@ -6571,7 +6572,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                     if propagatesFrameErrors { throw CancellationError() }
                     continue
                 }
-                results.append(normalizeJavaScriptResult(result))
+                frameResults.append((uuid, targetFrame, normalizeJavaScriptResult(result)))
             } catch {
                 if error is CancellationError { throw error }
                 if propagatesFrameErrors {
@@ -6580,6 +6581,16 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
 
+        // An earlier successful target may be retired during a later await.
+        // Revalidate the whole collected result set at the non-suspending
+        // return boundary, not only each target immediately after its call.
+        for entry in frameResults {
+            guard multiTargetFrames[entry.uuid] === entry.frame else {
+                if propagatesFrameErrors { throw CancellationError() }
+                continue
+            }
+            results.append(entry.value)
+        }
         return results
     }
 
