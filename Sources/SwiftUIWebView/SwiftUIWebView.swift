@@ -3355,11 +3355,29 @@ public class WebViewCoordinator: NSObject {
         snapshotCapture: WebViewScriptCaller.SnapshotCapture?
     ) {
         guard let scriptCaller else { return }
+        let fencedSnapshotCapture: WebViewScriptCaller.SnapshotCapture?
+        if let snapshotCapture {
+            fencedSnapshotCapture = { @MainActor [weak self, weak webView] request in
+                try Task.checkCancellation()
+                guard let self, let webView,
+                      let context = self.captureDocumentCallbackContext(for: webView) else {
+                    throw CancellationError()
+                }
+                let snapshot = try await snapshotCapture(request)
+                try Task.checkCancellation()
+                guard self.ownsDocumentCallbackContext(context) else {
+                    throw CancellationError()
+                }
+                return snapshot
+            }
+        } else {
+            fencedSnapshotCapture = nil
+        }
         scriptCaller.installBinding(
             ownedBy: scriptCallerBindingOwnerID,
             asyncCaller: asyncCaller,
             unsafeCaller: unsafeCaller,
-            snapshotCapture: snapshotCapture
+            snapshotCapture: fencedSnapshotCapture
         )
         scriptCallerBoundWebView = webView
     }
@@ -5969,7 +5987,7 @@ public struct WebViewSnapshotImage: @unchecked Sendable {
 }
 
 @MainActor
-private func makeWebViewSnapshotCapture(
+func makeWebViewSnapshotCapture(
     for webView: WKWebView
 ) -> WebViewScriptCaller.SnapshotCapture {
     return { [weak webView] request in
@@ -5977,6 +5995,11 @@ private func makeWebViewSnapshotCapture(
             throw WebViewScriptCallerSnapshotError.unavailable
         }
 
+        try Task.checkCancellation()
+        // One geometry snapshot owns both directions of the coordinate mapping.
+        // Re-reading bounds after the WebKit await can mislabel the captured pixels.
+        let captureBounds = webView.bounds
+        let capturePageZoom = webView.pageZoom
         let requestedRect: CGRect?
         let requestedDOMViewport: CGRect?
         switch request {
@@ -5987,11 +6010,11 @@ private func makeWebViewSnapshotCapture(
             requestedRect = try WebViewScriptCaller.resolvedViewRect(
                 forDOMViewportRect: rect,
                 viewportRect: viewportRect,
-                in: webView.bounds
+                in: captureBounds
             )
             requestedDOMViewport = viewportRect
         }
-        let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: webView.bounds)
+        let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: captureBounds)
         let configuration = makeWebViewSnapshotConfiguration(capturedRect: capturedRect)
 
         let image = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebViewSnapshotPlatformImage, Error>) in
@@ -6006,6 +6029,10 @@ private func makeWebViewSnapshotCapture(
             }
         }
 
+        try Task.checkCancellation()
+        guard webView.bounds == captureBounds, webView.pageZoom == capturePageZoom else {
+            throw CancellationError()
+        }
         guard let cgImage = webViewSnapshotCGImage(from: image) else {
             throw WebViewScriptCallerSnapshotError.imageConversionFailed
         }
@@ -6029,7 +6056,7 @@ private func makeWebViewSnapshotCapture(
                 WebViewScriptCaller.resolvedDOMViewportRect(
                     forViewRect: capturedRect,
                     viewportRect: $0,
-                    in: webView.bounds
+                    in: captureBounds
                 )
             }
         )
@@ -6500,10 +6527,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 
     @MainActor
     public func captureSnapshot(rect: CGRect? = nil) async throws -> WebViewSnapshotImage {
-        guard let snapshotCapture else {
-            throw WebViewScriptCallerSnapshotError.unavailable
-        }
-        return try await snapshotCapture(.viewRect(rect))
+        try await captureSnapshot(.viewRect(rect))
     }
 
     /// Captures a rect expressed in top-frame DOM viewport coordinates.
@@ -6515,12 +6539,22 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         domViewportRect: CGRect,
         viewportRect: CGRect
     ) async throws -> WebViewSnapshotImage {
-        guard let snapshotCapture else {
+        try await captureSnapshot(.domViewportRect(domViewportRect, viewportRect: viewportRect))
+    }
+
+    @MainActor
+    private func captureSnapshot(_ request: SnapshotRequest) async throws -> WebViewSnapshotImage {
+        try Task.checkCancellation()
+        guard let capture = snapshotCapture else {
             throw WebViewScriptCallerSnapshotError.unavailable
         }
-        return try await snapshotCapture(
-            .domViewportRect(domViewportRect, viewportRect: viewportRect)
-        )
+        let generation = snapshotCaptureReadinessGeneration
+        let image = try await capture(request)
+        try Task.checkCancellation()
+        guard snapshotCaptureReadinessGeneration == generation, snapshotCapture != nil else {
+            throw CancellationError()
+        }
+        return image
     }
 
     nonisolated static func resolvedViewRect(
