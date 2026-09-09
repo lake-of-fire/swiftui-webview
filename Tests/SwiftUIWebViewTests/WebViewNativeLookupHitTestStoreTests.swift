@@ -249,6 +249,8 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         )
     }
 
+    // These four cases exercise APIs intentionally absent from release builds.
+#if DEBUG
     func testTargetPublicationProbeDoesNotNotifyForRedundantEmptyClear() {
         let store = WebViewNativeLookupHitTestStore()
         var notificationCount = 0
@@ -351,6 +353,8 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertTrue(store.handleUITestTapOnLookupTarget(differentFrom: "first"))
         XCTAssertEqual(dispatchedElementIDs, ["first", "second"])
     }
+
+#endif
 
     func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {
         let store = WebViewNativeLookupHitTestStore()
