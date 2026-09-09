@@ -4199,4 +4199,30 @@ final class WebViewScriptCallerTests: XCTestCase {
             ]
         )
     }
+
+    func testNativeLookupHitCarriesThePublishedBindingToken() throws {
+        let caller = WebViewScriptCaller()
+        caller.installBinding(
+            ownedBy: UUID(),
+            asyncCaller: { _, _, _, _ in
+                WebViewScriptCaller.JavaScriptEvaluationResult(nil)
+            },
+            unsafeCaller: nil,
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { .zero }
+        )
+        let bindingToken = try XCTUnwrap(caller.currentJavaScriptBindingToken)
+        let target = WebViewNativeLookupHitTarget(
+            elementID: "term",
+            rects: [CGRect(x: 0, y: 0, width: 20, height: 20)],
+            javaScriptBindingToken: bindingToken
+        )
+        let store = WebViewNativeLookupHitTestStore()
+        var receivedToken: WebViewScriptCaller.JavaScriptBindingToken?
+        store.onHit = { receivedToken = $0.javaScriptBindingToken }
+
+        store.updateTargets([target])
+        XCTAssertTrue(store.handleTap(at: CGPoint(x: 10, y: 10)))
+        XCTAssertEqual(receivedToken, bindingToken)
+    }
 }

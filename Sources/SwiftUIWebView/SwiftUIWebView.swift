@@ -1422,6 +1422,7 @@ public struct WebViewNativeLookupHitTarget {
     public let nativeLookupFrameKey: String?
     /// Opaque identity of the exact target publication currently stored by the hit-test store.
     public let nativeLookupPublicationID: UUID?
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
     public let debugUsedInflatedHitRect: Bool?
     public let debugHitRects: [CGRect]
     public let debugDistance: CGFloat?
@@ -1439,6 +1440,7 @@ public struct WebViewNativeLookupHitTarget {
         documentURL: URL? = nil,
         nativeLookupFrameKey: String? = nil,
         nativeLookupPublicationID: UUID? = nil,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
         debugUsedInflatedHitRect: Bool? = nil,
         debugHitRects: [CGRect] = [],
         debugDistance: CGFloat? = nil,
@@ -1455,6 +1457,7 @@ public struct WebViewNativeLookupHitTarget {
         self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
         self.nativeLookupPublicationID = nativeLookupPublicationID
+        self.javaScriptBindingToken = javaScriptBindingToken
         self.debugUsedInflatedHitRect = debugUsedInflatedHitRect
         self.debugHitRects = debugHitRects
         self.debugDistance = debugDistance
@@ -1491,6 +1494,7 @@ public struct WebViewNativeLookupHitTarget {
             documentURL: documentURL,
             nativeLookupFrameKey: nativeLookupFrameKey,
             nativeLookupPublicationID: publicationID,
+            javaScriptBindingToken: javaScriptBindingToken,
             debugUsedInflatedHitRect: debugUsedInflatedHitRect,
             debugHitRects: debugHitRects,
             debugDistance: debugDistance,
@@ -1520,6 +1524,7 @@ public struct WebViewNativeLookupHit {
     public let nativeLookupFrameKey: String?
     /// Opaque identity of the exact target publication that produced this hit.
     public let nativeLookupPublicationID: UUID?
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
 
     public init(
         elementID: String,
@@ -1537,7 +1542,8 @@ public struct WebViewNativeLookupHit {
         frameInfo: WKFrameInfo? = nil,
         documentURL: URL? = nil,
         nativeLookupFrameKey: String? = nil,
-        nativeLookupPublicationID: UUID? = nil
+        nativeLookupPublicationID: UUID? = nil,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
     ) {
         self.elementID = elementID
         self.point = point
@@ -1555,6 +1561,7 @@ public struct WebViewNativeLookupHit {
         self.documentURL = documentURL
         self.nativeLookupFrameKey = nativeLookupFrameKey
         self.nativeLookupPublicationID = nativeLookupPublicationID
+        self.javaScriptBindingToken = javaScriptBindingToken
     }
 }
 
@@ -2122,6 +2129,7 @@ public final class WebViewNativeLookupHitTestStore {
             documentURL: candidate.target.documentURL,
             nativeLookupFrameKey: candidate.target.nativeLookupFrameKey,
             nativeLookupPublicationID: candidate.target.nativeLookupPublicationID,
+            javaScriptBindingToken: candidate.target.javaScriptBindingToken,
             debugUsedInflatedHitRect: usedInflatedHitRect,
             debugHitRects: [candidate.hitRect],
             debugDistance: candidate.distance,
@@ -2336,7 +2344,8 @@ public final class WebViewNativeLookupHitTestStore {
             frameInfo: target.frameInfo,
             documentURL: target.documentURL,
             nativeLookupFrameKey: target.nativeLookupFrameKey,
-            nativeLookupPublicationID: target.nativeLookupPublicationID
+            nativeLookupPublicationID: target.nativeLookupPublicationID,
+            javaScriptBindingToken: target.javaScriptBindingToken
         ))
         return true
     }
@@ -2393,7 +2402,8 @@ public final class WebViewNativeLookupHitTestStore {
             frameInfo: target.frameInfo,
             documentURL: target.documentURL,
             nativeLookupFrameKey: target.nativeLookupFrameKey,
-            nativeLookupPublicationID: target.nativeLookupPublicationID
+            nativeLookupPublicationID: target.nativeLookupPublicationID,
+            javaScriptBindingToken: target.javaScriptBindingToken
         ))
         return true
     }
