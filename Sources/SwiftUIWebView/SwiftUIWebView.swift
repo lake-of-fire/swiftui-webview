@@ -6372,7 +6372,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                         nsError = error as NSError
                     }
                 }
-                if !handled {
+                if !handled,
+                   nsError.domain == WKError.errorDomain,
+                   nsError.code == WKError.javaScriptResultTypeIsUnsupported.rawValue {
+                    // A coercion retry may fail for a different reason. Never
+                    // turn cancellation or a real retry failure into success.
                     // Treat unsupported result types as a benign nil so DOM snapshot can continue.
                     result = nil
                     handled = true
