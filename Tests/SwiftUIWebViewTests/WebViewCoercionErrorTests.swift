@@ -64,7 +64,7 @@ final class WebViewCoercionErrorTests: XCTestCase {
     }
 
     func testWebKitRetryErrorsAreNotMistakenForUnsupportedResults() async {
-        for code in [WKError.javaScriptInvalidFrameTarget, .webContentProcessTerminated, .javaScriptException] {
+        for code in [WKError.javaScriptInvalidFrameTarget, .webContentProcessTerminated, .javaScriptExceptionOccurred] {
             let expected = NSError(domain: WKError.errorDomain, code: code.rawValue,
                 userInfo: [NSLocalizedDescriptionKey: "retry error"])
             let source = CoercionRetrySource(retryError: expected)
