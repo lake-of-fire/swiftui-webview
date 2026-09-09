@@ -1,0 +1,54 @@
+name: Main-frame alias retention qualification v3
+on:
+  push:
+    branches: [audit/main-frame-alias-retention-20260909]
+    paths: [.github/workflows/main-frame-alias-retention-v3.yml]
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f4874e22c977a782bcbd579c4653919d64edd610
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reproduce on unchanged prior head with supported toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          swift --version
+          test "$(git rev-parse HEAD)" = f4874e22c977a782bcbd579c4653919d64edd610
+          cp Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift "$RUNNER_TEMP/alias-tests.swift"
+          git checkout --detach 7c215fda231605a5e428f00f225dea2872d84d0c
+          cp "$RUNNER_TEMP/alias-tests.swift" Tests/SwiftUIWebViewTests/WebViewMainFrameAliasRetentionTests.swift
+          set +e
+          swift test -j 4 --filter WebViewMainFrameAliasRetentionTests > "$RUNNER_TEMP/baseline.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/baseline.log"
+          test "$code" -ne 0
+          grep -q "Executed 3 tests" "$RUNNER_TEMP/baseline.log"
+          grep -q "0 unexpected" "$RUNNER_TEMP/baseline.log"
+          git diff --exit-code -- Sources Package.swift Package.resolved
+  candidate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: f4874e22c977a782bcbd579c4653919d64edd610
+          persist-credentials: false
+      - name: Full exact-source suites with supported toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          swift --version
+          test "$(git rev-parse HEAD)" = f4874e22c977a782bcbd579c4653919d64edd610
+          test "$(git rev-parse HEAD^{tree})" = e019497b415694447cffbc337df98887ac83d255
+          swift test -j 4
+          swift test -j 4 -c release
+          ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address
+          test -z "$(git status --porcelain --untracked-files=all)"
