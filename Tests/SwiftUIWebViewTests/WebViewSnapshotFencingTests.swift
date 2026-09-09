@@ -131,7 +131,7 @@ final class WebViewSnapshotFencingTests: XCTestCase {
         await requireCancellation(task)
     }
 
-    private func bindingChange(_ change: (WebViewScriptCaller, WebViewScriptCaller.SnapshotCapture) -> Void) async throws {
+    private func bindingChange(_ change: (WebViewScriptCaller, @escaping WebViewScriptCaller.SnapshotCapture) -> Void) async throws {
         for domRequest in [false, true] {
             let caller = WebViewScriptCaller(), gate = SnapshotGate()
             let began = expectation(description: "capture")
