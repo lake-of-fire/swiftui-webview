@@ -1,0 +1,139 @@
+name: WebView final snapshot and coercion stack
+on:
+  push:
+    branches: [audit/snapshot-fencing-20260909]
+    paths: [.github/workflows/webview-final-stack.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      snapshot: ${{ steps.publish.outputs.snapshot }}
+      combined: ${{ steps.publish.outputs.combined }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0e3e045c6650b728c45224baa153de814703a504
+          fetch-depth: 0
+      - id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          test "$(git rev-parse HEAD^{tree})" = ddc257e6b2352789af15f861e2d88f94735267ab
+          file=Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
+          test "$(git hash-object "$file")" = 0a27520023c1d7611d3227f18cb58231b233c753
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift');s=p.read_text()
+          a='    func testTargetPublicationProbeDoesNotNotifyForRedundantEmptyClear() {'
+          b='    func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {'
+          assert s.count(a)==s.count(b)==1
+          s=s.replace(a,'    // These four cases exercise APIs intentionally absent from release builds.\n#if DEBUG\n'+a).replace(b,'#endif\n\n'+b)
+          p.write_text(s)
+          PY
+          test "$(git hash-object "$file")" = 64ea6aa3a111c49ef6b6b0795518c60ce0fa83e0
+          git add "$file"
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 1
+          export GIT_AUTHOR_NAME='github-actions[bot]' GIT_COMMITTER_NAME='github-actions[bot]'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          snapshot=$(printf '%s\n' 'Match four lookup-probe tests to their DEBUG-only API availability' | git commit-tree "$(git write-tree)" -p 0e3e045c6650b728c45224baa153de814703a504)
+          git push origin "$snapshot:refs/heads/fix/snapshot-result-fencing-20260909"
+          git reset --hard "$snapshot"
+          git -c user.name=Audit -c user.email=audit@example.invalid merge --no-commit --no-ff ccc35fff158206950a65b40f4a0bfdb255bfb3f2
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l)" -eq 2
+          combined=$(printf '%s\n' 'Integrate qualified snapshot prerequisite without losing coercion error fix' | git commit-tree "$(git write-tree)" -p ccc35fff158206950a65b40f4a0bfdb255bfb3f2 -p "$snapshot")
+          git push origin "$combined:refs/heads/fix/javascript-coercion-errors-20260909"
+          printf 'snapshot=%s\ncombined=%s\n' "$snapshot" "$combined" >> "$GITHUB_OUTPUT"
+          git rev-parse "$snapshot" "$snapshot^{tree}" "$combined" "$combined^{tree}" > "$RUNNER_TEMP/evidence/identities.txt"
+          git diff --binary --full-index e1fb67b250e06f32a6b7ea82cbff71c1d4ca0d05 "$snapshot" > "$RUNNER_TEMP/evidence/snapshot.patch"
+          git diff --binary --full-index "$snapshot" "$combined" > "$RUNNER_TEMP/evidence/coercion.patch"
+          git ls-tree -r "$snapshot" > "$RUNNER_TEMP/evidence/snapshot-tree.txt"
+          git ls-tree -r "$combined" > "$RUNNER_TEMP/evidence/combined-tree.txt"
+          git archive --format=tar "$combined" | gzip -n > "$RUNNER_TEMP/evidence/source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webview-final-publication
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 14
+  native:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [snapshot, combined]
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.role == 'snapshot' && needs.publish.outputs.snapshot || needs.publish.outputs.combined }}
+          persist-credentials: false
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Native full debug, full release and focused AddressSanitizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/evidence/identity.txt"
+          swift --version > "$RUNNER_TEMP/evidence/swift.txt"
+          swift test -j 4 2>&1 | tee "$RUNNER_TEMP/evidence/full-debug.log"
+          swift test -j 4 -c release 2>&1 | tee "$RUNNER_TEMP/evidence/full-release.log"
+          ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address --filter 'WebViewSnapshot|WebViewCoercion' 2>&1 | tee "$RUNNER_TEMP/evidence/focused-asan.log"
+          git diff --exit-code
+      - if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          if test -f Package.resolved; then cp Package.resolved "$RUNNER_TEMP/evidence/Package.resolved"; fi
+          git status --porcelain > "$RUNNER_TEMP/evidence/status.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webview-final-${{ matrix.role }}
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 14
+  baseline-release:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e1fb67b250e06f32a6b7ea82cbff71c1d4ca0d05
+          persist-credentials: false
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Reproduce existing release test compilation failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/evidence/identity.txt"
+          swift --version > "$RUNNER_TEMP/evidence/swift.txt"
+          set +e
+          swift test -j 4 -c release --filter WebViewSnapshot 2>&1 | tee "$RUNNER_TEMP/evidence/baseline-release.log"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "$code" > "$RUNNER_TEMP/evidence/exit-code.txt"
+          test "$code" -ne 0
+          grep "has no member 'onTargetsChanged'" "$RUNNER_TEMP/evidence/baseline-release.log"
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webview-original-release-blocker
+          path: ${{ runner.temp }}/evidence
+          if-no-files-found: error
+          retention-days: 14
