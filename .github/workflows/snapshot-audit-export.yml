@@ -1,0 +1,33 @@
+name: Snapshot audit source export
+on:
+  push:
+    branches: [audit/snapshot-fencing-20260909]
+    paths: [.github/workflows/snapshot-audit-export.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e1fb67b250e06f32a6b7ea82cbff71c1d4ca0d05
+          persist-credentials: false
+      - name: Export exact source and identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = e1fb67b250e06f32a6b7ea82cbff71c1d4ca0d05
+          mkdir -p /tmp/snapshot-audit
+          git archive --format=tar HEAD | gzip -n > /tmp/snapshot-audit/source.tar.gz
+          git ls-tree -r HEAD > /tmp/snapshot-audit/tree.txt
+          git rev-parse HEAD HEAD^{tree} > /tmp/snapshot-audit/identity.txt
+          sha256sum /tmp/snapshot-audit/source.tar.gz > /tmp/snapshot-audit/SHA256SUMS
+          test -z "$(git status --porcelain)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-source
+          path: /tmp/snapshot-audit
+          if-no-files-found: error
+          retention-days: 14
