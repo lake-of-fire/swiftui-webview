@@ -1,0 +1,109 @@
+name: JavaScript dispatch boundary qualification
+on:
+  push:
+    branches: [audit/frame-and-dispatch-20260909]
+    paths: [.github/workflows/dispatch-fencing-audit.yml]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          python3 - <<'PY'
+          import base64,gzip,hashlib,os,pathlib
+          raw=gzip.decompress(base64.b64decode(pathlib.Path('audit/dispatch-fencing.patch.gz.b64').read_text()))
+          assert hashlib.sha256(raw).hexdigest()=='05159abf3742920ceef8edf1a30b3ee7394948fafb00836d24041841a1b18803'
+          pathlib.Path(os.environ['RUNNER_TEMP'],'evidence','source.patch').write_bytes(raw)
+          PY
+          git checkout --detach 58a80dd6326f4d5d009559663f9e4790f4af3d12
+          test "$(git rev-parse HEAD^{tree})" = 00e3e9c05bd85fd2f78a2a0d3dd5a7400a7acc39
+          git apply --index --whitespace=error-all "$RUNNER_TEMP/evidence/source.patch"
+          test "$(git write-tree)" = a8baa23ea883bd243d0cd0893a6f8988f074c142
+          test "$(git diff --cached --name-only | wc -l)" = 2
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Revalidate JavaScript binding and cancellation at every dispatch boundary'
+          git push origin HEAD:refs/heads/fix/javascript-dispatch-fencing-20260909
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/evidence/identity.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/evidence/tree.txt"
+          git archive HEAD | gzip -n > "$RUNNER_TEMP/evidence/source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dispatch-publication
+          path: ${{ runner.temp }}/evidence
+          retention-days: 14
+          if-no-files-found: error
+  native:
+    needs: publish
+    runs-on: macos-15
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [candidate, baseline]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.publish.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.3'
+      - shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          swift --version | tee "$RUNNER_TEMP/evidence/swift.txt"
+          if [ "$VARIANT" = baseline ]; then
+            cp Tests/SwiftUIWebViewTests/WebViewDispatchFencingTests.swift "$RUNNER_TEMP/DispatchTests.swift"
+            git checkout --detach 58a80dd6326f4d5d009559663f9e4790f4af3d12
+            test "$(git rev-parse HEAD^{tree})" = 00e3e9c05bd85fd2f78a2a0d3dd5a7400a7acc39
+            cp "$RUNNER_TEMP/DispatchTests.swift" Tests/SwiftUIWebViewTests/WebViewDispatchFencingTests.swift
+            git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/evidence/identity.txt"
+            set +e
+            swift test -j 4 --filter WebViewDispatchFencingTests > "$RUNNER_TEMP/evidence/baseline.log" 2>&1
+            rc=$?
+            set -e
+            echo "$rc" > "$RUNNER_TEMP/evidence/baseline-exit.txt"
+            test "$rc" != 0
+            grep -E 'Executed 16 tests, with [1-9][0-9]* failures \(0 unexpected\)' "$RUNNER_TEMP/evidence/baseline.log"
+            git diff --exit-code
+          else
+            test "$(git rev-parse HEAD^{tree})" = a8baa23ea883bd243d0cd0893a6f8988f074c142
+            git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/evidence/identity.txt"
+            swift test -j 4 2>&1 | tee "$RUNNER_TEMP/evidence/full-debug.log"
+            swift test -j 4 -c release 2>&1 | tee "$RUNNER_TEMP/evidence/full-release.log"
+            ASAN_OPTIONS=detect_leaks=0 swift test -j 4 --sanitize address --filter 'WebViewDispatchFencingTests|WebViewFrameIdentityTests|WebViewSnapshot|WebViewCoercion' 2>&1 | tee "$RUNNER_TEMP/evidence/focused-asan.log"
+            git diff --exit-code
+            test -z "$(git ls-files --others --exclude-standard)"
+          fi
+      - if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          cp Package.resolved "$RUNNER_TEMP/evidence/Package.resolved"
+          git status --porcelain > "$RUNNER_TEMP/evidence/status.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dispatch-${{ matrix.variant }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 14
+          if-no-files-found: error
