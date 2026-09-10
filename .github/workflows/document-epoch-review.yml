@@ -1,0 +1,136 @@
+name: Document epoch review
+on:
+  push:
+    branches: [fix/invalid-frame-retirement-20260909]
+    paths: ['.github/workflows/document-epoch-review.yml']
+permissions:
+  contents: write
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Select available Xcode 26.3
+        run: |
+          if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
+          swift --version
+          xcodebuild -version
+      - name: Check exact source and apply reviewed narrow edit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = ccd8317b79e6278c66de75991f8271af4b273ad9
+          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 82dd6b4010e94a50714761223f86f1f124bf5453
+          mkdir -p "$RUNNER_TEMP/document-epoch-review"
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
+          s = p.read_text()
+          def replace(old, new):
+              global s
+              assert s.count(old) == 1, (s.count(old), old)
+              s = s.replace(old, new)
+          replace('''            snapshotCapture: fencedSnapshotCapture
+                  )''', '''            snapshotCapture: fencedSnapshotCapture,
+                      documentGenerationProvider: { @MainActor [weak self] in
+                          // Bind the whole operation, not each fanout child separately,
+                          // to the coordinator's existing document epoch. Early scripts
+                          // remain usable before didCommit; navigation invalidates them.
+                          self?.documentCallbackGeneration
+                      }
+                  )''')
+          replace('''        fileprivate let generation: Int
+              }
+
+              public struct UnboundEvaluationAttempt''', '''        fileprivate let generation: Int
+                  fileprivate let documentGeneration: UInt64?
+              }
+
+              public struct UnboundEvaluationAttempt''')
+          replace('''    private var bindingOwnerID: UUID?
+
+              var asyncCaller''', '''    private var bindingOwnerID: UUID?
+              private var documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)?
+
+              var asyncCaller''')
+          replace('''        guard asyncCaller != nil else { return nil }
+                  return JavaScriptBindingToken(
+                      callerID: id,
+                      generation: asyncCallerReadinessGeneration
+                  )''', '''        guard asyncCaller != nil else { return nil }
+                  let documentGeneration = documentGenerationProvider?()
+                  guard documentGenerationProvider == nil || documentGeneration != nil else { return nil }
+                  return JavaScriptBindingToken(
+                      callerID: id,
+                      generation: asyncCallerReadinessGeneration,
+                      documentGeneration: documentGeneration
+                  )''')
+          replace('''            && token.generation == asyncCallerReadinessGeneration
+                      && asyncCaller != nil''', '''            && token.generation == asyncCallerReadinessGeneration
+                      && token.documentGeneration == documentGenerationProvider?()
+                      && asyncCaller != nil''')
+          replace('''        unsafeCaller: UnsafeCaller?,
+                  snapshotCapture: SnapshotCapture?
+              ) {
+                  bindingOwnerID = ownerID''', '''        unsafeCaller: UnsafeCaller?,
+                  snapshotCapture: SnapshotCapture?,
+                  documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)? = nil
+              ) {
+                  bindingOwnerID = ownerID
+                  self.documentGenerationProvider = documentGenerationProvider''')
+          replace('''        bindingOwnerID = nil
+                  asyncCaller = nil''', '''        bindingOwnerID = nil
+                  documentGenerationProvider = nil
+                  asyncCaller = nil''')
+          replace('''        return normalizeJavaScriptResult(result)
+              }
+
+              /// Evaluates only while the exact WebView binding that admitted the operation remains installed.''', '''        try validateJavaScriptOperation(bindingToken)
+                  return normalizeJavaScriptResult(result)
+              }
+
+              /// Evaluates only while the original WebView binding and document epoch remain current.''')
+          replace('''        // An earlier successful target may be retired during a later await.
+          ''', '''        // Navigation on the same WKWebView invalidates the primary result too,
+                  // even when the new document has no registered child frames.
+                  try validateJavaScriptOperation(bindingToken)
+                  // An earlier successful target may be retired during a later await.
+          ''')
+          p.write_text(s)
+          PY
+          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 146ba6376b989628d162bb6bf11f7c2f7e00b058
+          git diff --check
+          git diff > "$RUNNER_TEMP/document-epoch-review/source.patch"
+      - name: Publish only the checked source change
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(git rev-parse HEAD)"
+          test "$(git ls-remote origin refs/heads/fix/invalid-frame-retirement-20260909 | cut -f1)" = "$expected"
+          git config user.name 'Alex Ehlke'
+          git config user.email 'alex.ehlke@gmail.com'
+          git add Sources/SwiftUIWebView/SwiftUIWebView.swift
+          git commit -m 'Fence JavaScript results and retries to the original document epoch'
+          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/document-epoch-review/identity.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/document-epoch-review/tree.txt"
+      - name: Native debug suite
+        shell: bash
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tee "$RUNNER_TEMP/document-epoch-review/debug.log"
+      - name: Native release suite
+        shell: bash
+        run: |
+          set -o pipefail
+          swift test -c release 2>&1 | tee "$RUNNER_TEMP/document-epoch-review/release.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: document-epoch-review
+          path: ${{ runner.temp }}/document-epoch-review/
+          retention-days: 7
+          if-no-files-found: error
