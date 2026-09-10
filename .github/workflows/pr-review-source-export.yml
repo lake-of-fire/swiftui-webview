@@ -1,0 +1,27 @@
+name: PR review source export
+on:
+  push:
+    branches: [fix/invalid-frame-retirement-20260909]
+    paths: ['.github/workflows/pr-review-source-export.yml']
+permissions:
+  contents: read
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export exact tracked source and identity
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-source"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/review-source/identity.txt"
+          git archive --format=tar.gz HEAD Sources Tests Package.swift Package.resolved > "$RUNNER_TEMP/review-source/source.tar.gz"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/review-source/tree.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-source
+          path: ${{ runner.temp }}/review-source/
+          retention-days: 7
+          if-no-files-found: error
