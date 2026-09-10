@@ -1,69 +1,116 @@
-name: Document epoch review
+name: Native WebView verification
 on:
   push:
-    branches: [fix/invalid-frame-retirement-20260909]
-    paths: ['.github/workflows/document-epoch-review.yml']
+    branches: [fix/invalid-frame-retirement-20260909, codex/reader-hotfix-upstream-2026-09-07]
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - '.github/workflows/document-epoch-review.yml'
+  pull_request:
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - '.github/workflows/document-epoch-review.yml'
 permissions:
-  contents: write
+  contents: read
+concurrency:
+  group: native-webview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   native:
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [debug, release, asan]
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      - name: Select available Xcode 26.3
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Capture exact source and toolchain
         run: |
           if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
-          swift --version
-          xcodebuild -version
-      - name: Check exact source and apply reviewed narrow edit
+          mkdir -p "$RUNNER_TEMP/native-webview"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/native-webview/identity.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/native-webview/tree.txt"
+          swift --version > "$RUNNER_TEMP/native-webview/toolchain.txt"
+          xcodebuild -version >> "$RUNNER_TEMP/native-webview/toolchain.txt"
+      - name: Test published source without modifications
         shell: bash
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+          ASAN_OPTIONS: detect_leaks=0
         run: |
           set -euo pipefail
-          git merge-base --is-ancestor ccd8317b79e6278c66de75991f8271af4b273ad9 HEAD
-          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 82dd6b4010e94a50714761223f86f1f124bf5453
-          test "$(git hash-object Tests/SwiftUIWebViewTests/WebViewDocumentEpochEvaluationTests.swift)" = 7d26f4a2c23aa46d5e2eb6a0050cc7da3290ce2a
-          mkdir -p "$RUNNER_TEMP/document-epoch-review"
-          python3 <<'PY'
-          import base64, gzip, hashlib, os
-          from pathlib import Path
-          patch = gzip.decompress(base64.b64decode('H4sIAAAAAAAC/7VYbW/bNhD+7l9x+9I5jfwWvyTx0DlpEmzZsGaol/XDMBSUSNlsZdIlKbte2/++IyVZlOy4DYoEAWxKx+Pdc88d70x5HEOrNeMGSGcqUxUx3ZmueWzub9+w8G/O1rVlW9slhI+RbnBB2Uc4O6F0FA7a7d5gFJJRH3rd7mgwaLRarced3jg+Pn6kBRcX0Or3T0+DUzh2n70+4LNlGiY8gighWkO+40pKRbkgRqoxvJrehe9YZOBTA/w/uRaMvtyMQUeKL80VSRKmXqKfXMzu8J26vQ6qO4jeiCiTG/uLmlgqNIlZIeevgkbLF9SCLPVc4tFLkyo2hpiJiNFp9XHj+PF7guomKqN0wYT5haFbxHAp/lRyxam17xNc/EG4uIwQLPhnzch70CyJ/wUuqkrsX6cDFiEwcwbruUwYyGWuMQAhDTASzSEmQqYGojlPKCpbEpRgySbYq89Ipy0qQ/ajBvaRa4Nx2FoObCmjeRtuiEo2ecT0Xn2KLdAdSDUJ0byQxVIxoJxeycWCm59AkBWfOYvRwxVJOEXjtLVh0d5VaKGYtAsrbBRDEr0vcazu+FIS4aj8WuGXTAXNWQovYJ19a+S7LcVH3fOzYATHo153gFR/gOFTT+cYOs9vPqTEWI+D5x24pWgrj7lbw12omVrZ71keZIflSrVRKabGb2RFMpV5Avwl3zMxhlIt/Er0PPs2ZYI6cL2EinnCloqvEEtIGMbeWXZ7PYapUajvYcnZFssx3ApTAloX3CXxGO5xx2gwKfCDfb7di9CCfoOxTt22S2PYYmkq3nk+uSD0hqdZEEZPGoTcvRVRfj15zQjGgGlduopc6e7uqRWDb94XVqocwnh/ez3JkPfFDpWNplc1LrboNY+g9XMRlaNJEZCaf2O4LBcTNFHwxCcTZuuUmW0ozrHUDzEWJ91h0Dt/kmBUeGOtjVKlcMtDebH/+cR3YpYSRX2v4YfMUZZopBnWKQyZcE++lKTfT3SE6OFYTJpH5f7s1IeF4UVmxOfP+445YOHWr/zpfgSa1ZuwrAKc1u4+P+0PU79aYr9931fvwPGeZzsFvCwqeWLEqYiA66sHCNJ8izfaAY64BHkpZYXwbke7QMvGiNMqks+e5UIzjxQvHoXcVsU+fn2NYHVjdnldwuWy9qTfDc5t0g5Ogl7vySqo18i5z20583qySuW5YDoiS9taXO5t4KrN2723mngM3unCav3XpIT+q6IeT7+74IIXiiOfYdWKj2I5WJ6d2Om0DxWOA9Y1Kv1S2ydHhaM1OR9rFPSXNckaiChce5KTbtB3t/bJ8PQJb21XAaKEkWJaaO5l4N5Mz+pzPRrbcNRKb0zs8suBMNpofwN9fF7UUqL+qhaUyrvdMNjXDvrB2VnQ6yL2w27/qRN+WzbnSq5tYV4QtblRSqqqjAecd8UatYGi7y9r9F0xxzRDv1rv3HtCqgVu/s/b+prpNDFN5T68a6OVTSQdyFtPnDKkwOlljXMRc0MP+0iwQS3GgfxgfENwlqc4rRiWjVrbISufbjSOLtpYEGk+sxw8Rio+w9Eq2TmJCFqbsIrxKe9/2pk3F5Rj1VSu5GTeVhomlxAsP73ExWsG3sI7XYwCQUaY4dnQ5eqo2wvOn5wuFSpASQaE7VU5EOK/xUuTBYM3vxdo1cbEgnCQBRwvVRlUFLIVE4g+y5QJ1LDFeE40Mgh3znC+ZQrDmw3JscIjdfu7SYqnXwocwlXCMXt1GkXYEMRpAoaoGbaWC7LBkdhymdvDaaocDSDBY7BFXxNehDzX9poVVngzfyQxHpElZw6BRtXIWeeuFC2d6iVz9jWqk7nLIDeNIX7ZDwaOqu5Xg9xEvlgwyt0PBkBiaxY32nWS7cb/h7WDCOwSAAA='))
-          assert hashlib.sha256(patch).hexdigest() == '8e5047fdfe16df9fd5bf16cbd62f90d125ff9aefbc6d6db9207f98f60adae154'
-          Path(os.environ['RUNNER_TEMP'], 'document-epoch-review', 'source.patch').write_bytes(patch)
-          PY
-          git apply --check "$RUNNER_TEMP/document-epoch-review/source.patch"
-          git apply "$RUNNER_TEMP/document-epoch-review/source.patch"
-          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 146ba639b6e1fb7b7281af259d198859589c33b5
-          git diff --check
-      - name: Publish only the checked source change
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected="$(git rev-parse HEAD)"
-          test "$(git ls-remote origin refs/heads/fix/invalid-frame-retirement-20260909 | cut -f1)" = "$expected"
-          git config user.name 'Alex Ehlke'
-          git config user.email 'alex.ehlke@gmail.com'
-          git add Sources/SwiftUIWebView/SwiftUIWebView.swift
-          git commit -m 'Fence JavaScript results and retries to the original document epoch'
-          git push origin HEAD:refs/heads/fix/invalid-frame-retirement-20260909
-          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/document-epoch-review/identity.txt"
-          git ls-tree -r HEAD > "$RUNNER_TEMP/document-epoch-review/tree.txt"
-      - name: Native debug suite
-        shell: bash
-        run: |
-          set -o pipefail
-          swift test 2>&1 | tee "$RUNNER_TEMP/document-epoch-review/debug.log"
-      - name: Native release suite
-        shell: bash
-        run: |
-          set -o pipefail
-          swift test -c release 2>&1 | tee "$RUNNER_TEMP/document-epoch-review/release.log"
+          case "$CONFIGURATION" in
+            debug) swift test 2>&1 | tee "$RUNNER_TEMP/native-webview/tests.log" ;;
+            release) swift test -c release 2>&1 | tee "$RUNNER_TEMP/native-webview/tests.log" ;;
+            asan) swift test --sanitize=address 2>&1 | tee "$RUNNER_TEMP/native-webview/tests.log" ;;
+          esac
+          git diff --exit-code
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: document-epoch-review
-          path: ${{ runner.temp }}/document-epoch-review/
+          name: native-webview-${{ matrix.configuration }}
+          path: ${{ runner.temp }}/native-webview/
+          retention-days: 7
+          if-no-files-found: error
+  document-epoch-regression-control:
+    # Keep the negative control scoped to this review branch. It never publishes
+    # its old-source checkout or runs with write credentials.
+    if: github.event_name == 'push' && github.ref_name == 'fix/invalid-frame-retirement-20260909'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run new regression tests against pre-fix production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
+          mkdir -p "$RUNNER_TEMP/epoch-control"
+          test "$(git hash-object Tests/SwiftUIWebViewTests/WebViewDocumentEpochEvaluationTests.swift)" = 7d26f4a2c23aa46d5e2eb6a0050cc7da3290ce2a
+          git restore --source=f4874e22c977a782bcbd579c4653919d64edd610 -- Sources/SwiftUIWebView/SwiftUIWebView.swift
+          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 82dd6b4010e94a50714761223f86f1f124bf5453
+          set +e
+          swift test --filter WebViewDocumentEpochEvaluationTests > "$RUNNER_TEMP/epoch-control/tests.log" 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          python3 <<'PY'
+          import os, re
+          from pathlib import Path
+          log = Path(os.environ['RUNNER_TEMP'], 'epoch-control', 'tests.log').read_text()
+          expected = {
+              'testSameWebViewCommitRejectsPrimaryResultInEveryRoute',
+              'testProvisionalNavigationRejectsInFlightEvaluationInEveryRoute',
+              'testPreservedDocumentAfterProvisionalFailureDoesNotReviveOldToken',
+              'testProcessTerminationRejectsInFlightEvaluationInEveryRoute',
+              'testTerminalNavigationFailureRejectsInFlightEvaluationInEveryRoute',
+              'testStaleUnsupportedErrorCannotStartCoercionRetry',
+              'testNavigationDuringCoercionRetryCannotReturnOldValue',
+              'testLaterChildNavigationRejectsWholeOptionalAndStrictAggregate',
+              'testStaleInvalidFrameErrorCannotRetireNewDocumentRegistration',
+              'testRequiredTokenFromPriorDocumentRejectsBeforeDispatch',
+          }
+          failed = set(re.findall(r"Test Case '-\[.*?WebViewDocumentEpochEvaluationTests (\w+)\]' failed", log))
+          assert failed == expected, (failed, expected, log[-4000:])
+          assert re.search(r'Executed 13 tests, with \d+ failures \(0 unexpected\)', log), log[-4000:]
+          print('Confirmed ten failing regression methods on pre-fix production; three controls pass.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: document-epoch-negative-control
+          path: ${{ runner.temp }}/epoch-control/
           retention-days: 7
           if-no-files-found: error
