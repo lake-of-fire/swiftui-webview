@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Select available Xcode 26.3
         run: |
           if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
@@ -22,88 +22,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^)" = ccd8317b79e6278c66de75991f8271af4b273ad9
+          git merge-base --is-ancestor ccd8317b79e6278c66de75991f8271af4b273ad9 HEAD
           test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 82dd6b4010e94a50714761223f86f1f124bf5453
+          test "$(git hash-object Tests/SwiftUIWebViewTests/WebViewDocumentEpochEvaluationTests.swift)" = 7d26f4a2c23aa46d5e2eb6a0050cc7da3290ce2a
           mkdir -p "$RUNNER_TEMP/document-epoch-review"
           python3 <<'PY'
+          import base64, gzip, hashlib, os
           from pathlib import Path
-          p = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
-          s = p.read_text()
-          def replace(old, new):
-              global s
-              assert s.count(old) == 1, (s.count(old), old)
-              s = s.replace(old, new)
-          replace('''            snapshotCapture: fencedSnapshotCapture
-                  )''', '''            snapshotCapture: fencedSnapshotCapture,
-                      documentGenerationProvider: { @MainActor [weak self] in
-                          // Bind the whole operation, not each fanout child separately,
-                          // to the coordinator's existing document epoch. Early scripts
-                          // remain usable before didCommit; navigation invalidates them.
-                          self?.documentCallbackGeneration
-                      }
-                  )''')
-          replace('''        fileprivate let generation: Int
-              }
-
-              public struct UnboundEvaluationAttempt''', '''        fileprivate let generation: Int
-                  fileprivate let documentGeneration: UInt64?
-              }
-
-              public struct UnboundEvaluationAttempt''')
-          replace('''    private var bindingOwnerID: UUID?
-
-              var asyncCaller''', '''    private var bindingOwnerID: UUID?
-              private var documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)?
-
-              var asyncCaller''')
-          replace('''        guard asyncCaller != nil else { return nil }
-                  return JavaScriptBindingToken(
-                      callerID: id,
-                      generation: asyncCallerReadinessGeneration
-                  )''', '''        guard asyncCaller != nil else { return nil }
-                  let documentGeneration = documentGenerationProvider?()
-                  guard documentGenerationProvider == nil || documentGeneration != nil else { return nil }
-                  return JavaScriptBindingToken(
-                      callerID: id,
-                      generation: asyncCallerReadinessGeneration,
-                      documentGeneration: documentGeneration
-                  )''')
-          replace('''            && token.generation == asyncCallerReadinessGeneration
-                      && asyncCaller != nil''', '''            && token.generation == asyncCallerReadinessGeneration
-                      && token.documentGeneration == documentGenerationProvider?()
-                      && asyncCaller != nil''')
-          replace('''        unsafeCaller: UnsafeCaller?,
-                  snapshotCapture: SnapshotCapture?
-              ) {
-                  bindingOwnerID = ownerID''', '''        unsafeCaller: UnsafeCaller?,
-                  snapshotCapture: SnapshotCapture?,
-                  documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)? = nil
-              ) {
-                  bindingOwnerID = ownerID
-                  self.documentGenerationProvider = documentGenerationProvider''')
-          replace('''        bindingOwnerID = nil
-                  asyncCaller = nil''', '''        bindingOwnerID = nil
-                  documentGenerationProvider = nil
-                  asyncCaller = nil''')
-          replace('''        return normalizeJavaScriptResult(result)
-              }
-
-              /// Evaluates only while the exact WebView binding that admitted the operation remains installed.''', '''        try validateJavaScriptOperation(bindingToken)
-                  return normalizeJavaScriptResult(result)
-              }
-
-              /// Evaluates only while the original WebView binding and document epoch remain current.''')
-          replace('''        // An earlier successful target may be retired during a later await.
-          ''', '''        // Navigation on the same WKWebView invalidates the primary result too,
-                  // even when the new document has no registered child frames.
-                  try validateJavaScriptOperation(bindingToken)
-                  // An earlier successful target may be retired during a later await.
-          ''')
-          p.write_text(s)
+          patch = gzip.decompress(base64.b64decode('H4sIAAAAAAAC/7VYbW/bNhD+7l9x+9I5jfwWvyTx0DlpEmzZsGaol/XDMBSUSNlsZdIlKbte2/++IyVZlOy4DYoEAWxKx+Pdc88d70x5HEOrNeMGSGcqUxUx3ZmueWzub9+w8G/O1rVlW9slhI+RbnBB2Uc4O6F0FA7a7d5gFJJRH3rd7mgwaLRarced3jg+Pn6kBRcX0Or3T0+DUzh2n70+4LNlGiY8gighWkO+40pKRbkgRqoxvJrehe9YZOBTA/w/uRaMvtyMQUeKL80VSRKmXqKfXMzu8J26vQ6qO4jeiCiTG/uLmlgqNIlZIeevgkbLF9SCLPVc4tFLkyo2hpiJiNFp9XHj+PF7guomKqN0wYT5haFbxHAp/lRyxam17xNc/EG4uIwQLPhnzch70CyJ/wUuqkrsX6cDFiEwcwbruUwYyGWuMQAhDTASzSEmQqYGojlPKCpbEpRgySbYq89Ipy0qQ/ajBvaRa4Nx2FoObCmjeRtuiEo2ecT0Xn2KLdAdSDUJ0byQxVIxoJxeycWCm59AkBWfOYvRwxVJOEXjtLVh0d5VaKGYtAsrbBRDEr0vcazu+FIS4aj8WuGXTAXNWQovYJ19a+S7LcVH3fOzYATHo153gFR/gOFTT+cYOs9vPqTEWI+D5x24pWgrj7lbw12omVrZ71keZIflSrVRKabGb2RFMpV5Avwl3zMxhlIt/Er0PPs2ZYI6cL2EinnCloqvEEtIGMbeWXZ7PYapUajvYcnZFssx3ApTAloX3CXxGO5xx2gwKfCDfb7di9CCfoOxTt22S2PYYmkq3nk+uSD0hqdZEEZPGoTcvRVRfj15zQjGgGlduopc6e7uqRWDb94XVqocwnh/ez3JkPfFDpWNplc1LrboNY+g9XMRlaNJEZCaf2O4LBcTNFHwxCcTZuuUmW0ozrHUDzEWJ91h0Dt/kmBUeGOtjVKlcMtDebH/+cR3YpYSRX2v4YfMUZZopBnWKQyZcE++lKTfT3SE6OFYTJpH5f7s1IeF4UVmxOfP+445YOHWr/zpfgSa1ZuwrAKc1u4+P+0PU79aYr9931fvwPGeZzsFvCwqeWLEqYiA66sHCNJ8izfaAY64BHkpZYXwbke7QMvGiNMqks+e5UIzjxQvHoXcVsU+fn2NYHVjdnldwuWy9qTfDc5t0g5Ogl7vySqo18i5z20583qySuW5YDoiS9taXO5t4KrN2723mngM3unCav3XpIT+q6IeT7+74IIXiiOfYdWKj2I5WJ6d2Om0DxWOA9Y1Kv1S2ydHhaM1OR9rFPSXNckaiChce5KTbtB3t/bJ8PQJb21XAaKEkWJaaO5l4N5Mz+pzPRrbcNRKb0zs8suBMNpofwN9fF7UUqL+qhaUyrvdMNjXDvrB2VnQ6yL2w27/qRN+WzbnSq5tYV4QtblRSqqqjAecd8UatYGi7y9r9F0xxzRDv1rv3HtCqgVu/s/b+prpNDFN5T68a6OVTSQdyFtPnDKkwOlljXMRc0MP+0iwQS3GgfxgfENwlqc4rRiWjVrbISufbjSOLtpYEGk+sxw8Rio+w9Eq2TmJCFqbsIrxKe9/2pk3F5Rj1VSu5GTeVhomlxAsP73ExWsG3sI7XYwCQUaY4dnQ5eqo2wvOn5wuFSpASQaE7VU5EOK/xUuTBYM3vxdo1cbEgnCQBRwvVRlUFLIVE4g+y5QJ1LDFeE40Mgh3znC+ZQrDmw3JscIjdfu7SYqnXwocwlXCMXt1GkXYEMRpAoaoGbaWC7LBkdhymdvDaaocDSDBY7BFXxNehDzX9poVVngzfyQxHpElZw6BRtXIWeeuFC2d6iVz9jWqk7nLIDeNIX7ZDwaOqu5Xg9xEvlgwyt0PBkBiaxY32nWS7cb/h7WDCOwSAAA='))
+          assert hashlib.sha256(patch).hexdigest() == '8e5047fdfe16df9fd5bf16cbd62f90d125ff9aefbc6d6db9207f98f60adae154'
+          Path(os.environ['RUNNER_TEMP'], 'document-epoch-review', 'source.patch').write_bytes(patch)
           PY
-          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 146ba6376b989628d162bb6bf11f7c2f7e00b058
+          git apply --check "$RUNNER_TEMP/document-epoch-review/source.patch"
+          git apply "$RUNNER_TEMP/document-epoch-review/source.patch"
+          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 146ba639b6e1fb7b7281af259d198859589c33b5
           git diff --check
-          git diff > "$RUNNER_TEMP/document-epoch-review/source.patch"
       - name: Publish only the checked source change
         shell: bash
         run: |
