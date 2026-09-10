@@ -3377,7 +3377,13 @@ public class WebViewCoordinator: NSObject {
             ownedBy: scriptCallerBindingOwnerID,
             asyncCaller: asyncCaller,
             unsafeCaller: unsafeCaller,
-            snapshotCapture: fencedSnapshotCapture
+            snapshotCapture: fencedSnapshotCapture,
+            documentGenerationProvider: { @MainActor [weak self] in
+                // Bind the whole operation, not each fanout child separately,
+                // to the coordinator's existing document epoch. Early scripts
+                // remain usable before didCommit; navigation invalidates them.
+                self?.documentCallbackGeneration
+            }
         )
         scriptCallerBoundWebView = webView
     }
@@ -6098,6 +6104,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public struct JavaScriptBindingToken: Equatable, Hashable, Sendable {
         fileprivate let callerID: String
         fileprivate let generation: Int
+        fileprivate let documentGeneration: UInt64?
     }
 
     public struct UnboundEvaluationAttempt: Equatable, Sendable {
@@ -6157,6 +6164,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     private var asyncCallerReadinessGeneration = 0
     private var snapshotCaptureReadinessGeneration = 0
     private var bindingOwnerID: UUID?
+    private var documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)?
 
     var asyncCaller: AsyncCaller? = nil {
         didSet {
@@ -6197,15 +6205,19 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 
     public var currentJavaScriptBindingToken: JavaScriptBindingToken? {
         guard asyncCaller != nil else { return nil }
+        let documentGeneration = documentGenerationProvider?()
+        guard documentGenerationProvider == nil || documentGeneration != nil else { return nil }
         return JavaScriptBindingToken(
             callerID: id,
-            generation: asyncCallerReadinessGeneration
+            generation: asyncCallerReadinessGeneration,
+            documentGeneration: documentGeneration
         )
     }
 
     private func isCurrentJavaScriptBinding(_ token: JavaScriptBindingToken) -> Bool {
         token.callerID == id
             && token.generation == asyncCallerReadinessGeneration
+            && token.documentGeneration == documentGenerationProvider?()
             && asyncCaller != nil
     }
 
@@ -6230,9 +6242,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         ownedBy ownerID: UUID,
         asyncCaller: @escaping AsyncCaller,
         unsafeCaller: UnsafeCaller?,
-        snapshotCapture: SnapshotCapture?
+        snapshotCapture: SnapshotCapture?,
+        documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)? = nil
     ) {
         bindingOwnerID = ownerID
+        self.documentGenerationProvider = documentGenerationProvider
         self.asyncCaller = asyncCaller
         self.unsafeCaller = unsafeCaller
         self.snapshotCapture = snapshotCapture
@@ -6243,6 +6257,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     func clearBinding(ownedBy ownerID: UUID) -> Bool {
         guard bindingOwnerID == ownerID else { return false }
         bindingOwnerID = nil
+        documentGenerationProvider = nil
         asyncCaller = nil
         unsafeCaller = nil
         snapshotCapture = nil
@@ -6488,10 +6503,11 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 throw primaryError
             }
         }
+        try validateJavaScriptOperation(bindingToken)
         return normalizeJavaScriptResult(result)
     }
 
-    /// Evaluates only while the exact WebView binding that admitted the operation remains installed.
+    /// Evaluates only while the original WebView binding and document epoch remain current.
     @discardableResult
     public func evaluateJavaScript(
         _ js: String,
@@ -6585,6 +6601,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
 
+        // Navigation on the same WKWebView invalidates the primary result too,
+        // even when the new document has no registered child frames.
+        try validateJavaScriptOperation(bindingToken)
         // An earlier successful target may be retired during a later await.
         // Revalidate the whole collected result set at the non-suspending
         // return boundary, not only each target immediately after its call.
