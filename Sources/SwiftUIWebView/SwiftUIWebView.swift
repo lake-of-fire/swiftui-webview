@@ -6265,18 +6265,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     //    }
 
     private func canonicalizedURL(_ url: URL) -> URL {
-        if url.scheme?.lowercased() == "internal",
-           url.host?.lowercased() == "local",
-           url.path == "/load/reader",
-           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-           let readerURLValue = components.queryItems?.first(where: { $0.name == "reader-url" })?.value {
-            if let decoded = readerURLValue.removingPercentEncoding, let resolved = URL(string: decoded) {
-                return resolved
-            } else if let resolved = URL(string: readerURLValue) {
-                return resolved
-            }
-        }
-        return url
+        // URLComponents has already decoded the query-item transport layer.
+        // Share loader resolution so escaped path/query delimiters stay literal.
+        canonicalContentURLForReaderLoader(url) ?? url
     }
 
     private func canonicalFrameKey(for url: URL?) -> String? {
@@ -6740,6 +6731,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         trackedWordTargetFrameUUIDs.removeAll()
         canonicalFrameKeyByUUID.removeAll()
         framesByCanonicalURL.removeAll()
+        lastKnownMainFrame = nil
     }
 
     /// Returns only a canonical URL match and never falls back to another frame.
