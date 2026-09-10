@@ -6315,6 +6315,37 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
+    /// One dispatch boundary, shared by the primary evaluation, coercion retry
+    /// and frame fanout. A post-operation guard alone is too late to prevent
+    /// later dispatch from an obsolete invocation. Already-dispatched scripts
+    /// cannot be rolled back by this check.
+    private func evaluateBoundJavaScript(
+        _ caller: AsyncCaller,
+        _ token: JavaScriptBindingToken,
+        _ script: String,
+        _ arguments: [String: any Sendable]?,
+        _ frame: WKFrameInfo?,
+        _ world: WKContentWorld?
+    ) async throws -> JavaScriptEvaluationResult {
+        try validateJavaScriptOperation(token)
+        let result: JavaScriptEvaluationResult
+        do {
+            result = try await caller(script, arguments, frame, world)
+        } catch {
+            // Validate errors too: stale failures must not trigger recovery or
+            // remove registrations owned by a replacement binding.
+            try validateJavaScriptOperation(token)
+            throw error
+        }
+        try validateJavaScriptOperation(token)
+        return result
+    }
+
+    private func validateJavaScriptOperation(_ token: JavaScriptBindingToken) throws {
+        try Task.checkCancellation()
+        guard isCurrentJavaScriptBinding(token) else { throw CancellationError() }
+    }
+
     //    @MainActor
     @discardableResult
     public func evaluateJavaScript(
@@ -6324,7 +6355,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         duplicateInMultiTargetFrames: Bool = false,
         in world: WKContentWorld? = nil
     ) async throws -> Any? {
-        guard let asyncCaller else {
+        try Task.checkCancellation()
+        guard let asyncCaller, let bindingToken = currentJavaScriptBindingToken else {
             reportUnboundEvaluation(operation: .evaluateJavaScript, script: js)
             throw ScriptCallerError.evaluationTimedOut
         }
@@ -6339,28 +6371,28 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         var result: Any?
 
         do {
-            //            result = try await asyncCaller(js, primitiveArguments, frame, world)
-            result = try await asyncCaller(js, primitiveArguments, frame, world).value
+            result = try await evaluateBoundJavaScript(asyncCaller, bindingToken,
+                js, primitiveArguments, frame, world).value
         } catch {
+            if error is CancellationError { throw error }
             primaryError = error
         }
 
         if duplicateInMultiTargetFrames {
-            await { @MainActor [weak self] in
-                guard let self else { return }
-                for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
-                    if targetFrame == frame { continue }
-                    do {
-                        _ = try await asyncCaller(js, primitiveArguments, targetFrame, world)
-                    } catch {
-                        if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
-                            removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
-                        } else {
-                            print(error)
-                        }
+            for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
+                if targetFrame == frame { continue }
+                do {
+                    _ = try await evaluateBoundJavaScript(asyncCaller, bindingToken,
+                        js, primitiveArguments, targetFrame, world)
+                } catch {
+                    if error is CancellationError { throw error }
+                    if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
+                        removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
+                    } else {
+                        print(error)
                     }
                 }
-            }()
+            }
         }
         if var primaryError {
             var handled = false
@@ -6373,7 +6405,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 // Coerce common primitives (like window.location.href) instead of failing the whole pipeline.
                 if trimmed == "window.location.href" || trimmed.contains("window.location.href") {
                     do {
-                        result = try await asyncCaller(
+                        result = try await evaluateBoundJavaScript(
+                            asyncCaller, bindingToken,
                             "(function () { try { return String(window.location && window.location.href) } catch (_) { return null } })();",
                             primitiveArguments,
                             frame,
@@ -6473,7 +6506,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         in world: WKContentWorld? = nil,
         propagatesFrameErrors: Bool = false
     ) async throws -> [Any?] {
-        guard let asyncCaller else {
+        try Task.checkCancellation()
+        guard let asyncCaller, let bindingToken = currentJavaScriptBindingToken else {
             reportUnboundEvaluation(
                 operation: .evaluateJavaScriptInMultiTargetFrames,
                 script: js
@@ -6489,7 +6523,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
 
         var results = [Any?]()
-        let mainResult = try await asyncCaller(
+        let mainResult = try await evaluateBoundJavaScript(
+            asyncCaller, bindingToken,
             js,
             primitiveArguments,
             nil,
@@ -6499,7 +6534,8 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 
         for (uuid, targetFrame) in multiTargetFrames.filter({ !$0.value.isMainFrame }) {
             do {
-                let result = try await asyncCaller(
+                let result = try await evaluateBoundJavaScript(
+                    asyncCaller, bindingToken,
                     js,
                     primitiveArguments,
                     targetFrame,
@@ -6507,6 +6543,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 ).value
                 results.append(normalizeJavaScriptResult(result))
             } catch {
+                if error is CancellationError { throw error }
                 if let webKitError = error as? WKError,
                    webKitError.code == .javaScriptInvalidFrameTarget {
                     removeRegisteredFrame(uuid: uuid, expectedFrame: targetFrame)
