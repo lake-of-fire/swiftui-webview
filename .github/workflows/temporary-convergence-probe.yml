@@ -46,19 +46,31 @@ jobs:
           # The older document-epoch focused tests predate main's optional geometry
           # binding callback. Keep main callers explicit while allowing those focused
           # tests to omit geometry; nil means no mounted-window coordinate origin.
+          # Scope the replacement to the coordinator helper signature so indentation
+          # and composer-added later parameters cannot make this compatibility seam
+          # brittle or accidentally change another declaration.
           python3 - <<'PY'
           from pathlib import Path
+          import re
+
           path = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
           source = path.read_text()
-          old = '''        snapshotCapture: WebViewScriptCaller.SnapshotCapture?,
-              coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow
-          ) {'''
-          new = '''        snapshotCapture: WebViewScriptCaller.SnapshotCapture?,
-              coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow = { nil }
-          ) {'''
-          if source.count(old) != 1:
-              raise SystemExit(f'expected one coordinator binding compatibility seam, found {source.count(old)}')
-          path.write_text(source.replace(old, new, 1))
+          pattern = (
+              r'(func installScriptCallerBinding\([\s\S]*?'
+              r'snapshotCapture: WebViewScriptCaller\.SnapshotCapture\?,\s*\n\s*)'
+              r'coordinateOriginInWindow: @escaping '
+              r'WebViewScriptCaller\.CoordinateOriginInWindow'
+          )
+          replacement = (
+              r'\1coordinateOriginInWindow: @escaping '
+              r'WebViewScriptCaller.CoordinateOriginInWindow = { nil }'
+          )
+          source, count = re.subn(pattern, replacement, source, count=1)
+          if count != 1:
+              raise SystemExit(
+                  f'expected one coordinator binding compatibility seam, found {count}'
+              )
+          path.write_text(source)
           PY
 
           git add Sources/SwiftUIWebView/SwiftUIWebView.swift \
