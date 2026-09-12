@@ -43,6 +43,24 @@ jobs:
             Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
           python3 "$RUNNER_TEMP/compose-webview-convergence.py"
 
+          # The older document-epoch focused tests predate main's optional geometry
+          # binding callback. Keep main callers explicit while allowing those focused
+          # tests to omit geometry; nil means no mounted-window coordinate origin.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('Sources/SwiftUIWebView/SwiftUIWebView.swift')
+          source = path.read_text()
+          old = '''        snapshotCapture: WebViewScriptCaller.SnapshotCapture?,
+              coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow
+          ) {'''
+          new = '''        snapshotCapture: WebViewScriptCaller.SnapshotCapture?,
+              coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow = { nil }
+          ) {'''
+          if source.count(old) != 1:
+              raise SystemExit(f'expected one coordinator binding compatibility seam, found {source.count(old)}')
+          path.write_text(source.replace(old, new, 1))
+          PY
+
           git add Sources/SwiftUIWebView/SwiftUIWebView.swift \
             SwiftUIWebView.xcodeproj/project.pbxproj \
             Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
