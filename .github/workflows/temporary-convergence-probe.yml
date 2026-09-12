@@ -28,7 +28,12 @@ jobs:
           git config user.name convergence-bot
           git config user.email convergence-bot@example.invalid
           git checkout -B codex/webview-convergence-candidate-20260912 fd2a7a2b44e7bc321d25778a01bc8f64d6e49193
-          git merge --no-ff -Xours fe302bf8b7385d72778426ee20afad424ac80414 -m 'Merge qualified document-epoch stack into Reader webview lineage'
+          git merge --no-ff -Xtheirs fe302bf8b7385d72778426ee20afad424ac80414 -m 'Merge qualified document-epoch stack into Reader webview lineage'
+          # Preserve the complete Reader-native lookup regression suite rather than
+          # allowing a conflict strategy to reduce the evidence surface.
+          git restore --source=fd2a7a2b44e7bc321d25778a01bc8f64d6e49193 -- Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
+          git add Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
+          git commit -m 'Retain Reader native lookup regression coverage'
           git merge-base --is-ancestor fd2a7a2b44e7bc321d25778a01bc8f64d6e49193 HEAD
           git merge-base --is-ancestor fe302bf8b7385d72778426ee20afad424ac80414 HEAD
       - name: Debug tests
@@ -44,4 +49,4 @@ jobs:
         run: |
           set -euxo pipefail
           git status --short
-          git push origin HEAD:refs/heads/codex/webview-convergence-candidate-20260912
+          git push --force-with-lease origin HEAD:refs/heads/codex/webview-convergence-candidate-20260912
