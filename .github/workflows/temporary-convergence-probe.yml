@@ -6,34 +6,40 @@ on:
       - codex/webview-convergence-probe-20260912
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  merge-probe:
+  candidate:
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Probe exact merge
+      - name: Compose exact histories
         shell: bash
         run: |
-          set +e
-          git config user.name merge-probe
-          git config user.email merge-probe@example.invalid
-          git merge --no-commit --no-ff fe302bf8b7385d72778426ee20afad424ac80414
-          rc=$?
-          echo "merge_rc=$rc"
-          echo '--- status ---'
+          set -euxo pipefail
+          git config user.name convergence-bot
+          git config user.email convergence-bot@example.invalid
+          git checkout -B codex/webview-convergence-candidate-20260912 fd2a7a2b44e7bc321d25778a01bc8f64d6e49193
+          git merge --no-ff -Xours fe302bf8b7385d72778426ee20afad424ac80414 -m 'Merge qualified document-epoch stack into Reader webview lineage'
+          echo '--- composed diff summary ---'
+          git diff --stat fd2a7a2b44e7bc321d25778a01bc8f64d6e49193..HEAD
+          echo '--- verify both parents ---'
+          git merge-base --is-ancestor fd2a7a2b44e7bc321d25778a01bc8f64d6e49193 HEAD
+          git merge-base --is-ancestor fe302bf8b7385d72778426ee20afad424ac80414 HEAD
+      - name: Debug tests
+        run: swift test
+      - name: Release tests
+        run: swift test -c release
+      - name: AddressSanitizer debug tests
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: swift test --sanitize=address
+      - name: Publish candidate only after all tests pass
+        shell: bash
+        run: |
+          set -euxo pipefail
           git status --short
-          echo '--- unresolved ---'
-          git diff --name-only --diff-filter=U
-          echo '--- SwiftUIWebView conflict hunks ---'
-          git diff --cc -- Sources/SwiftUIWebView/SwiftUIWebView.swift || true
-          echo '--- Native lookup conflict hunks ---'
-          git diff --cc -- Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift || true
-          echo '--- Snapshot conflict hunks ---'
-          git diff --cc -- Tests/SwiftUIWebViewTests/WebViewSnapshotTests.swift || true
-          git merge --abort >/dev/null 2>&1 || true
-          exit $rc
+          git push origin HEAD:refs/heads/codex/webview-convergence-candidate-20260912
