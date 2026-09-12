@@ -11,7 +11,7 @@ permissions:
 jobs:
   candidate:
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,21 +21,36 @@ jobs:
           if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
           swift --version
           xcodebuild -version
-      - name: Compose exact histories
+      - name: Preserve semantic composer
+        run: cp .github/scripts/compose-webview-convergence.py "$RUNNER_TEMP/compose-webview-convergence.py"
+      - name: Compose exact histories and semantic runtime
         shell: bash
         run: |
           set -euxo pipefail
           git config user.name convergence-bot
           git config user.email convergence-bot@example.invalid
-          git checkout -B codex/webview-convergence-candidate-20260912 fd2a7a2b44e7bc321d25778a01bc8f64d6e49193
-          git merge --no-ff -Xtheirs fe302bf8b7385d72778426ee20afad424ac80414 -m 'Merge qualified document-epoch stack into Reader webview lineage'
-          # Preserve the complete Reader-native lookup regression suite rather than
-          # allowing a conflict strategy to reduce the evidence surface.
-          git restore --source=fd2a7a2b44e7bc321d25778a01bc8f64d6e49193 -- Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
-          git add Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
-          git commit -m 'Retain Reader native lookup regression coverage'
-          git merge-base --is-ancestor fd2a7a2b44e7bc321d25778a01bc8f64d6e49193 HEAD
-          git merge-base --is-ancestor fe302bf8b7385d72778426ee20afad424ac80414 HEAD
+          MAIN=fd2a7a2b44e7bc321d25778a01bc8f64d6e49193
+          EPOCH=fe302bf8b7385d72778426ee20afad424ac80414
+          git checkout -B codex/webview-convergence-candidate-20260912 "$MAIN"
+          git merge --no-ff -Xours "$EPOCH" -m 'Merge qualified document-epoch stack into Reader webview lineage'
+
+          # Current main remains authoritative for the evolved Reader runtime layout,
+          # Xcode project, and native-lookup suite. Reapply document-epoch semantics
+          # deliberately rather than accepting conflict-strategy source fragments.
+          git restore --source="$MAIN" -- \
+            Sources/SwiftUIWebView/SwiftUIWebView.swift \
+            SwiftUIWebView.xcodeproj/project.pbxproj \
+            Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
+          python3 "$RUNNER_TEMP/compose-webview-convergence.py"
+
+          git add Sources/SwiftUIWebView/SwiftUIWebView.swift \
+            SwiftUIWebView.xcodeproj/project.pbxproj \
+            Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift
+          git diff --cached --check
+          git commit -m 'Semantically compose document epochs with Reader webview runtime'
+          git merge-base --is-ancestor "$MAIN" HEAD
+          git merge-base --is-ancestor "$EPOCH" HEAD
+          git status --short
       - name: Debug tests
         run: swift test
       - name: Release tests
