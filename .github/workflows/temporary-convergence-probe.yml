@@ -1,0 +1,39 @@
+name: Temporary webview convergence probe
+
+on:
+  push:
+    branches:
+      - codex/webview-convergence-probe-20260912
+
+permissions:
+  contents: read
+
+jobs:
+  merge-probe:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Probe exact merge
+        shell: bash
+        run: |
+          set +e
+          git config user.name merge-probe
+          git config user.email merge-probe@example.invalid
+          git merge --no-commit --no-ff fe302bf8b7385d72778426ee20afad424ac80414
+          rc=$?
+          echo "merge_rc=$rc"
+          echo '--- status ---'
+          git status --short
+          echo '--- unresolved ---'
+          git diff --name-only --diff-filter=U
+          echo '--- SwiftUIWebView conflict hunks ---'
+          git diff --cc -- Sources/SwiftUIWebView/SwiftUIWebView.swift || true
+          echo '--- Native lookup conflict hunks ---'
+          git diff --cc -- Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift || true
+          echo '--- Snapshot conflict hunks ---'
+          git diff --cc -- Tests/SwiftUIWebViewTests/WebViewSnapshotTests.swift || true
+          git merge --abort >/dev/null 2>&1 || true
+          exit $rc
