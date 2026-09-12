@@ -16,6 +16,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Select qualified toolchain
+        run: |
+          if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
+          swift --version
+          xcodebuild -version
       - name: Compose exact histories
         shell: bash
         run: |
@@ -24,9 +29,6 @@ jobs:
           git config user.email convergence-bot@example.invalid
           git checkout -B codex/webview-convergence-candidate-20260912 fd2a7a2b44e7bc321d25778a01bc8f64d6e49193
           git merge --no-ff -Xours fe302bf8b7385d72778426ee20afad424ac80414 -m 'Merge qualified document-epoch stack into Reader webview lineage'
-          echo '--- composed diff summary ---'
-          git diff --stat fd2a7a2b44e7bc321d25778a01bc8f64d6e49193..HEAD
-          echo '--- verify both parents ---'
           git merge-base --is-ancestor fd2a7a2b44e7bc321d25778a01bc8f64d6e49193 HEAD
           git merge-base --is-ancestor fe302bf8b7385d72778426ee20afad424ac80414 HEAD
       - name: Debug tests
