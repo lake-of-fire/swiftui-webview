@@ -97,6 +97,89 @@ final class WebViewTrustedUserActionTests: XCTestCase {
         ))
     }
 
+    func testBrokerAdmissionSpendsOriginalClickLifetime() {
+        let store = WebViewTrustedUserActionAdmissionStore()
+        let observedAt = 100_000.0
+        let encodedScope = WebViewTrustedUserActionAdmissionStore
+            .brokerScopePrefix + "100000:section-1"
+        XCTAssertTrue(store.admit(
+            action: "markSectionAsRead",
+            scope: encodedScope,
+            document: document,
+            frame: frame,
+            now: 50,
+            wallClockNowUnixMilliseconds: 101_000
+        ))
+        let action = store.consume(
+            action: "markSectionAsRead",
+            document: document,
+            frame: frame,
+            now: 50.49
+        )
+        XCTAssertEqual(action?.scope, "section-1")
+        XCTAssertEqual(action?.observedAtUnixMilliseconds, observedAt)
+
+        let expiringStore = WebViewTrustedUserActionAdmissionStore()
+        XCTAssertTrue(expiringStore.admit(
+            action: "markSectionAsRead",
+            scope: encodedScope,
+            document: document,
+            frame: frame,
+            now: 60,
+            wallClockNowUnixMilliseconds: 101_000
+        ))
+        XCTAssertNil(expiringStore.consume(
+            action: "markSectionAsRead",
+            document: document,
+            frame: frame,
+            now: 60.51
+        ))
+    }
+
+    func testBrokerAdmissionRejectsAlreadyExpiredInitialDelivery() {
+        let store = WebViewTrustedUserActionAdmissionStore()
+        let encodedScope = WebViewTrustedUserActionAdmissionStore
+            .brokerScopePrefix + "100000:-"
+        XCTAssertFalse(store.admit(
+            action: "startOver",
+            scope: encodedScope,
+            document: document,
+            frame: frame,
+            now: 70,
+            wallClockNowUnixMilliseconds: 101_501
+        ))
+        XCTAssertNil(store.consume(
+            action: "startOver",
+            document: document,
+            frame: frame,
+            now: 70
+        ))
+    }
+
+    func testBrokerAdmissionRejectsImplausibleFutureTimestampAndMalformedEnvelope() {
+        let store = WebViewTrustedUserActionAdmissionStore()
+        let future = WebViewTrustedUserActionAdmissionStore
+            .brokerScopePrefix + "106000:-"
+        XCTAssertFalse(store.admit(
+            action: "startOver",
+            scope: future,
+            document: document,
+            frame: frame,
+            now: 80,
+            wallClockNowUnixMilliseconds: 100_000
+        ))
+        let malformed = WebViewTrustedUserActionAdmissionStore
+            .brokerScopePrefix + "not-a-time:section-1"
+        XCTAssertFalse(store.admit(
+            action: "markSectionAsRead",
+            scope: malformed,
+            document: document,
+            frame: frame,
+            now: 80,
+            wallClockNowUnixMilliseconds: 100_000
+        ))
+    }
+
     func testInvalidationRemovesAllAdmissions() {
         let store = WebViewTrustedUserActionAdmissionStore()
         XCTAssertTrue(store.admit(
