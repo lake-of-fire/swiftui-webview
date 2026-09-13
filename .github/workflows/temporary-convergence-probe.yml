@@ -82,7 +82,16 @@ jobs:
           git merge-base --is-ancestor "$EPOCH" HEAD
           git status --short
       - name: Debug tests
-        run: swift test
+        shell: bash
+        run: |
+          set +e
+          swift test > "$RUNNER_TEMP/webview-debug.log" 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "=== failing WebView debug tests ==="
+            grep -E "Test Case .* failed|XCTAssert|error:|failed \(|failure:" "$RUNNER_TEMP/webview-debug.log" | tail -n 160 || true
+          fi
+          exit "$status"
       - name: Release tests
         run: swift test -c release
       - name: AddressSanitizer debug tests
