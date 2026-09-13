@@ -1,11 +1,13 @@
 import Foundation
 import WebKit
 
-/// Receipt-time evidence that an isolated content world observed a genuine user
-/// activation for a specific action in the same document and frame.
+/// Evidence that an isolated content world observed a genuine user activation
+/// for a specific action in the same document and frame.
 ///
-/// No bearer token is exposed to the page world. The evidence is allocated and
-/// consumed inside the native message dispatch path.
+/// Isolated-world activations carry their original event time so delayed IPC
+/// spends the same short lifetime instead of minting a fresh receipt-time
+/// lease. Native-authorized operations retain native receipt-time admission.
+/// No bearer token is exposed to the page world.
 public struct WebViewTrustedUserAction: Equatable, Sendable {
     public enum Source: Equatable, Sendable {
         case isolatedUserActivation
@@ -15,15 +17,18 @@ public struct WebViewTrustedUserAction: Equatable, Sendable {
     public let action: String
     public let scope: String?
     public let source: Source
+    public let observedAtUnixMilliseconds: Double?
 
     public init(
         action: String,
         scope: String?,
-        source: Source = .isolatedUserActivation
+        source: Source = .isolatedUserActivation,
+        observedAtUnixMilliseconds: Double? = nil
     ) {
         self.action = action
         self.scope = scope
         self.source = source
+        self.observedAtUnixMilliseconds = observedAtUnixMilliseconds
     }
 }
 
@@ -73,13 +78,23 @@ final class WebViewTrustedUserActionAdmissionStore {
         let id: UUID
         let scope: String?
         let source: WebViewTrustedUserAction.Source
+        let observedAtUnixMilliseconds: Double?
         let expiresAt: TimeInterval
+    }
+
+    private struct DecodedBrokerScope {
+        let scope: String?
+        let observedAtUnixMilliseconds: Double?
     }
 
     static let maximumActionUTF8Bytes = 128
     static let maximumScopeUTF8Bytes = 4_096
     static let maximumAdmissionCount = 4_096
     static let lifetime: TimeInterval = 1.5
+    static let maximumFutureClockSkewMilliseconds: Double = 5_000
+    static let brokerScopePrefix = "__swiftUIWebViewTrustedUserActionV1:"
+    private static let maximumBrokerEnvelopeUTF8Bytes =
+        maximumScopeUTF8Bytes * 3 + 256
 
     private var admissions: [Key: [Admission]] = [:]
 
@@ -95,7 +110,9 @@ final class WebViewTrustedUserActionAdmissionStore {
             scope: scope,
             document: document,
             frame: WebViewTrustedUserActionFrameIdentity(frameInfo),
-            now: now
+            now: now,
+            wallClockNowUnixMilliseconds:
+                Date().timeIntervalSince1970 * 1_000
         )
     }
 
@@ -104,11 +121,31 @@ final class WebViewTrustedUserActionAdmissionStore {
         scope: String?,
         document: DocumentIdentity,
         frame: WebViewTrustedUserActionFrameIdentity,
-        now: TimeInterval
+        now: TimeInterval,
+        wallClockNowUnixMilliseconds: Double? = nil
     ) -> Bool {
-        guard Self.accepts(action: action, scope: scope) else { return false }
+        guard let decoded = Self.decodeBrokerScope(scope),
+              Self.accepts(action: action, scope: decoded.scope) else {
+            return false
+        }
         prune(now: now)
         guard admissionCount < Self.maximumAdmissionCount else { return false }
+
+        var expiresAt = now + Self.lifetime
+        if let observedAtUnixMilliseconds = decoded.observedAtUnixMilliseconds {
+            let wallClockNow = wallClockNowUnixMilliseconds
+                ?? Date().timeIntervalSince1970 * 1_000
+            guard wallClockNow.isFinite,
+                  observedAtUnixMilliseconds.isFinite else { return false }
+            let ageMilliseconds = wallClockNow - observedAtUnixMilliseconds
+            guard ageMilliseconds >= -Self.maximumFutureClockSkewMilliseconds,
+                  ageMilliseconds <= Self.lifetime * 1_000 else {
+                return false
+            }
+            let elapsed = max(0, ageMilliseconds / 1_000)
+            expiresAt = now + max(0, Self.lifetime - elapsed)
+        }
+
         let key = Key(
             document: document,
             frame: frame,
@@ -117,9 +154,11 @@ final class WebViewTrustedUserActionAdmissionStore {
         admissions[key, default: []].append(
             Admission(
                 id: UUID(),
-                scope: scope,
+                scope: decoded.scope,
                 source: .isolatedUserActivation,
-                expiresAt: now + Self.lifetime
+                observedAtUnixMilliseconds:
+                    decoded.observedAtUnixMilliseconds,
+                expiresAt: expiresAt
             )
         )
         return true
@@ -163,7 +202,8 @@ final class WebViewTrustedUserActionAdmissionStore {
         return WebViewTrustedUserAction(
             action: action,
             scope: admission.scope,
-            source: admission.source
+            source: admission.source,
+            observedAtUnixMilliseconds: admission.observedAtUnixMilliseconds
         )
     }
 
@@ -212,6 +252,7 @@ final class WebViewTrustedUserActionAdmissionStore {
                 id: UUID(),
                 scope: nil,
                 source: .nativeAuthorizedOperation,
+                observedAtUnixMilliseconds: nil,
                 expiresAt: now + Self.lifetime
             )
         }
@@ -225,6 +266,50 @@ final class WebViewTrustedUserActionAdmissionStore {
             let retained = candidates.filter { !ids.contains($0.id) }
             return retained.isEmpty ? nil : retained
         }
+    }
+
+    private static func decodeBrokerScope(
+        _ encodedScope: String?
+    ) -> DecodedBrokerScope? {
+        guard let encodedScope else {
+            return DecodedBrokerScope(
+                scope: nil,
+                observedAtUnixMilliseconds: nil
+            )
+        }
+        guard encodedScope.hasPrefix(brokerScopePrefix) else {
+            return DecodedBrokerScope(
+                scope: encodedScope,
+                observedAtUnixMilliseconds: nil
+            )
+        }
+        guard encodedScope.utf8.count <= maximumBrokerEnvelopeUTF8Bytes else {
+            return nil
+        }
+        let remainder = encodedScope.dropFirst(brokerScopePrefix.count)
+        guard let separator = remainder.firstIndex(of: ":"),
+              let observedAtUnixMilliseconds = Double(
+                remainder[..<separator]
+              ), observedAtUnixMilliseconds.isFinite,
+              observedAtUnixMilliseconds > 0 else {
+            return nil
+        }
+        let encodedPayload = String(remainder[remainder.index(after: separator)...])
+        let scope: String?
+        if encodedPayload == "-" {
+            scope = nil
+        } else {
+            guard let decoded = encodedPayload.removingPercentEncoding,
+                  !decoded.isEmpty,
+                  decoded.utf8.count <= maximumScopeUTF8Bytes else {
+                return nil
+            }
+            scope = decoded
+        }
+        return DecodedBrokerScope(
+            scope: scope,
+            observedAtUnixMilliseconds: observedAtUnixMilliseconds
+        )
     }
 
     private static func accepts(action: String, scope: String?) -> Bool {
@@ -255,8 +340,8 @@ enum WebViewTrustedUserActionBroker {
     /// This script runs outside the page content world. Page JavaScript cannot
     /// see its message handler or call its closure. `isTrusted` is only one
     /// input here: native also binds the short-lived admission to the exact
-    /// WebView document generation, frame, and declared action, and consumes it
-    /// once before dispatching the page message.
+    /// WebView document generation, frame, declared action, and original event
+    /// lifetime, and consumes it once before dispatching the page message.
     ///
     /// Threat-contract boundary: this broker privately registers exact nodes in
     /// the app's reserved control-selector namespace. It ignores page-declared
@@ -284,12 +369,36 @@ enum WebViewTrustedUserActionBroker {
                 { value: true, configurable: false, enumerable: false }
             );
             const registrations = new WeakMap();
+            const brokerScopePrefix = '__swiftUIWebViewTrustedUserActionV1:';
             const boundedScope = (value) => {
                 if (typeof value !== 'string' || value.length === 0
                     || value.length > 4096) {
                     return null;
                 }
                 return value;
+            };
+            const trustedEventUnixMilliseconds = (event) => {
+                const stamp = Number(event?.timeStamp);
+                if (Number.isFinite(stamp) && stamp > 1e12) {
+                    return stamp;
+                }
+                const origin = Number(globalThis.performance?.timeOrigin);
+                if (Number.isFinite(origin) && Number.isFinite(stamp)
+                    && stamp >= 0) {
+                    const candidate = origin + stamp;
+                    if (Number.isFinite(candidate) && candidate > 0) {
+                        return candidate;
+                    }
+                }
+                const fallback = Date.now();
+                return Number.isFinite(fallback) ? fallback : 0;
+            };
+            const encodedAdmissionScope = (scope, event) => {
+                const observedAt = trustedEventUnixMilliseconds(event);
+                if (!(observedAt > 0)) { return null; }
+                const payload = scope == null ? '-' : encodeURIComponent(scope);
+                return brokerScopePrefix
+                    + String(Math.round(observedAt)) + ':' + payload;
             };
             const sectionScope = (control) => {
                 const section = control.closest?.(
@@ -443,12 +552,17 @@ enum WebViewTrustedUserActionBroker {
                     }
                 }
                 if (!admission) { return; }
+                const encodedScope = encodedAdmissionScope(
+                    admission.scope,
+                    event
+                );
+                if (!encodedScope) { return; }
                 try {
                     for (const action of admission.actions) {
                         globalThis.webkit.messageHandlers
                             .swiftUIWebViewTrustedUserAction.postMessage({
                                 action,
-                                scope: admission.scope,
+                                scope: encodedScope,
                             });
                     }
                 } catch (_error) {}
