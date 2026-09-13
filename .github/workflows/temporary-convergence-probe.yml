@@ -66,6 +66,8 @@ jobs:
           swift test > "$RUNNER_TEMP/webview-debug.log" 2>&1
           status=$?
           if [ "$status" -ne 0 ]; then
+            echo "=== Exact WebView debug failures ==="
+            grep -n -E "Test Case .* failed|XCTAssert|error:|failed -|failure:" "$RUNNER_TEMP/webview-debug.log" | tail -n 120 || true
             echo "=== WebView debug test tail ==="
             tail -n 300 "$RUNNER_TEMP/webview-debug.log" || true
           fi
