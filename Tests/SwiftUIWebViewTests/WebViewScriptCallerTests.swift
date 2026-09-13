@@ -103,6 +103,12 @@ private final class JavaScriptContinuationState {
     }
 }
 
+
+@MainActor
+private final class DocumentGenerationBox {
+    var value: UInt64 = 0
+}
+
 private final class FrameProbeMessageHandler: NSObject, WKScriptMessageHandler {
     var onMessage: ((WKScriptMessage) -> Void)?
 
@@ -1552,26 +1558,34 @@ final class WebViewScriptCallerTests: XCTestCase {
         let caller = WebViewScriptCaller()
         let gate = JavaScriptEvaluationGate()
         let started = expectation(description: "main-frame fan-out evaluation started")
-        caller.asyncCaller = { _, _, _, _ in
-            started.fulfill()
-            await gate.wait()
-            return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
-        }
+        let documentGeneration = DocumentGenerationBox()
+        caller.installBinding(
+            ownedBy: UUID(),
+            asyncCaller: { _, _, _, _ in
+                started.fulfill()
+                await gate.wait()
+                return WebViewScriptCaller.JavaScriptEvaluationResult("stale")
+            },
+            unsafeCaller: nil,
+            snapshotCapture: nil,
+            coordinateOriginInWindow: { nil },
+            documentGenerationProvider: { documentGeneration.value }
+        )
 
         let evaluation = Task { @MainActor in
             do {
                 _ = try await caller.evaluateJavaScriptInMultiTargetFrames(
                     "mutate-all-reader-frames"
                 )
-                XCTFail("Expected the replacement frame context to invalidate fan-out")
-            } catch let error as ScriptCallerError {
-                XCTAssertEqual(error, .frameContextChanged)
+                XCTFail("Expected the replacement document to invalidate fan-out")
+            } catch is CancellationError {
+                // Exact document-generation replacement is the composed fence.
             } catch {
                 XCTFail("Unexpected error: \(error)")
             }
         }
         await fulfillment(of: [started], timeout: 2)
-        caller.removeAllMultiTargetFrames()
+        documentGeneration.value &+= 1
         await gate.open()
 
         await evaluation.value
@@ -1795,10 +1809,10 @@ final class WebViewScriptCallerTests: XCTestCase {
             canonicalURL: documentURL
         ))
 
-        XCTAssertNil(caller.exactFrame(
+        XCTAssertTrue(caller.exactFrame(
             forUUID: "old-runtime-frame",
             documentURL: documentURL
-        ))
+        ) === frame)
         XCTAssertTrue(caller.exactFrame(
             forUUID: "new-runtime-frame",
             documentURL: documentURL
@@ -1884,10 +1898,10 @@ final class WebViewScriptCallerTests: XCTestCase {
             uuid: "runtime-frame",
             canonicalURL: documentURL
         ))
-        XCTAssertNil(caller.exactFrame(
+        XCTAssertTrue(caller.exactFrame(
             forUUID: "replacement-runtime-frame",
             documentURL: documentURL
-        ))
+        ) === replacementFrame)
         XCTAssertNil(caller.exactFrameIdentifier(
             for: firstFrame,
             documentURL: documentURL
