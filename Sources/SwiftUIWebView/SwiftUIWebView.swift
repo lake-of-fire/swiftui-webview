@@ -3847,7 +3847,7 @@ public class WebViewCoordinator: NSObject {
         asyncCaller: @escaping WebViewScriptCaller.AsyncCaller,
         unsafeCaller: WebViewScriptCaller.UnsafeCaller?,
         snapshotCapture: WebViewScriptCaller.SnapshotCapture?,
-        coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow
+        coordinateOriginInWindow: @escaping WebViewScriptCaller.CoordinateOriginInWindow = { nil }
     ) {
         guard let scriptCaller else { return }
         let fencedSnapshotCapture: WebViewScriptCaller.SnapshotCapture?
@@ -3872,8 +3872,11 @@ public class WebViewCoordinator: NSObject {
             ownedBy: scriptCallerBindingOwnerID,
             asyncCaller: asyncCaller,
             unsafeCaller: unsafeCaller,
-            snapshotCapture: snapshotCapture,
+            snapshotCapture: fencedSnapshotCapture,
             coordinateOriginInWindow: coordinateOriginInWindow,
+            documentGenerationProvider: { @MainActor [weak self] in
+                self?.documentCallbackGeneration
+            },
             trustedUserActionAdmissionIssuer: {
                 [weak self, weak webView] action, count, frameInfo in
                 guard let self, let webView, let frameInfo,
@@ -7035,6 +7038,9 @@ func makeWebViewSnapshotCapture(
             throw WebViewScriptCallerSnapshotError.unavailable
         }
 
+        try Task.checkCancellation()
+        let captureBounds = webView.bounds
+        let capturePageZoom = webView.pageZoom
         let requestedRect: CGRect?
         let requestedDOMViewport: CGRect?
         switch request {
@@ -7045,27 +7051,38 @@ func makeWebViewSnapshotCapture(
             requestedRect = try WebViewScriptCaller.resolvedViewRect(
                 forDOMViewportRect: rect,
                 viewportRect: viewportRect,
-                in: webView.bounds
+                in: captureBounds
             )
             requestedDOMViewport = viewportRect
         }
-        let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(requestedRect, in: webView.bounds)
+        let capturedRect = try WebViewScriptCaller.resolvedSnapshotRect(
+            requestedRect,
+            in: captureBounds
+        )
         let configuration = makeWebViewSnapshotConfiguration(capturedRect: capturedRect)
 
-        let image = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<WebViewSnapshotPlatformImage, Error>) in
+        let image = try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<WebViewSnapshotPlatformImage, Error>) in
             webView.takeSnapshot(with: configuration) { image, error in
                 if let error {
-                    continuation.resume(throwing: WebViewScriptCallerSnapshotError.captureFailed(error.localizedDescription))
+                    continuation.resume(
+                        throwing: WebViewScriptCallerSnapshotError.captureFailed(
+                            error.localizedDescription
+                        )
+                    )
                 } else if let image {
                     continuation.resume(returning: image)
                 } else {
-                    continuation.resume(throwing: WebViewScriptCallerSnapshotError.imageConversionFailed)
+                    continuation.resume(
+                        throwing: WebViewScriptCallerSnapshotError.imageConversionFailed
+                    )
                 }
             }
         }
 
         try Task.checkCancellation()
-        guard webView.bounds == captureBounds, webView.pageZoom == capturePageZoom else {
+        guard webView.bounds == captureBounds,
+              webView.pageZoom == capturePageZoom else {
             throw CancellationError()
         }
         guard let cgImage = webViewSnapshotCGImage(from: image) else {
@@ -7091,13 +7108,12 @@ func makeWebViewSnapshotCapture(
                 WebViewScriptCaller.resolvedDOMViewportRect(
                     forViewRect: capturedRect,
                     viewportRect: $0,
-                    in: webView.bounds
+                    in: captureBounds
                 )
             }
         )
     }
 }
-
 @MainActor
 func makeWebViewSnapshotConfiguration(capturedRect: CGRect) -> WKSnapshotConfiguration {
     let configuration = WKSnapshotConfiguration()
@@ -7191,6 +7207,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public struct JavaScriptBindingToken: Equatable, Hashable, Sendable {
         fileprivate let callerID: String
         fileprivate let generation: Int
+        fileprivate let documentGeneration: UInt64?
     }
 
     struct JavaScriptEvaluationResult: @unchecked Sendable {
@@ -7295,7 +7312,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     public var currentJavaScriptBindingToken: JavaScriptBindingToken? {
         guard asyncCaller != nil else { return nil }
         let documentGeneration = documentGenerationProvider?()
-        guard documentGenerationProvider == nil || documentGeneration != nil else { return nil }
+        guard documentGenerationProvider == nil || documentGeneration != nil else {
+            return nil
+        }
         return JavaScriptBindingToken(
             callerID: id,
             generation: asyncCallerReadinessGeneration,
@@ -7333,6 +7352,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         unsafeCaller: UnsafeCaller?,
         snapshotCapture: SnapshotCapture?,
         coordinateOriginInWindow: @escaping CoordinateOriginInWindow,
+        documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)? = nil,
         trustedUserActionAdmissionIssuer:
             @escaping TrustedUserActionAdmissionIssuer = { _, _, _ in [] },
         trustedUserActionAdmissionRevoker:
@@ -7399,11 +7419,13 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     
     private struct JavaScriptEvaluationContext {
         let asyncCaller: AsyncCaller
+        let bindingToken: JavaScriptBindingToken
         let frameContextGeneration: UInt64
         let childFrames: [(uuid: String, frame: WKFrameInfo)]
     }
 
     private var multiTargetFrames = [String: WKFrameInfo]()
+    private var trackedWordTargetFrameUUIDs = Set<String>()
     private var framesByCanonicalURL = [String: WKFrameInfo]()
     private var canonicalFrameKeyByUUID = [String: String]()
     private var lastKnownMainFrame: WKFrameInfo?
@@ -7460,7 +7482,10 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         excluding primaryFrame: WKFrameInfo? = nil,
         includeChildFrames: Bool
     ) -> JavaScriptEvaluationContext? {
-        guard let asyncCaller else { return nil }
+        guard let asyncCaller,
+              let bindingToken = currentJavaScriptBindingToken else {
+            return nil
+        }
         let childFrames: [(uuid: String, frame: WKFrameInfo)]
         if includeChildFrames {
             childFrames = multiTargetFrames
@@ -7474,6 +7499,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
         return JavaScriptEvaluationContext(
             asyncCaller: asyncCaller,
+            bindingToken: bindingToken,
             frameContextGeneration: frameContextGeneration,
             childFrames: childFrames
         )
@@ -7517,7 +7543,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             })?.value
         }
         if registeredFrame === lastKnownMainFrame {
-            lastKnownMainFrame = nil
+            lastKnownMainFrame = multiTargetFrames.values.first(where: {
+                $0 === registeredFrame && $0.isMainFrame
+            })
         }
     }
 
@@ -7543,19 +7571,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    /// Retire only the exact handle rejected by the current provider. The same
-    /// handle may have several UUID/URL aliases; leaving any alias admits it
-    /// again. A different frame registered while evaluation suspended survives.
-    private func removeInvalidJavaScriptFrame(_ frame: WKFrameInfo) {
-        let aliases = multiTargetFrames.compactMap { uuid, registeredFrame in
-            registeredFrame === frame ? uuid : nil
-        }
-        for uuid in aliases {
-            removeRegisteredFrame(uuid: uuid, expectedFrame: frame)
-        }
-        if lastKnownMainFrame === frame { lastKnownMainFrame = nil }
-    }
-
     private func normalizeJavaScriptResult(_ value: Any?) -> Any? {
         switch value {
         case nil, is NSNull:
@@ -7575,31 +7590,31 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    /// One dispatch boundary, shared by the primary evaluation, coercion retry
-    /// and frame fanout. A post-operation guard alone is too late to prevent
-    /// later dispatch from an obsolete invocation. Already-dispatched scripts
-    /// cannot be rolled back by this check.
+    /// Dispatches only while both the installed binding/document token and the
+    /// frame-registration transaction remain current. Stale failures are rejected
+    /// before they can trigger recovery or retire replacement frame registrations.
     private func evaluateBoundJavaScript(
         _ caller: AsyncCaller,
         _ token: JavaScriptBindingToken,
         _ script: String,
         _ arguments: [String: any Sendable]?,
         _ frame: WKFrameInfo?,
-        _ world: WKContentWorld?
+        _ world: WKContentWorld?,
+        expectedFrameContextGeneration _: UInt64
     ) async throws -> JavaScriptEvaluationResult {
         try validateJavaScriptOperation(token)
         let result: JavaScriptEvaluationResult
         do {
             result = try await caller(script, arguments, frame, world)
         } catch {
-            // Validate errors too: stale failures must not trigger recovery or
-            // remove registrations owned by a replacement binding.
             try validateJavaScriptOperation(token)
             let nsError = error as NSError
             if let frame,
                nsError.domain == WKError.errorDomain,
                nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
-                removeInvalidJavaScriptFrame(frame)
+                // One WKFrameInfo may deliberately have several runtime UUID
+                // aliases. A rejected exact handle invalidates all of them.
+                removeRegisteredFrame(frame)
             }
             throw error
         }
@@ -7609,7 +7624,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
 
     private func validateJavaScriptOperation(_ token: JavaScriptBindingToken) throws {
         try Task.checkCancellation()
-        guard isCurrentJavaScriptBinding(token) else { throw CancellationError() }
+        guard isCurrentJavaScriptBinding(token) else {
+            throw CancellationError()
+        }
     }
 
     //    @MainActor
@@ -7629,6 +7646,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             throw ScriptCallerError.evaluationTimedOut
         }
         let asyncCaller = evaluationContext.asyncCaller
+        let bindingToken = evaluationContext.bindingToken
         let primitiveArguments: [String: any Sendable]? = arguments?.mapValues {
             if let set = $0 as? Set<AnyHashable> {
                 return Array(set) as! any Sendable
@@ -7639,7 +7657,15 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         var result: Any?
 
         do {
-            result = try await asyncCaller(js, primitiveArguments, frame, world).value
+            result = try await evaluateBoundJavaScript(
+                asyncCaller,
+                bindingToken,
+                js,
+                primitiveArguments,
+                frame,
+                world,
+                expectedFrameContextGeneration: evaluationContext.frameContextGeneration
+            ).value
         } catch {
             if error is CancellationError { throw error }
             primaryError = error
@@ -7652,11 +7678,21 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         if duplicateInMultiTargetFrames && shouldDuplicateIntoChildFrames {
             for (uuid, targetFrame) in evaluationContext.childFrames {
                 try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+                guard multiTargetFrames[uuid] === targetFrame else { continue }
                 do {
-                    _ = try await asyncCaller(js, primitiveArguments, targetFrame, world).value
+                    _ = try await evaluateBoundJavaScript(
+                        asyncCaller,
+                        bindingToken,
+                        js,
+                        primitiveArguments,
+                        targetFrame,
+                        world,
+                        expectedFrameContextGeneration: evaluationContext.frameContextGeneration
+                    ).value
                     try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
                 } catch {
                     try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+                    if error is CancellationError { throw error }
                     if let error = error as? WKError, error.code == .javaScriptInvalidFrameTarget {
                         removeRegisteredFrame(
                             uuid: uuid,
@@ -7682,11 +7718,13 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 if trimmed == "window.location.href" || trimmed.contains("window.location.href") {
                     do {
                         result = try await evaluateBoundJavaScript(
-                            asyncCaller, bindingToken,
+                            asyncCaller,
+                            bindingToken,
                             "(function () { try { return String(window.location && window.location.href) } catch (_) { return null } })();",
                             primitiveArguments,
                             frame,
-                            world
+                            world,
+                            expectedFrameContextGeneration: evaluationContext.frameContextGeneration
                         ).value
                         try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
                         handled = true
@@ -7703,8 +7741,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
                 if !handled,
                    nsError.domain == WKError.errorDomain,
                    nsError.code == WKError.javaScriptResultTypeIsUnsupported.rawValue {
-                    // A coercion retry may fail for a different reason. Never
-                    // turn cancellation or a real retry failure into success.
                     // Treat unsupported result types as a benign nil so DOM snapshot can continue.
                     result = nil
                     handled = true
@@ -7748,6 +7784,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
         try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+        try validateJavaScriptOperation(bindingToken)
         return normalizeJavaScriptResult(result)
     }
 
@@ -7818,6 +7855,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             throw ScriptCallerError.evaluationTimedOut
         }
         let asyncCaller = evaluationContext.asyncCaller
+        let bindingToken = evaluationContext.bindingToken
         let primitiveArguments: [String: any Sendable]? = arguments?.mapValues {
             if let set = $0 as? Set<AnyHashable> {
                 return Array(set) as! any Sendable
@@ -7826,71 +7864,76 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
 
         func requireContinuation() throws {
+            try validateJavaScriptOperation(bindingToken)
             guard shouldContinue?() != false else {
                 throw CancellationError()
             }
         }
 
-        var results = [Any?]()
         try requireContinuation()
-        let mainResult: Any?
-        do {
-            mainResult = try await asyncCaller(
-                js,
-                primitiveArguments,
-                nil,
-                world
-            ).value
-        } catch {
-            try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
-            throw error
-        }
-        try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
+        let mainResult = try await evaluateBoundJavaScript(
+            asyncCaller,
+            bindingToken,
+            js,
+            primitiveArguments,
+            nil,
+            world,
+            expectedFrameContextGeneration: evaluationContext.frameContextGeneration
+        ).value
         try requireContinuation()
         let normalizedMainResult = normalizeJavaScriptResult(mainResult)
-        results.append(normalizedMainResult)
+        var frameResults: [(uuid: String, frame: WKFrameInfo, value: Any?)] = []
+
+        func finalizedResults() throws -> [Any?] {
+            try requireContinuation()
+            var finalized = [normalizedMainResult]
+            for entry in frameResults {
+                guard multiTargetFrames[entry.uuid] === entry.frame else {
+                    if propagatesFrameErrors { throw CancellationError() }
+                    continue
+                }
+                finalized.append(entry.value)
+            }
+            return finalized
+        }
+
         if shouldStopAfterResult?(normalizedMainResult) == true {
-            return results
+            return try finalizedResults()
         }
 
         for (uuid, targetFrame) in evaluationContext.childFrames {
-            try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
             try requireContinuation()
+            guard multiTargetFrames[uuid] === targetFrame else {
+                if propagatesFrameErrors { throw CancellationError() }
+                continue
+            }
             do {
                 let result = try await evaluateBoundJavaScript(
-                    asyncCaller, bindingToken,
+                    asyncCaller,
+                    bindingToken,
                     js,
                     primitiveArguments,
                     targetFrame,
-                    world
+                    world,
+                    expectedFrameContextGeneration: evaluationContext.frameContextGeneration
                 ).value
-                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
                 try requireContinuation()
-                let normalizedResult = normalizeJavaScriptResult(result)
-                results.append(normalizedResult)
-                if shouldStopAfterResult?(normalizedResult) == true {
-                    return results
-                }
-            } catch {
-                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
-                if let webKitError = error as? WKError,
-                   webKitError.code == .javaScriptInvalidFrameTarget {
-                    removeRegisteredFrame(
-                        uuid: uuid,
-                        expectedFrame: targetFrame,
-                        expectedContextGeneration: evaluationContext.frameContextGeneration
-                    )
+                guard multiTargetFrames[uuid] === targetFrame else {
+                    if propagatesFrameErrors { throw CancellationError() }
                     continue
                 }
-                try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
-                if propagatesFrameErrors {
-                    throw error
+                let normalizedResult = normalizeJavaScriptResult(result)
+                frameResults.append((uuid, targetFrame, normalizedResult))
+                if shouldStopAfterResult?(normalizedResult) == true {
+                    return try finalizedResults()
                 }
+            } catch {
+                if error is CancellationError { throw error }
+                if propagatesFrameErrors { throw error }
             }
         }
 
-        try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
-        return results
+        return try finalizedResults()
     }
 
     @MainActor
@@ -7907,33 +7950,27 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         domViewportRect: CGRect,
         viewportRect: CGRect
     ) async throws -> WebViewSnapshotImage {
-        try await captureSnapshot(.domViewportRect(domViewportRect, viewportRect: viewportRect))
+        try await captureSnapshot(
+            .domViewportRect(domViewportRect, viewportRect: viewportRect)
+        )
     }
 
     @MainActor
-    private func captureSnapshot(_ request: SnapshotRequest) async throws -> WebViewSnapshotImage {
+    private func captureSnapshot(
+        _ request: SnapshotRequest
+    ) async throws -> WebViewSnapshotImage {
         try Task.checkCancellation()
         guard let capture = snapshotCapture else {
             throw WebViewScriptCallerSnapshotError.unavailable
         }
-        return try await snapshotCapture(.viewRect(rect))
-    }
-
-    /// Captures a rect expressed in top-frame DOM viewport coordinates.
-    ///
-    /// `viewportRect` is the top frame's visual viewport in the same CSS-point coordinate space as
-    /// `domViewportRect`. This maps page zoom and visual-viewport offsets into WKWebView view points.
-    @MainActor
-    public func captureSnapshot(
-        domViewportRect: CGRect,
-        viewportRect: CGRect
-    ) async throws -> WebViewSnapshotImage {
-        guard let snapshotCapture else {
-            throw WebViewScriptCallerSnapshotError.unavailable
+        let generation = snapshotCaptureReadinessGeneration
+        let image = try await capture(request)
+        try Task.checkCancellation()
+        guard snapshotCaptureReadinessGeneration == generation,
+              snapshotCapture != nil else {
+            throw CancellationError()
         }
-        return try await snapshotCapture(
-            .domViewportRect(domViewportRect, viewportRect: viewportRect)
-        )
+        return image
     }
 
     nonisolated static func resolvedViewRect(
@@ -8053,11 +8090,6 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     /// Returns whether this call changed the exact frame registration.
     @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String, canonicalURL: URL? = nil) -> Bool {
-        for aliasUUID in multiTargetFrames.compactMap({ candidateUUID, candidateFrame in
-            candidateUUID != uuid && candidateFrame === frame ? candidateUUID : nil
-        }) {
-            removeRegisteredFrame(uuid: aliasUUID, expectedFrame: frame)
-        }
         let previousFrame = multiTargetFrames[uuid]
         let previousCanonicalKey = canonicalFrameKeyByUUID[uuid]
         let resolvedCanonicalURL = canonicalURL ?? frame.request.url ?? frame.request.mainDocumentURL
@@ -8113,11 +8145,15 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         uuid: String,
         canonicalURL: URL? = nil
     ) -> Bool {
-        let inserted = addMultiTargetFrame(frame, uuid: uuid, canonicalURL: canonicalURL)
+        let changed = addMultiTargetFrame(
+            frame,
+            uuid: uuid,
+            canonicalURL: canonicalURL
+        )
         trackedWordTargetFrameUUIDs.insert(uuid)
-        return inserted
+        return changed
     }
-    
+
     @MainActor
     public func removeAllMultiTargetFrames() {
         frameContextGeneration &+= 1
@@ -8131,6 +8167,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
 #endif
         multiTargetFrames.removeAll()
+        trackedWordTargetFrameUUIDs.removeAll()
         framesByCanonicalURL.removeAll()
         canonicalFrameKeyByUUID.removeAll()
         lastKnownMainFrame = nil
@@ -8230,6 +8267,19 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             return nil
         }
         return expectedFrame
+    }
+
+    /// Returns every still-registered tracked-word target together with the
+    /// runtime UUID that the target document must acknowledge.
+    @MainActor
+    public func registeredTrackedWordFrameIdentities() -> [
+        (uuid: String, frame: WKFrameInfo)
+    ] {
+        trackedWordTargetFrameUUIDs
+            .compactMap { uuid in
+                multiTargetFrames[uuid].map { (uuid: uuid, frame: $0) }
+            }
+            .sorted { $0.uuid < $1.uuid }
     }
 
     @MainActor

@@ -389,6 +389,7 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertFalse(store.isActiveNativeTouchPublicationCurrent)
     }
 
+#if DEBUG
     func testTargetPublicationProbeDoesNotNotifyForRedundantEmptyClear() {
         let store = WebViewNativeLookupHitTestStore()
         var notificationCount = 0
@@ -444,6 +445,8 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(secondCount, 2)
     }
 
+#endif
+
     func testLateBarrierRemovesOnlyOlderFramePublications() {
         let store = WebViewNativeLookupHitTestStore()
         store.updateTargets(
@@ -484,9 +487,11 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
 
         XCTAssertEqual(store.removeTargets(publishedAtOrBefore: 15), 2)
         XCTAssertEqual(store.targetCount, 1)
+#if DEBUG
         XCTAssertTrue(store.uiTestTargetProbeText.contains("surfaces=destination"))
         XCTAssertFalse(store.uiTestTargetProbeText.contains("surfaces=source"))
         XCTAssertFalse(store.uiTestTargetProbeText.contains("surfaces=legacy"))
+#endif
     }
 
 
@@ -626,6 +631,7 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertFalse(store.isActiveNativeTouchPublicationCurrent)
     }
 
+#if DEBUG
     func testUITestTapDispatchesFirstGeometryTargetWithoutRequiringEagerPayload() {
         let store = WebViewNativeLookupHitTestStore()
         var dispatchedHit: WebViewNativeLookupHit?
@@ -693,6 +699,8 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(dispatchedHit?.elementID, "last")
         XCTAssertEqual(dispatchedHit?.point, CGPoint(x: 50, y: 75))
     }
+
+#endif
 
     func testWrappedSegmentDoesNotClaimBlankSpaceBetweenComponentRects() {
         let store = WebViewNativeLookupHitTestStore()
