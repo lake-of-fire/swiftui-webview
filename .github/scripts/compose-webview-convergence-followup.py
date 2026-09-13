@@ -339,3 +339,50 @@ if tests.count(old_test) != 1:
 tests = tests.replace(old_test, new_test, 1)
 
 tests_path.write_text(tests)
+
+# The native-hit UI probe surface is intentionally DEBUG-only production code.
+# Keep those tests in the Debug matrix instead of widening production API just
+# so `swift test -c release` can compile them. Preserve the non-debug late-barrier
+# assertion using ordinary hit-testing so Release still covers its behavior.
+native_tests_path = Path("Tests/SwiftUIWebViewTests/WebViewNativeLookupHitTestStoreTests.swift")
+native_tests = native_tests_path.read_text()
+
+def debug_only_test(name: str) -> None:
+    global native_tests
+    pattern = rf"(\n    func {re.escape(name)}\([^\n]*\)\s*(?:throws\s*)?\{{.*?\n    \}}\n)(?=\n    func |\n\}})"
+    match = re.search(pattern, native_tests, flags=re.S)
+    if match is None:
+        raise SystemExit(f"debug-only test not found: {name}")
+    wrapped = "\n#if DEBUG" + match.group(1) + "#endif\n"
+    native_tests = native_tests[:match.start()] + wrapped + native_tests[match.end():]
+
+for method_name in [
+    "testTargetPublicationProbeDoesNotNotifyForRedundantEmptyClear",
+    "testTargetPublicationProbeSupportsIndependentObservers",
+    "testUITestTapDispatchesFirstGeometryTargetWithoutRequiringEagerPayload",
+    "testUITestTapCanRetargetToDifferentElementWhileLookupIsActive",
+    "testUITestTapCanSelectLastVisibleTargetForBoundaryNavigation",
+]:
+    debug_only_test(method_name)
+
+late_probe_assertions = """        XCTAssertEqual(store.removeTargets(publishedAtOrBefore: 15), 2)
+        XCTAssertEqual(store.targetCount, 1)
+        XCTAssertTrue(store.uiTestTargetProbeText.contains("surfaces=destination"))
+        XCTAssertFalse(store.uiTestTargetProbeText.contains("surfaces=source"))
+        XCTAssertFalse(store.uiTestTargetProbeText.contains("surfaces=legacy"))
+"""
+late_release_assertions = """        XCTAssertEqual(store.removeTargets(publishedAtOrBefore: 15), 2)
+        XCTAssertEqual(store.targetCount, 1)
+        XCTAssertNil(store.hitTarget(at: CGPoint(x: 10, y: 10)))
+        XCTAssertNil(store.hitTarget(at: CGPoint(x: 30, y: 10)))
+        XCTAssertEqual(
+            store.hitTarget(at: CGPoint(x: 50, y: 10))?.elementID,
+            "destination-frame"
+        )
+"""
+if native_tests.count(late_probe_assertions) != 1:
+    raise SystemExit(
+        f"late-barrier debug probe preimage count={native_tests.count(late_probe_assertions)}"
+    )
+native_tests = native_tests.replace(late_probe_assertions, late_release_assertions, 1)
+native_tests_path.write_text(native_tests)
