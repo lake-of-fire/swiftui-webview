@@ -21,10 +21,10 @@ source, count = re.subn(pattern, replacement, source, count=1)
 if count != 1:
     raise SystemExit(f"geometry compatibility seam count={count}")
 
-# Binding/document generation is the cross-await transaction fence. Frame
-# registration mutations are validated independently by exact UUID + handle;
-# treating every frame-context generation change as transaction cancellation
-# incorrectly rejects legitimate retire/replace operations inside fanout.
+# Binding/document generation and removeAllMultiTargetFrames' frame-context
+# generation are whole-document transaction fences. Ordinary per-frame
+# registration churn does not advance frameContextGeneration and is validated
+# independently by exact UUID + WKFrameInfo identity.
 helper_pattern = (
     r"    private func evaluateBoundJavaScript\(\n"
     r".*?\n"
@@ -38,25 +38,31 @@ helper_replacement = """    private func evaluateBoundJavaScript(
         _ arguments: [String: any Sendable]?,
         _ frame: WKFrameInfo?,
         _ world: WKContentWorld?,
-        expectedFrameContextGeneration _: UInt64
+        expectedFrameContextGeneration: UInt64
     ) async throws -> JavaScriptEvaluationResult {
         try validateJavaScriptOperation(token)
+        try requireCurrentFrameContext(expectedFrameContextGeneration)
         let result: JavaScriptEvaluationResult
         do {
             result = try await caller(script, arguments, frame, world)
         } catch {
             try validateJavaScriptOperation(token)
+            try requireCurrentFrameContext(expectedFrameContextGeneration)
             let nsError = error as NSError
             if let frame,
                nsError.domain == WKError.errorDomain,
                nsError.code == WKError.javaScriptInvalidFrameTarget.rawValue {
                 // One WKFrameInfo may deliberately have several runtime UUID
                 // aliases. A rejected exact handle invalidates all of them.
-                removeRegisteredFrame(frame)
+                removeRegisteredFrame(
+                    frame,
+                    expectedContextGeneration: expectedFrameContextGeneration
+                )
             }
             throw error
         }
         try validateJavaScriptOperation(token)
+        try requireCurrentFrameContext(expectedFrameContextGeneration)
         return result
     }
 
@@ -87,9 +93,9 @@ if source.count(single_old) != 1:
     raise SystemExit(f"duplicate fanout loop count={source.count(single_old)}")
 source = source.replace(single_old, single_new, 1)
 
-# Aggregate results must keep document/binding continuity while allowing frame
-# registration churn. Each child result is admitted only while its exact
-# UUID/handle mapping still exists. Optional fanout omits retired results;
+# Aggregate results keep the whole-document generation fence while allowing
+# ordinary registration churn. Each child result is admitted only while its
+# exact UUID/handle mapping still exists. Optional fanout omits retired results;
 # strict fanout converts that loss into cancellation.
 aggregate_pattern = (
     r"    public func evaluateJavaScriptInMultiTargetFrames\(\n"
@@ -126,6 +132,7 @@ aggregate_replacement = """    public func evaluateJavaScriptInMultiTargetFrames
 
         func requireContinuation() throws {
             try validateJavaScriptOperation(bindingToken)
+            try requireCurrentFrameContext(evaluationContext.frameContextGeneration)
             guard shouldContinue?() != false else {
                 throw CancellationError()
             }
