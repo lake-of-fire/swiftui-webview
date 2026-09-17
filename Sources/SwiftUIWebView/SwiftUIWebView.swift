@@ -265,16 +265,26 @@ public struct WebViewMessageHandlers: Sendable {
         String,
         @MainActor @Sendable (WebViewMessage) -> Void
     >
+    /// Handler names that may receive isolated-world user-activation evidence.
+    public let trustedUserActionHandlerNames: Set<String>
+    /// Handler names that must never dispatch without that evidence.
+    public let requiredTrustedUserActionHandlerNames: Set<String>
     
     public init(
         _ handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void> = [:],
         cancellationHandlers: OrderedDictionary<
             String,
             @MainActor @Sendable (WebViewMessage) -> Void
-        > = [:]
+        > = [:],
+        trustedUserActionHandlerNames: Set<String> = [],
+        requiredTrustedUserActionHandlerNames: Set<String> = []
     ) {
         self.handlers = handlers
         self.cancellationHandlers = cancellationHandlers
+        self.trustedUserActionHandlerNames = trustedUserActionHandlerNames
+            .union(requiredTrustedUserActionHandlerNames)
+        self.requiredTrustedUserActionHandlerNames =
+            requiredTrustedUserActionHandlerNames
     }
     
     public init(
@@ -282,11 +292,16 @@ public struct WebViewMessageHandlers: Sendable {
         cancellationHandlers: OrderedDictionary<
             String,
             @MainActor @Sendable (WebViewMessage) -> Void
-        > = [:]
+        > = [:],
+        trustedUserActionHandlerNames: Set<String> = [],
+        requiredTrustedUserActionHandlerNames: Set<String> = []
     ) {
         self.init(
             OrderedDictionary(uniqueKeysWithValues: pairs),
-            cancellationHandlers: cancellationHandlers
+            cancellationHandlers: cancellationHandlers,
+            trustedUserActionHandlerNames: trustedUserActionHandlerNames,
+            requiredTrustedUserActionHandlerNames:
+                requiredTrustedUserActionHandlerNames
         )
     }
 
@@ -322,7 +337,16 @@ public struct WebViewMessageHandlers: Sendable {
                 mergedCancellationHandlers[name] = handler
             }
         }
-        return WebViewMessageHandlers(merged, cancellationHandlers: mergedCancellationHandlers)
+        return WebViewMessageHandlers(
+            merged,
+            cancellationHandlers: mergedCancellationHandlers,
+            trustedUserActionHandlerNames:
+                trustedUserActionHandlerNames
+                    .union(other.trustedUserActionHandlerNames),
+            requiredTrustedUserActionHandlerNames:
+                requiredTrustedUserActionHandlerNames
+                    .union(other.requiredTrustedUserActionHandlerNames)
+        )
     }
     
     public static func + (lhs: WebViewMessageHandlers, rhs: WebViewMessageHandlers) -> WebViewMessageHandlers {
@@ -332,7 +356,13 @@ public struct WebViewMessageHandlers: Sendable {
     public func updating(_ name: String, handler: @Sendable @escaping (WebViewMessage) async -> Void) -> WebViewMessageHandlers {
         var copy = handlers
         copy[name] = handler
-        return WebViewMessageHandlers(copy, cancellationHandlers: cancellationHandlers)
+        return WebViewMessageHandlers(
+            copy,
+            cancellationHandlers: cancellationHandlers,
+            trustedUserActionHandlerNames: trustedUserActionHandlerNames,
+            requiredTrustedUserActionHandlerNames:
+                requiredTrustedUserActionHandlerNames
+        )
     }
 
     public func updatingCancellationHandler(
@@ -341,7 +371,43 @@ public struct WebViewMessageHandlers: Sendable {
     ) -> WebViewMessageHandlers {
         var copy = cancellationHandlers
         copy[name] = handler
-        return WebViewMessageHandlers(handlers, cancellationHandlers: copy)
+        return WebViewMessageHandlers(
+            handlers,
+            cancellationHandlers: copy,
+            trustedUserActionHandlerNames: trustedUserActionHandlerNames,
+            requiredTrustedUserActionHandlerNames:
+                requiredTrustedUserActionHandlerNames
+        )
+    }
+
+    /// Requires an isolated-world, one-shot user activation before dispatching
+    /// this page-world handler.
+    public func requiringTrustedUserAction(
+        _ name: String
+    ) -> WebViewMessageHandlers {
+        WebViewMessageHandlers(
+            handlers,
+            cancellationHandlers: cancellationHandlers,
+            trustedUserActionHandlerNames:
+                trustedUserActionHandlerNames.union([name]),
+            requiredTrustedUserActionHandlerNames:
+                requiredTrustedUserActionHandlerNames.union([name])
+        )
+    }
+
+    /// Attaches user-activation evidence when present while allowing the
+    /// handler to decide whether a particular payload requires it.
+    public func acceptingTrustedUserAction(
+        _ name: String
+    ) -> WebViewMessageHandlers {
+        WebViewMessageHandlers(
+            handlers,
+            cancellationHandlers: cancellationHandlers,
+            trustedUserActionHandlerNames:
+                trustedUserActionHandlerNames.union([name]),
+            requiredTrustedUserActionHandlerNames:
+                requiredTrustedUserActionHandlerNames
+        )
     }
 }
 
@@ -1291,6 +1357,7 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
     public let body: Any
     public let receiptSequence: UInt64?
     public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
+    public let trustedUserAction: WebViewTrustedUserAction?
     public let isMainFrame: Bool
     public let requestURL: URL?
     public let mainDocumentURL: URL?
@@ -1302,7 +1369,8 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
         name: String,
         body: Any,
         receiptSequence: UInt64? = nil,
-        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
+        trustedUserAction: WebViewTrustedUserAction? = nil
     ) {
         self.frameInfo = frameInfo
         self.uuid = uuid
@@ -1310,6 +1378,7 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
         self.body = body
         self.receiptSequence = receiptSequence
         self.javaScriptBindingToken = javaScriptBindingToken
+        self.trustedUserAction = trustedUserAction
         self.isMainFrame = frameInfo.isMainFrame
         self.requestURL = frameInfo.request.url
         self.mainDocumentURL = frameInfo.request.mainDocumentURL
@@ -2777,6 +2846,9 @@ public class WebViewCoordinator: NSObject {
     private weak var scriptCallerBoundWebView: WKWebView?
     private var documentCallbackGeneration: UInt64 = 0
     private var documentCallbackContextIsActive = false
+    private let trustedUserActionAdmissions =
+        WebViewTrustedUserActionAdmissionStore()
+    private var messageHandlerConfigurationGeneration: UInt64 = 0
     private var committedDocumentSurvivesProvisionalNavigation = false
     private var pendingDocumentCallbackTasks = [UUID: WebViewPendingDocumentCallbackTask]()
     private var pageStateExtractionGate = WebViewMutationGenerationGate()
@@ -2848,7 +2920,11 @@ public class WebViewCoordinator: NSObject {
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
-    var messageHandlers: WebViewMessageHandlers
+    var messageHandlers: WebViewMessageHandlers {
+        didSet {
+            messageHandlerConfigurationGeneration &+= 1
+        }
+    }
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
     }
@@ -3228,6 +3304,7 @@ public class WebViewCoordinator: NSObject {
     private func invalidateDocumentCallbackContext() {
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = false
+        trustedUserActionAdmissions.invalidateAll()
         cancelPendingWebViewDocumentCallbackTasks(&pendingDocumentCallbackTasks)
     }
 
@@ -3236,6 +3313,7 @@ public class WebViewCoordinator: NSObject {
         guard navigator.webView === sourceWebView else { return }
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = true
+        trustedUserActionAdmissions.invalidateAll()
     }
 
     @MainActor
@@ -3359,7 +3437,31 @@ public class WebViewCoordinator: NSObject {
             ownedBy: scriptCallerBindingOwnerID,
             asyncCaller: asyncCaller,
             unsafeCaller: unsafeCaller,
-            snapshotCapture: snapshotCapture
+            snapshotCapture: snapshotCapture,
+            trustedUserActionAdmissionIssuer: {
+                [weak self, weak webView] action, count, frameInfo in
+                guard let self, let webView, let frameInfo,
+                      self.messageHandlers
+                        .trustedUserActionHandlerNames
+                        .contains(action),
+                      let context = self.captureDocumentCallbackContext(
+                        for: webView
+                      ) else {
+                    return []
+                }
+                return self.trustedUserActionAdmissions.admitNativeBatch(
+                    action: action,
+                    count: count,
+                    document: .init(
+                        webViewID: context.webViewID,
+                        generation: context.generation
+                    ),
+                    frameInfo: frameInfo
+                )
+            },
+            trustedUserActionAdmissionRevoker: { [weak self] ids in
+                self?.trustedUserActionAdmissions.revoke(ids)
+            }
         )
         scriptCallerBoundWebView = webView
     }
@@ -3375,6 +3477,10 @@ public class WebViewCoordinator: NSObject {
         for messageHandlerName in registeredMessageHandlerNames {
             userContentController.removeScriptMessageHandler(forName: messageHandlerName)
             userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
+            userContentController.removeScriptMessageHandler(
+                forName: messageHandlerName,
+                contentWorld: WebViewTrustedUserActionBroker.world
+            )
         }
         registeredMessageHandlerNames.removeAll()
         lastEnvHandlerNames = nil
@@ -3830,6 +3936,26 @@ extension WebViewCoordinator: WKScriptMessageHandler {
               let documentContext = captureDocumentCallbackContext(for: sourceWebView) else {
             return
         }
+        if message.name == WebViewTrustedUserActionBroker.handlerName {
+            guard let body = message.body as? [String: Any],
+                  let action = body["action"] as? String,
+                  message.frameInfo.isMainFrame,
+                  messageHandlers.trustedUserActionHandlerNames
+                    .contains(action) else {
+                return
+            }
+            _ = trustedUserActionAdmissions.admit(
+                action: action,
+                scope: body["scope"] as? String,
+                correlationToken: body["correlationToken"] as? String,
+                document: .init(
+                    webViewID: documentContext.webViewID,
+                    generation: documentContext.generation
+                ),
+                frameInfo: message.frameInfo
+            )
+            return
+        }
         if message.name == "swiftUIWebViewBackgroundStatus", let hasBackground = message.body as? Bool {
             webView.drawsBackground = !hasBackground
             return
@@ -3966,21 +4092,147 @@ extension WebViewCoordinator: WKScriptMessageHandler {
          return
          }*/
         
+        let messageHandlers = messageHandlers
+        let messageHandlerConfigurationGeneration =
+            messageHandlerConfigurationGeneration
         guard let messageHandler = messageHandlers.handlers[message.name] else { return }
+        let acceptsTrustedUserAction = messageHandlers
+            .trustedUserActionHandlerNames.contains(message.name)
+        let receiptSequence = WebViewMessageReceiptSequencer.reserve()
+        let handlerName = message.name
+        let frameInfo = message.frameInfo
+        let body = message.body
+        let javaScriptBindingToken = javaScriptBindingToken(for: sourceWebView)
+        let cancellationHandler = messageHandlers.cancellationHandlers[handlerName]
+        let requiresTrustedUserAction = messageHandlers
+            .requiredTrustedUserActionHandlerNames.contains(handlerName)
+
+        if acceptsTrustedUserAction {
+            let correlationToken = trustedUserActionCorrelationToken(in: body)
+            let document = WebViewTrustedUserActionAdmissionStore
+                .DocumentIdentity(
+                    webViewID: documentContext.webViewID,
+                    generation: documentContext.generation
+                )
+            if let trustedUserAction = trustedUserActionAdmissions.consume(
+                action: handlerName,
+                correlationToken: correlationToken,
+                document: document,
+                frame: WebViewTrustedUserActionFrameIdentity(frameInfo),
+                now: ProcessInfo.processInfo.systemUptime
+            ) {
+                scheduleTrustedUserActionMessageHandler(
+                    messageHandler,
+                    name: handlerName,
+                    body: body,
+                    frameInfo: frameInfo,
+                    receiptSequence: receiptSequence,
+                    javaScriptBindingToken: javaScriptBindingToken,
+                    trustedUserAction: trustedUserAction,
+                    context: documentContext,
+                    cancellationHandler: cancellationHandler
+                )
+                return
+            }
+            guard correlationToken != nil else {
+                guard !requiresTrustedUserAction else { return }
+                scheduleTrustedUserActionMessageHandler(
+                    messageHandler,
+                    name: handlerName,
+                    body: body,
+                    frameInfo: frameInfo,
+                    receiptSequence: receiptSequence,
+                    javaScriptBindingToken: javaScriptBindingToken,
+                    trustedUserAction: nil,
+                    context: documentContext,
+                    cancellationHandler: cancellationHandler
+                )
+                return
+            }
+
+            // The page command and isolated-world admission carry one exact
+            // token. Wait only for that receipt; another action in the same
+            // frame can never satisfy this command.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let trustedUserAction = await self.trustedUserActionAdmissions
+                    .consumeOrWaitForBrokerAdmission(
+                        action: handlerName,
+                        correlationToken: correlationToken,
+                        document: document,
+                        frame: WebViewTrustedUserActionFrameIdentity(frameInfo),
+                        now: ProcessInfo.processInfo.systemUptime
+                    )
+                guard !Task.isCancelled,
+                      self.ownsDocumentCallbackContext(documentContext),
+                      self.messageHandlerConfigurationGeneration
+                        == messageHandlerConfigurationGeneration,
+                      trustedUserAction != nil || !requiresTrustedUserAction else {
+                    return
+                }
+                self.scheduleTrustedUserActionMessageHandler(
+                    messageHandler,
+                    name: handlerName,
+                    body: body,
+                    frameInfo: frameInfo,
+                    receiptSequence: receiptSequence,
+                    javaScriptBindingToken: javaScriptBindingToken,
+                    trustedUserAction: trustedUserAction,
+                    context: documentContext,
+                    cancellationHandler: cancellationHandler
+                )
+            }
+            return
+        }
         let message = WebViewMessage(
-            frameInfo: message.frameInfo,
+            frameInfo: frameInfo,
             uuid: UUID(),
-            name: message.name,
-            body: message.body,
-            receiptSequence: WebViewMessageReceiptSequencer.reserve(),
-            javaScriptBindingToken: javaScriptBindingToken(for: sourceWebView)
+            name: handlerName,
+            body: body,
+            receiptSequence: receiptSequence,
+            javaScriptBindingToken: javaScriptBindingToken
         )
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
         scheduleDocumentMessageHandler(
             messageHandler,
             message: message,
             context: documentContext,
-            cancellationHandler: messageHandlers.cancellationHandlers[message.name]
+            cancellationHandler: cancellationHandler
+        )
+    }
+
+    @MainActor
+    private func trustedUserActionCorrelationToken(in body: Any) -> String? {
+        (body as? [String: Any])?[WebViewTrustedUserActionBroker
+            .correlationTokenBodyKey] as? String
+    }
+
+    @MainActor
+    private func scheduleTrustedUserActionMessageHandler(
+        _ handler: @Sendable @escaping (WebViewMessage) async -> Void,
+        name: String,
+        body: Any,
+        frameInfo: WKFrameInfo,
+        receiptSequence: UInt64,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?,
+        trustedUserAction: WebViewTrustedUserAction?,
+        context: WebViewDocumentCallbackContext,
+        cancellationHandler: (@MainActor @Sendable (WebViewMessage) -> Void)?
+    ) {
+        let message = WebViewMessage(
+            frameInfo: frameInfo,
+            uuid: UUID(),
+            name: name,
+            body: body,
+            receiptSequence: receiptSequence,
+            javaScriptBindingToken: javaScriptBindingToken,
+            trustedUserAction: trustedUserAction
+        )
+        scheduleDocumentMessageHandler(
+            handler,
+            message: message,
+            context: context,
+            cancellationHandler: cancellationHandler
         )
     }
 }
@@ -6114,6 +6366,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         case domViewportRect(CGRect, viewportRect: CGRect)
     }
     typealias SnapshotCapture = @MainActor @Sendable (SnapshotRequest) async throws -> WebViewSnapshotImage
+    typealias TrustedUserActionAdmissionIssuer = @MainActor @Sendable (
+        String,
+        Int,
+        WKFrameInfo?
+    ) -> Set<UUID>
+    typealias TrustedUserActionAdmissionRevoker = @MainActor @Sendable (
+        Set<UUID>
+    ) -> Void
 
     public let id = UUID().uuidString
     //    @Published var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
@@ -6158,6 +6418,10 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
     var unsafeCaller: UnsafeCaller? = nil
+    private var trustedUserActionAdmissionIssuer:
+        TrustedUserActionAdmissionIssuer?
+    private var trustedUserActionAdmissionRevoker:
+        TrustedUserActionAdmissionRevoker?
 
     /// Synchronously reflects whether JavaScript evaluation is currently possible.
     ///
@@ -6203,12 +6467,20 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         ownedBy ownerID: UUID,
         asyncCaller: @escaping AsyncCaller,
         unsafeCaller: UnsafeCaller?,
-        snapshotCapture: SnapshotCapture?
+        snapshotCapture: SnapshotCapture?,
+        trustedUserActionAdmissionIssuer:
+            @escaping TrustedUserActionAdmissionIssuer = { _, _, _ in [] },
+        trustedUserActionAdmissionRevoker:
+            @escaping TrustedUserActionAdmissionRevoker = { _ in }
     ) {
         bindingOwnerID = ownerID
         self.asyncCaller = asyncCaller
         self.unsafeCaller = unsafeCaller
         self.snapshotCapture = snapshotCapture
+        self.trustedUserActionAdmissionIssuer =
+            trustedUserActionAdmissionIssuer
+        self.trustedUserActionAdmissionRevoker =
+            trustedUserActionAdmissionRevoker
     }
 
     @MainActor
@@ -6219,12 +6491,36 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         asyncCaller = nil
         unsafeCaller = nil
         snapshotCapture = nil
+        trustedUserActionAdmissionIssuer = nil
+        trustedUserActionAdmissionRevoker = nil
         return true
     }
 
     @MainActor
     func isBindingOwned(by ownerID: UUID) -> Bool {
         bindingOwnerID == ownerID && asyncCaller != nil
+    }
+
+    /// Runs a native-authorized operation with an exact number of one-shot
+    /// admissions for the page messages it is expected to emit. Any unused
+    /// admissions are revoked immediately when the operation returns.
+    public func withTrustedUserActionAdmissions<Result>(
+        action: String,
+        count: Int,
+        in frame: WKFrameInfo?,
+        operation: () async throws -> Result
+    ) async throws -> Result {
+        guard count > 0,
+              let trustedUserActionAdmissionIssuer,
+              let trustedUserActionAdmissionRevoker else {
+            throw ScriptCallerError.evaluationTimedOut
+        }
+        let ids = trustedUserActionAdmissionIssuer(action, count, frame)
+        guard ids.count == count else {
+            throw ScriptCallerError.evaluationTimedOut
+        }
+        defer { trustedUserActionAdmissionRevoker(ids) }
+        return try await operation()
     }
     
     private var multiTargetFrames = [String: WKFrameInfo]()
@@ -9904,13 +10200,33 @@ extension WebView {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
             // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
             userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
+            userContentController.removeScriptMessageHandler(
+                forName: messageHandlerName,
+                contentWorld: WebViewTrustedUserActionBroker.world
+            )
+            let contentWorld = messageHandlerName
+                == WebViewTrustedUserActionBroker.handlerName
+                ? WebViewTrustedUserActionBroker.world
+                : .page
+            userContentController.add(
+                context.coordinator,
+                contentWorld: contentWorld,
+                name: messageHandlerName
+            )
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
         
         // Remove any no-longer-needed handlers.
         for missing in context.coordinator.registeredMessageHandlerNames.subtracting(requiredHandlers) {
             userContentController.removeScriptMessageHandler(forName: missing)
+            userContentController.removeScriptMessageHandler(
+                forName: missing,
+                contentWorld: .page
+            )
+            userContentController.removeScriptMessageHandler(
+                forName: missing,
+                contentWorld: WebViewTrustedUserActionBroker.world
+            )
             context.coordinator.registeredMessageHandlerNames.remove(missing)
         }
     }
@@ -9971,6 +10287,8 @@ extension WebView {
     }
     
     @MainActor fileprivate static let systemScripts = [
+        WebViewTrustedUserActionBroker.userScript,
+        WebViewTrustedUserActionBroker.pageCorrelationUserScript,
         WebViewBackgroundStatusUserScript().userScript,
         LocationChangeUserScript().userScript,
         ImageChangeUserScript().userScript,
@@ -9980,6 +10298,7 @@ extension WebView {
     ]
     
     fileprivate static let systemMessageHandlers: [String] = [
+        WebViewTrustedUserActionBroker.handlerName,
         "swiftUIWebViewBackgroundStatus",
         "swiftUIWebViewLocationChanged",
         "swiftUIWebViewImageUpdated",
