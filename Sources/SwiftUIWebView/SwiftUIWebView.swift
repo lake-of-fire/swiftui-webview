@@ -4655,8 +4655,9 @@ extension WebViewCoordinator: WKScriptMessageHandler {
               ) else {
             return
         }
-        let trustedUserAction = messageHandlers
+        let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
+        let trustedUserAction = acceptsTrustedUserAction
             ? trustedUserActionAdmissions.consume(
                 action: message.name,
                 document: .init(
@@ -4666,6 +4667,58 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 frameInfo: message.frameInfo
             )
             : nil
+        if acceptsTrustedUserAction, trustedUserAction == nil {
+            // Isolated- and page-world script messages use independent WebKit
+            // delivery queues. The page command can therefore arrive just
+            // before the isolated-world activation that its capture listener
+            // posted first. Give that broker receipt one main-actor turn to
+            // land, then consume it against the same document and frame.
+            let handlerName = message.name
+            let frameInfo = message.frameInfo
+            let body = message.body
+            let javaScriptBindingToken = javaScriptBindingToken(
+                for: message.webView
+            )
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self,
+                      self.ownsDocumentCallbackContext(documentContext) else {
+                    return
+                }
+                let delayedTrustedUserAction = self
+                    .trustedUserActionAdmissions.consume(
+                        action: handlerName,
+                        document: .init(
+                            webViewID: documentContext.webViewID,
+                            generation: documentContext.generation
+                        ),
+                        frameInfo: frameInfo
+                    )
+                guard delayedTrustedUserAction != nil
+                    || !self.messageHandlers
+                        .requiredTrustedUserActionHandlerNames
+                        .contains(handlerName) else {
+                    return
+                }
+                let delayedMessage = WebViewMessage(
+                    frameInfo: frameInfo,
+                    uuid: UUID(),
+                    name: handlerName,
+                    body: body,
+                    receiptSequence: WebViewMessageReceiptSequencer.reserve(),
+                    javaScriptBindingToken: javaScriptBindingToken,
+                    trustedUserAction: delayedTrustedUserAction
+                )
+                self.scheduleDocumentMessageHandler(
+                    messageHandler,
+                    message: delayedMessage,
+                    context: documentContext,
+                    cancellationHandler:
+                        self.messageHandlers.cancellationHandlers[handlerName]
+                )
+            }
+            return
+        }
         guard trustedUserAction != nil
             || !messageHandlers.requiredTrustedUserActionHandlerNames
                 .contains(message.name) else {
