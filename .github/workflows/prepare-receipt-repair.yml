@@ -1,0 +1,45 @@
+name: Prepare receipt repair
+on:
+  push:
+    branches: [review/prepare-receipt-repair-20260919]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build a clean product commit from the exact Reader pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=6628f7244d527959869a54f5f76b88a8aa845ebd
+          git worktree add --detach "$RUNNER_TEMP/receipt-product" "$base"
+          python3 review-payload/apply.py "$RUNNER_TEMP/receipt-product"
+          cd "$RUNNER_TEMP/receipt-product"
+          swift --version
+          swiftc -frontend -parse Sources/SwiftUIWebView/SwiftUIWebView.swift Sources/SwiftUIWebView/WebViewMessageReceiptEvidence.swift
+          swiftc Sources/SwiftUIWebView/WebViewMessageReceiptEvidence.swift dev/receipt-evidence/ReceiptHarness.swift -o "$RUNNER_TEMP/receipt-debug"
+          "$RUNNER_TEMP/receipt-debug"
+          swiftc -O Sources/SwiftUIWebView/WebViewMessageReceiptEvidence.swift dev/receipt-evidence/ReceiptHarness.swift -o "$RUNNER_TEMP/receipt-release"
+          "$RUNNER_TEMP/receipt-release"
+          plutil -lint SwiftUIWebView.xcodeproj/project.pbxproj
+          git diff --check
+          git add Sources Tests dev SwiftUIWebView.xcodeproj/project.pbxproj
+          tree=$(git write-tree)
+          export GIT_AUTHOR_NAME='github-actions[bot]' GIT_COMMITTER_NAME='github-actions[bot]'
+          export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+          commit=$(printf '%s\n' 'Capture immutable app evidence before deferred WebView delivery' | git commit-tree "$tree" -p "$base")
+          git push origin "$commit:refs/heads/fix/message-receipt-evidence-20260919"
+          printf '%s\n%s\n' "$commit" "$tree" > "$RUNNER_TEMP/receipt-product-identity.txt"
+          git archive "$commit" Sources Tests dev SwiftUIWebView.xcodeproj/project.pbxproj > "$RUNNER_TEMP/receipt-product.tar"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-receipt-repair-source
+          path: |
+            ${{ runner.temp }}/receipt-product.tar
+            ${{ runner.temp }}/receipt-product-identity.txt
+          retention-days: 7
