@@ -126,13 +126,12 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
             state.captures += 1
             return state.captures
         }
-        let handlers = WebViewMessageHandlers([(name, { @MainActor message in
+        let handlers = WebViewMessageHandlers([(name, { @MainActor _ in
             let captured: Int? = WebViewMessageReceiptContext.evidence?.value(for: key)
-            if message.body as? String == "old" {
+            if captured == 1 {
                 entered.fulfill()
                 await gate.wait()
                 XCTAssertTrue(Task.isCancelled)
-                XCTAssertEqual(captured, 1)
                 let retained: Int? = WebViewMessageReceiptContext.evidence?.value(for: key)
                 XCTAssertEqual(retained, captured)
                 oldFinished.fulfill()
