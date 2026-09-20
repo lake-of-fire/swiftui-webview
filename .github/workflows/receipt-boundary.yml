@@ -1,0 +1,48 @@
+name: Receipt boundary regression
+on:
+  pull_request:
+    paths: ['Sources/**', 'Tests/**', 'dev/receipt-evidence/**', '.github/workflows/receipt-boundary.yml']
+permissions:
+  contents: read
+jobs:
+  negative-control:
+    if: github.head_ref == 'fix/message-receipt-evidence-20260919'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run unchanged dispatch regressions against pre-fix scheduler
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
+          mkdir -p "$RUNNER_TEMP/receipt-control"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/receipt-control/identity.txt"
+          git hash-object Tests/SwiftUIWebViewTests/WebViewReceiptDispatchTests.swift >> "$RUNNER_TEMP/receipt-control/identity.txt"
+          git restore --source=6628f7244d527959869a54f5f76b88a8aa845ebd -- Sources/SwiftUIWebView/SwiftUIWebView.swift
+          set +e
+          swift test --disable-experimental-prebuilts --filter WebViewReceiptDispatchTests > "$RUNNER_TEMP/receipt-control/tests.log" 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          log = Path(os.environ['RUNNER_TEMP'], 'receipt-control/tests.log').read_text()
+          expected = {'testOrdinaryReceiptKeepsItsPreDispatchLifetime', 'testBrokerDeferralKeepsTheOriginalReceiptLifetime'}
+          failed = set(re.findall(r"Test Case '-\[.*?WebViewReceiptDispatchTests (\w+)\]' failed", log))
+          assert failed == expected, (failed, log[-6000:])
+          assert re.search(r'Executed 2 tests, with \d+ failures \(0 unexpected\)', log), log[-6000:]
+          assert 'Asynchronous wait failed' not in log, 'A WebKit timeout is not the intended negative control'
+          print('Confirmed both real receipt dispatch methods fail assertions on the pre-fix scheduler.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: receipt-boundary-negative-control
+          path: ${{ runner.temp }}/receipt-control/
+          retention-days: 7
