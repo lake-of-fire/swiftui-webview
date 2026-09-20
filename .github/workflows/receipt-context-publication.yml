@@ -1,0 +1,78 @@
+name: Receipt context publication
+on:
+  push:
+    branches: [automation/receipt-context-publication-20260920]
+permissions:
+  contents: write
+concurrency:
+  group: receipt-context-publication-20260920
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Verify original blobs, parse edits, and publish only the product branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request
+          repo = 'lake-of-fire/swiftui-webview'
+          base = '6be63abbb85bdbc9d736a02af347ddd6f6ea8208'
+          branch = 'fix/receipt-context-before-dispatch-20260920'
+          path = 'Sources/SwiftUIWebView/SwiftUIWebView.swift'
+          def api(method, route, value=None):
+              data = None if value is None else json.dumps(value).encode()
+              request = urllib.request.Request('https://api.github.com/repos/' + repo + '/' + route, data=data, method=method,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          def contents(file):
+              result = api('GET', 'contents/' + file + '?ref=' + base)
+              return base64.b64decode(result['content'])
+          original = contents(path)
+          original_sha = hashlib.sha1(b'blob ' + str(len(original)).encode() + b'\0' + original).hexdigest()
+          assert original_sha == '9fb866a117e9fcb6ea5d3e2a1e13955423af3dfe', original_sha
+          source = original.decode()
+          edits = [
+              ('    public let trustedUserAction: WebViewTrustedUserAction?\n',
+               '    public let trustedUserAction: WebViewTrustedUserAction?\n    public let receiptContext: WebViewMessageReceiptContext\n'),
+              ('        trustedUserAction: WebViewTrustedUserAction? = nil\n',
+               '        trustedUserAction: WebViewTrustedUserAction? = nil,\n        receiptContext: WebViewMessageReceiptContext? = nil\n'),
+              ('        self.trustedUserAction = trustedUserAction\n',
+               '        self.trustedUserAction = trustedUserAction\n        self.receiptContext = receiptContext ?? WebViewMessageReceiptCaptureRegistry.shared.capture(\n            WebViewMessageReceipt(name: name, requestURL: frameInfo.request.url, mainDocumentURL: frameInfo.request.mainDocumentURL)\n        )\n'),
+              ('            let javaScriptBindingToken = javaScriptBindingToken(\n                for: message.webView\n            )\n            Task { @MainActor [weak self] in\n',
+               '            let javaScriptBindingToken = javaScriptBindingToken(\n                for: message.webView\n            )\n            // Capture application evidence at receipt, before the broker wait.\n            // Delayed delivery must carry this exact snapshot, not recapture it.\n            let receiptContext = WebViewMessageReceiptCaptureRegistry.shared.capture(\n                WebViewMessageReceipt(name: handlerName, requestURL: frameInfo.request.url, mainDocumentURL: frameInfo.request.mainDocumentURL)\n            )\n            Task { @MainActor [weak self] in\n'),
+              ('                    trustedUserAction: delayedTrustedUserAction\n',
+               '                    trustedUserAction: delayedTrustedUserAction,\n                    receiptContext: receiptContext\n'),
+          ]
+          for old, new in edits:
+              assert source.count(old) == 1, ('non-unique anchor', source.count(old), old)
+              source = source.replace(old, new)
+          destination = pathlib.Path('receipt-publication')
+          destination.mkdir()
+          (destination / 'SwiftUIWebView.swift').write_text(source)
+          (destination / 'WebViewMessageReceiptContext.swift').write_bytes(contents('Sources/SwiftUIWebView/WebViewMessageReceiptContext.swift'))
+          subprocess.run(['swiftc', '-frontend', '-parse', str(destination / 'SwiftUIWebView.swift')], check=True)
+          subprocess.run(['swiftc', '-swift-version', '6', '-strict-concurrency=complete', '-typecheck', str(destination / 'WebViewMessageReceiptContext.swift')], check=True)
+          commit = api('GET', 'git/commits/' + base)
+          current = api('GET', 'git/ref/heads/' + branch)['object']['sha']
+          assert current == base, ('branch moved; reconcile before publishing', current)
+          blob = api('POST', 'git/blobs', {'content': source, 'encoding': 'utf-8'})['sha']
+          tree = api('POST', 'git/trees', {'base_tree': commit['tree']['sha'], 'tree': [{'path': path, 'mode': '100644', 'type': 'blob', 'sha': blob}]})['sha']
+          product = api('POST', 'git/commits', {'message': 'Capture application evidence before every native message dispatch suspension', 'tree': tree, 'parents': [base]})['sha']
+          api('PATCH', 'git/refs/heads/' + branch, {'sha': product, 'force': False})
+          receipt = {'base': base, 'original_blob': original_sha, 'product_blob': blob, 'tree': tree, 'commit': product,
+                     'checks': ['Swift frontend syntax parse', 'Swift 6 strict-concurrency receipt-context typecheck'],
+                     'not_claimed': ['full WebKit package build', 'native Core/Realm integration', 'Apple application E2E']}
+          (destination / 'publication.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt, indent=2))
+          PY
+      - name: Retain exact public source and publication receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: receipt-context-publication
+          path: receipt-publication/
+          retention-days: 14
