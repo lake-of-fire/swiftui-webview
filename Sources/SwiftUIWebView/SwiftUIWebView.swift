@@ -1380,6 +1380,7 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
     public let receiptSequence: UInt64?
     public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
     public let trustedUserAction: WebViewTrustedUserAction?
+    public let receiptContext: WebViewMessageReceiptContext
     public let isMainFrame: Bool
     public let requestURL: URL?
     public let mainDocumentURL: URL?
@@ -1392,7 +1393,8 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
         body: Any,
         receiptSequence: UInt64? = nil,
         javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
-        trustedUserAction: WebViewTrustedUserAction? = nil
+        trustedUserAction: WebViewTrustedUserAction? = nil,
+        receiptContext: WebViewMessageReceiptContext? = nil
     ) {
         self.frameInfo = frameInfo
         self.uuid = uuid
@@ -1401,6 +1403,9 @@ public struct WebViewMessage: Equatable, @unchecked Sendable {
         self.receiptSequence = receiptSequence
         self.javaScriptBindingToken = javaScriptBindingToken
         self.trustedUserAction = trustedUserAction
+        self.receiptContext = receiptContext ?? WebViewMessageReceiptCaptureRegistry.shared.capture(
+            WebViewMessageReceipt(name: name, requestURL: frameInfo.request.url, mainDocumentURL: frameInfo.request.mainDocumentURL)
+        )
         self.isMainFrame = frameInfo.isMainFrame
         self.requestURL = frameInfo.request.url
         self.mainDocumentURL = frameInfo.request.mainDocumentURL
@@ -4679,6 +4684,11 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let javaScriptBindingToken = javaScriptBindingToken(
                 for: message.webView
             )
+            // Capture application evidence at receipt, before the broker wait.
+            // Delayed delivery must carry this exact snapshot, not recapture it.
+            let receiptContext = WebViewMessageReceiptCaptureRegistry.shared.capture(
+                WebViewMessageReceipt(name: handlerName, requestURL: frameInfo.request.url, mainDocumentURL: frameInfo.request.mainDocumentURL)
+            )
             Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self,
@@ -4707,7 +4717,8 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     body: body,
                     receiptSequence: WebViewMessageReceiptSequencer.reserve(),
                     javaScriptBindingToken: javaScriptBindingToken,
-                    trustedUserAction: delayedTrustedUserAction
+                    trustedUserAction: delayedTrustedUserAction,
+                    receiptContext: receiptContext
                 )
                 self.scheduleDocumentMessageHandler(
                     messageHandler,
