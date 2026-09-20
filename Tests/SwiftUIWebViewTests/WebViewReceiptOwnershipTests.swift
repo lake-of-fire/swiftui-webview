@@ -55,7 +55,7 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
             if state.captures == 1 { state.lifetime = 2 }
             return observed
         }
-        var handlers = WebViewMessageHandlers([(name, { @MainActor _ in
+        let handler: @Sendable (WebViewMessage) async -> Void = { @MainActor _ in
             let observed: Int? = WebViewMessageReceiptContext.evidence?.value(for: key)
             if let observed {
                 state.received.append(observed)
@@ -63,7 +63,8 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
                 if observed == state.lifetime { state.committed.append(observed) }
             }
             if state.captures == 1 { first.fulfill() } else { fresh.fulfill() }
-        })])
+        }
+        var handlers = WebViewMessageHandlers([(name, handler)])
         if brokerDeferred { handlers = handlers.acceptingTrustedUserAction(name) }
         try await withWebView(name: name, handlers: handlers) { view in
             view.loadHTMLString(htmlPosting(name: name, body: "old"), baseURL: testURL)
@@ -90,7 +91,7 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
             names.contains(receipt.name) ? receipt.name : nil
         }
         func handlers(_ name: String) -> WebViewMessageHandlers {
-            WebViewMessageHandlers([(name, { @MainActor _ in
+            let handler: @Sendable (WebViewMessage) async -> Void = { @MainActor _ in
                 let before: String? = WebViewMessageReceiptContext.evidence?.value(for: key)
                 entered.fulfill()
                 await gate.wait()
@@ -98,7 +99,8 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
                 XCTAssertEqual(before, name)
                 XCTAssertEqual(after, name)
                 finished.fulfill()
-            })]).acceptingTrustedUserAction(name)
+            }
+            return WebViewMessageHandlers([(name, handler)]).acceptingTrustedUserAction(name)
         }
         try await withWebView(name: names[0], handlers: handlers(names[0])) { first in
             try await withWebView(name: names[1], handlers: handlers(names[1])) { second in
@@ -126,7 +128,7 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
             state.captures += 1
             return state.captures
         }
-        let handlers = WebViewMessageHandlers([(name, { @MainActor _ in
+        let handler: @Sendable (WebViewMessage) async -> Void = { @MainActor _ in
             let captured: Int? = WebViewMessageReceiptContext.evidence?.value(for: key)
             if captured == 1 {
                 entered.fulfill()
@@ -141,7 +143,8 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
             XCTAssertEqual(captured, 2)
             if let captured { state.committed.append(captured) }
             fresh.fulfill()
-        })])
+        }
+        let handlers = WebViewMessageHandlers([(name, handler)])
         try await withWebView(name: name, handlers: handlers) { view in
             view.loadHTMLString(htmlPosting(name: name, body: "old"), baseURL: testURL)
             await fulfillment(of: [entered], timeout: 10)
@@ -159,11 +162,12 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
         let name = uniqueName()
         let missingKey = "test.unregistered." + name
         let delivered = expectation(description: "unregistered provider delivery")
-        let handlers = WebViewMessageHandlers([(name, { @MainActor _ in
+        let handler: @Sendable (WebViewMessage) async -> Void = { @MainActor _ in
             let missing: Int? = WebViewMessageReceiptContext.evidence?.value(for: missingKey)
             XCTAssertNil(missing)
             delivered.fulfill()
-        })])
+        }
+        let handlers = WebViewMessageHandlers([(name, handler)])
         try await withWebView(name: name, handlers: handlers) { view in
             view.loadHTMLString(htmlPosting(name: name, body: "missing"), baseURL: testURL)
             await fulfillment(of: [delivered], timeout: 10)
