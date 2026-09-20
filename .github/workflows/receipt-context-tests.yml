@@ -1,0 +1,45 @@
+name: Native receipt context qualification
+on:
+  pull_request:
+    paths:
+      - 'Sources/SwiftUIWebView/**'
+      - 'Tests/SwiftUIWebViewTests/**'
+      - 'Package.swift'
+      - '.github/workflows/receipt-context-tests.yml'
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - name: Record exact source and toolchain
+        run: |
+          git rev-parse HEAD HEAD^{tree}
+          xcodebuild -version
+          swift --version
+      - name: Receipt context regressions
+        run: |
+          set -o pipefail
+          swift test --disable-experimental-prebuilts --filter WebViewMessageReceiptContextTests 2>&1 | tee receipt-tests.log
+      - name: Full native package tests
+        run: |
+          set -o pipefail
+          swift test --disable-experimental-prebuilts 2>&1 | tee full-tests.log
+      - name: Assert unchanged tracked source
+        if: always()
+        run: git diff --exit-code -- . ':!Package.resolved'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-receipt-test-evidence
+          path: |
+            receipt-tests.log
+            full-tests.log
+          retention-days: 14
