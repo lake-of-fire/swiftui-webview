@@ -3506,6 +3506,7 @@ public class WebViewCoordinator: NSObject {
         _ handler: @Sendable @escaping (WebViewMessage) async -> Void,
         message: WebViewMessage,
         context: WebViewDocumentCallbackContext,
+        receiptEvidence: WebViewMessageReceiptEvidence,
         cancellationHandler: (@MainActor @Sendable (WebViewMessage) -> Void)?
     ) {
         let taskID = UUID()
@@ -3518,7 +3519,9 @@ public class WebViewCoordinator: NSObject {
                 self?.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
                 return
             }
-            await handler(message)
+            await WebViewMessageReceiptContext.$evidence.withValue(receiptEvidence) {
+                await handler(message)
+            }
             self.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
         }
         pendingDocumentCallbackTasks[taskID] = WebViewPendingDocumentCallbackTask(
@@ -4655,6 +4658,13 @@ extension WebViewCoordinator: WKScriptMessageHandler {
               ) else {
             return
         }
+        // Capture application evidence at receipt, before either the broker's
+        // deferred admission or the handler scheduler can suspend this event.
+        let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
+            name: message.name,
+            mainDocumentURL: message.frameInfo.request.mainDocumentURL,
+            requestURL: message.frameInfo.request.url
+        ))
         let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
         let trustedUserAction = acceptsTrustedUserAction
@@ -4713,6 +4723,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     messageHandler,
                     message: delayedMessage,
                     context: documentContext,
+                    receiptEvidence: receiptEvidence,
                     cancellationHandler:
                         self.messageHandlers.cancellationHandlers[handlerName]
                 )
@@ -4738,6 +4749,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             messageHandler,
             message: message,
             context: documentContext,
+            receiptEvidence: receiptEvidence,
             cancellationHandler: messageHandlers.cancellationHandlers[message.name]
         )
     }
