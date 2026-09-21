@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A71E119A5B7439109F02EA10 /* WebViewMessageReceiptEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71E119A5B7439109F02EA11 /* WebViewMessageReceiptEvidence.swift */; };
 		0B2392A28EF98970076AF683 /* URL+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D4EA4CD28D693B0668236E4 /* URL+Extensions.swift */; };
 		0E0093EC8AACF04A5335025A /* OrderedCollections.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */; };
 		15E27763AC3FD99059EDCF02 /* OrderedCollections.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */; };
@@ -15,20 +16,30 @@
 		27760E30BD1EF933EAEC654E /* WebViewUserScriptSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B284CD7AB3E4A6FECEFBD /* WebViewUserScriptSignatureTests.swift */; };
 		296A5C9B83011F286947821E /* WebViewPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */; };
 		2A875882342499CCD28D95B4 /* LRUCache.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */; };
+		4C406E4EBEB81A04DDF5E164 /* WebViewSnapshotFencingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A55688CE2895C9B4AE3E6453 /* WebViewSnapshotFencingTests.swift */; };
 		4F2FCDCE348DFDB9B0370603 /* WebViewReaderLoadActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4CCB07EB8E6A98787E27D /* WebViewReaderLoadActivityTests.swift */; };
 		536542C1F706C4446944F798 /* WebViewReaderDocumentSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC2F71C4E7379238D7D59B7E /* WebViewReaderDocumentSummaryTests.swift */; };
+		640EFA77E57305824653ACB6 /* WebViewTrustedUserAction+SemanticEquality.swift in Sources */ = {isa = PBXBuildFile; fileRef = 320E3388E2F49A32675C648F /* WebViewTrustedUserAction+SemanticEquality.swift */; };
 		69EA6DB8E8AA0F5A6FC7FD64 /* WebViewScriptCallerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD33BAFE851DB6ADB1ABA778 /* WebViewScriptCallerTests.swift */; };
+		7104AD231447BB7B11742121 /* WebViewMainFrameAliasRetentionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FEF73E882598B637C36AD83 /* WebViewMainFrameAliasRetentionTests.swift */; };
 		759A02D660572A6EA0BA5FD7 /* WebViewPaginationConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF3A2C3139BE70BADA5B7688 /* WebViewPaginationConfigurationTests.swift */; };
 		7D8929A1D45F572241643B12 /* PendingRequestLoadDispositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5669F5811D929F206DA245B6 /* PendingRequestLoadDispositionTests.swift */; };
 		88894AAA54335F8B113F4143 /* WebViewSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C42A17D319B90B34692D48F /* WebViewSnapshotTests.swift */; };
 		8BED3B1087F6F21CA8927C88 /* WebViewTrustedUserActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EA4FFD79230462EBAEFF1D2 /* WebViewTrustedUserActionTests.swift */; };
 		946046018ED22AB00D3E397C /* WebViewCoordinator+UIScrollViewDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7EA0A7C68D5B7948DEDFE82 /* WebViewCoordinator+UIScrollViewDelegate.swift */; };
 		9DBC7CB085D9127313D024E7 /* LoadingProgressPublicationStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2DC59391F12A600628BF2C9 /* LoadingProgressPublicationStateTests.swift */; };
+		A10B508D67B583D7BCEC76A3 /* WebViewInvalidFrameRetirementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A4CB8A44C283E1CAD2098A7 /* WebViewInvalidFrameRetirementTests.swift */; };
+		A6BFCC2C3C19F58AAF8C398A /* WebViewTrustedUserActionSemanticEqualityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 928ABF89B3AC047F601BD730 /* WebViewTrustedUserActionSemanticEqualityTests.swift */; };
 		ACC1F3256AEBACFE3D690182 /* WebViewNativeLookupHitTestStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C8C8A06C034C6BF5228BD44 /* WebViewNativeLookupHitTestStoreTests.swift */; };
+		ACC49923CFF8E00762642F53 /* WebViewDocumentEpochEvaluationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6B7F2460919A67EF5811A65 /* WebViewDocumentEpochEvaluationTests.swift */; };
+		AD076550F53976E9F3DA59A8 /* WebViewAggregateFrameResultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CEF62CFFCCE1A73F4875072 /* WebViewAggregateFrameResultTests.swift */; };
+		D0010E9E5E9E03AB91B812BE /* WebViewFrameIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F158BCA91A59AA18C1AEAED /* WebViewFrameIdentityTests.swift */; };
 		D100DDEDB12F576F423CD44A /* URLSchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */; };
 		D729627185622A03A7F6E2E5 /* WebViewPoolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A330AA9D15C974C1BD2F50E1 /* WebViewPoolTests.swift */; };
 		D905CEF40AF7B3A9BF88F462 /* WebViewScrollOwnershipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F88EC4B8FFA8E7D98B247BF3 /* WebViewScrollOwnershipTests.swift */; };
 		E78DF249FE340E7FAA50C0DF /* PDFJS.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9A1922746100196C740DDA9 /* PDFJS.swift */; };
+		E9A16206C5AC181B3FD7E28D /* WebViewCoercionErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E058370BF4430E16415AFBF6 /* WebViewCoercionErrorTests.swift */; };
+		EAAD4EAB6FB98E721C5590A7 /* WebViewDispatchFencingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2DCC4AB3557662EF2932667 /* WebViewDispatchFencingTests.swift */; };
 		F3844FB495612D33AF7299C6 /* LoadingProgressPublicationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF791FBD9A0E3DC0624346B5 /* LoadingProgressPublicationState.swift */; };
 		F3A5ED5A17EBCFD6DDB0FF48 /* WebViewTrustedUserAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75D2FDA5CD1913B616878B15 /* WebViewTrustedUserAction.swift */; };
 		FC0C82B773005F81D6E6F7B6 /* SwiftUIWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B50D26B28AAC13E05CE7C2F /* SwiftUIWebView.swift */; };
@@ -68,19 +79,29 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A71E119A5B7439109F02EA11 /* WebViewMessageReceiptEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewMessageReceiptEvidence.swift; sourceTree = "<group>"; };
 		00F4CCB07EB8E6A98787E27D /* WebViewReaderLoadActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewReaderLoadActivityTests.swift; sourceTree = "<group>"; };
 		0D4EA4CD28D693B0668236E4 /* URL+Extensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "URL+Extensions.swift"; sourceTree = "<group>"; };
 		1322E9EFFD0AA29B28C6C660 /* LRUCache.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = LRUCache.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewPool.swift; sourceTree = "<group>"; };
 		1C42A17D319B90B34692D48F /* WebViewSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewSnapshotTests.swift; sourceTree = "<group>"; };
 		1E1B284CD7AB3E4A6FECEFBD /* WebViewUserScriptSignatureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewUserScriptSignatureTests.swift; sourceTree = "<group>"; };
+		1FEF73E882598B637C36AD83 /* WebViewMainFrameAliasRetentionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewMainFrameAliasRetentionTests.swift; sourceTree = "<group>"; };
+		320E3388E2F49A32675C648F /* WebViewTrustedUserAction+SemanticEquality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WebViewTrustedUserAction+SemanticEquality.swift"; sourceTree = "<group>"; };
 		3B50D26B28AAC13E05CE7C2F /* SwiftUIWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIWebView.swift; sourceTree = "<group>"; };
+		4A4CB8A44C283E1CAD2098A7 /* WebViewInvalidFrameRetirementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewInvalidFrameRetirementTests.swift; sourceTree = "<group>"; };
 		4EFDA511EF8EDB9F5158E0E7 /* SwiftUIWebView.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SwiftUIWebView.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		5669F5811D929F206DA245B6 /* PendingRequestLoadDispositionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingRequestLoadDispositionTests.swift; sourceTree = "<group>"; };
 		6C8C8A06C034C6BF5228BD44 /* WebViewNativeLookupHitTestStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewNativeLookupHitTestStoreTests.swift; sourceTree = "<group>"; };
 		6EA4FFD79230462EBAEFF1D2 /* WebViewTrustedUserActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewTrustedUserActionTests.swift; sourceTree = "<group>"; };
 		75D2FDA5CD1913B616878B15 /* WebViewTrustedUserAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewTrustedUserAction.swift; sourceTree = "<group>"; };
+		7CEF62CFFCCE1A73F4875072 /* WebViewAggregateFrameResultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewAggregateFrameResultTests.swift; sourceTree = "<group>"; };
+		7F158BCA91A59AA18C1AEAED /* WebViewFrameIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewFrameIdentityTests.swift; sourceTree = "<group>"; };
+		928ABF89B3AC047F601BD730 /* WebViewTrustedUserActionSemanticEqualityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewTrustedUserActionSemanticEqualityTests.swift; sourceTree = "<group>"; };
+		A2DCC4AB3557662EF2932667 /* WebViewDispatchFencingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewDispatchFencingTests.swift; sourceTree = "<group>"; };
 		A330AA9D15C974C1BD2F50E1 /* WebViewPoolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewPoolTests.swift; sourceTree = "<group>"; };
+		A55688CE2895C9B4AE3E6453 /* WebViewSnapshotFencingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewSnapshotFencingTests.swift; sourceTree = "<group>"; };
+		A6B7F2460919A67EF5811A65 /* WebViewDocumentEpochEvaluationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewDocumentEpochEvaluationTests.swift; sourceTree = "<group>"; };
 		A7EA0A7C68D5B7948DEDFE82 /* WebViewCoordinator+UIScrollViewDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "WebViewCoordinator+UIScrollViewDelegate.swift"; sourceTree = "<group>"; };
 		AF3A2C3139BE70BADA5B7688 /* WebViewPaginationConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewPaginationConfigurationTests.swift; sourceTree = "<group>"; };
 		B11FE1C7DAC064739E298FC0 /* OrderedCollections.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OrderedCollections.framework; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -93,6 +114,7 @@
 		CF791FBD9A0E3DC0624346B5 /* LoadingProgressPublicationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingProgressPublicationState.swift; sourceTree = "<group>"; };
 		DC2F71C4E7379238D7D59B7E /* WebViewReaderDocumentSummaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewReaderDocumentSummaryTests.swift; sourceTree = "<group>"; };
 		DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSchemeHandler.swift; sourceTree = "<group>"; };
+		E058370BF4430E16415AFBF6 /* WebViewCoercionErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewCoercionErrorTests.swift; sourceTree = "<group>"; };
 		F88EC4B8FFA8E7D98B247BF3 /* WebViewScrollOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewScrollOwnershipTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -124,6 +146,13 @@
 			children = (
 				C2DC59391F12A600628BF2C9 /* LoadingProgressPublicationStateTests.swift */,
 				5669F5811D929F206DA245B6 /* PendingRequestLoadDispositionTests.swift */,
+				7CEF62CFFCCE1A73F4875072 /* WebViewAggregateFrameResultTests.swift */,
+				E058370BF4430E16415AFBF6 /* WebViewCoercionErrorTests.swift */,
+				A2DCC4AB3557662EF2932667 /* WebViewDispatchFencingTests.swift */,
+				A6B7F2460919A67EF5811A65 /* WebViewDocumentEpochEvaluationTests.swift */,
+				7F158BCA91A59AA18C1AEAED /* WebViewFrameIdentityTests.swift */,
+				4A4CB8A44C283E1CAD2098A7 /* WebViewInvalidFrameRetirementTests.swift */,
+				1FEF73E882598B637C36AD83 /* WebViewMainFrameAliasRetentionTests.swift */,
 				6C8C8A06C034C6BF5228BD44 /* WebViewNativeLookupHitTestStoreTests.swift */,
 				AF3A2C3139BE70BADA5B7688 /* WebViewPaginationConfigurationTests.swift */,
 				A330AA9D15C974C1BD2F50E1 /* WebViewPoolTests.swift */,
@@ -131,7 +160,9 @@
 				00F4CCB07EB8E6A98787E27D /* WebViewReaderLoadActivityTests.swift */,
 				BD33BAFE851DB6ADB1ABA778 /* WebViewScriptCallerTests.swift */,
 				F88EC4B8FFA8E7D98B247BF3 /* WebViewScrollOwnershipTests.swift */,
+				A55688CE2895C9B4AE3E6453 /* WebViewSnapshotFencingTests.swift */,
 				1C42A17D319B90B34692D48F /* WebViewSnapshotTests.swift */,
+				928ABF89B3AC047F601BD730 /* WebViewTrustedUserActionSemanticEqualityTests.swift */,
 				6EA4FFD79230462EBAEFF1D2 /* WebViewTrustedUserActionTests.swift */,
 				1E1B284CD7AB3E4A6FECEFBD /* WebViewUserScriptSignatureTests.swift */,
 			);
@@ -179,11 +210,13 @@
 				CF791FBD9A0E3DC0624346B5 /* LoadingProgressPublicationState.swift */,
 				C9A1922746100196C740DDA9 /* PDFJS.swift */,
 				3B50D26B28AAC13E05CE7C2F /* SwiftUIWebView.swift */,
+				A71E119A5B7439109F02EA11 /* WebViewMessageReceiptEvidence.swift */,
 				0D4EA4CD28D693B0668236E4 /* URL+Extensions.swift */,
 				DF3B9B1DC6923255F411B84A /* URLSchemeHandler.swift */,
 				A7EA0A7C68D5B7948DEDFE82 /* WebViewCoordinator+UIScrollViewDelegate.swift */,
 				1AC2B3BB8218265D8EED28EA /* WebViewPool.swift */,
 				75D2FDA5CD1913B616878B15 /* WebViewTrustedUserAction.swift */,
+				320E3388E2F49A32675C648F /* WebViewTrustedUserAction+SemanticEquality.swift */,
 			);
 			path = SwiftUIWebView;
 			sourceTree = "<group>";
@@ -313,6 +346,13 @@
 			files = (
 				9DBC7CB085D9127313D024E7 /* LoadingProgressPublicationStateTests.swift in Sources */,
 				7D8929A1D45F572241643B12 /* PendingRequestLoadDispositionTests.swift in Sources */,
+				AD076550F53976E9F3DA59A8 /* WebViewAggregateFrameResultTests.swift in Sources */,
+				E9A16206C5AC181B3FD7E28D /* WebViewCoercionErrorTests.swift in Sources */,
+				EAAD4EAB6FB98E721C5590A7 /* WebViewDispatchFencingTests.swift in Sources */,
+				ACC49923CFF8E00762642F53 /* WebViewDocumentEpochEvaluationTests.swift in Sources */,
+				D0010E9E5E9E03AB91B812BE /* WebViewFrameIdentityTests.swift in Sources */,
+				A10B508D67B583D7BCEC76A3 /* WebViewInvalidFrameRetirementTests.swift in Sources */,
+				7104AD231447BB7B11742121 /* WebViewMainFrameAliasRetentionTests.swift in Sources */,
 				ACC1F3256AEBACFE3D690182 /* WebViewNativeLookupHitTestStoreTests.swift in Sources */,
 				759A02D660572A6EA0BA5FD7 /* WebViewPaginationConfigurationTests.swift in Sources */,
 				D729627185622A03A7F6E2E5 /* WebViewPoolTests.swift in Sources */,
@@ -320,7 +360,9 @@
 				4F2FCDCE348DFDB9B0370603 /* WebViewReaderLoadActivityTests.swift in Sources */,
 				69EA6DB8E8AA0F5A6FC7FD64 /* WebViewScriptCallerTests.swift in Sources */,
 				D905CEF40AF7B3A9BF88F462 /* WebViewScrollOwnershipTests.swift in Sources */,
+				4C406E4EBEB81A04DDF5E164 /* WebViewSnapshotFencingTests.swift in Sources */,
 				88894AAA54335F8B113F4143 /* WebViewSnapshotTests.swift in Sources */,
+				A6BFCC2C3C19F58AAF8C398A /* WebViewTrustedUserActionSemanticEqualityTests.swift in Sources */,
 				8BED3B1087F6F21CA8927C88 /* WebViewTrustedUserActionTests.swift in Sources */,
 				27760E30BD1EF933EAEC654E /* WebViewUserScriptSignatureTests.swift in Sources */,
 			);
@@ -333,10 +375,12 @@
 				F3844FB495612D33AF7299C6 /* LoadingProgressPublicationState.swift in Sources */,
 				E78DF249FE340E7FAA50C0DF /* PDFJS.swift in Sources */,
 				FC0C82B773005F81D6E6F7B6 /* SwiftUIWebView.swift in Sources */,
+				A71E119A5B7439109F02EA10 /* WebViewMessageReceiptEvidence.swift in Sources */,
 				0B2392A28EF98970076AF683 /* URL+Extensions.swift in Sources */,
 				D100DDEDB12F576F423CD44A /* URLSchemeHandler.swift in Sources */,
 				946046018ED22AB00D3E397C /* WebViewCoordinator+UIScrollViewDelegate.swift in Sources */,
 				296A5C9B83011F286947821E /* WebViewPool.swift in Sources */,
+				640EFA77E57305824653ACB6 /* WebViewTrustedUserAction+SemanticEquality.swift in Sources */,
 				F3A5ED5A17EBCFD6DDB0FF48 /* WebViewTrustedUserAction.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

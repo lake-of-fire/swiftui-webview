@@ -3487,6 +3487,9 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func invalidateDocumentCallbackContext() {
+        scriptCaller?.invalidateJavaScriptBindingCommitFence(
+            ownedBy: scriptCallerBindingOwnerID
+        )
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = false
         trustedUserActionAdmissions.invalidateAll()
@@ -3496,6 +3499,9 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     private func activateDocumentCallbackContext(for sourceWebView: WKWebView) {
         guard ownsWebView(sourceWebView) else { return }
+        scriptCaller?.invalidateJavaScriptBindingCommitFence(
+            ownedBy: scriptCallerBindingOwnerID
+        )
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = true
         trustedUserActionAdmissions.invalidateAll()
@@ -3506,6 +3512,7 @@ public class WebViewCoordinator: NSObject {
         _ handler: @Sendable @escaping (WebViewMessage) async -> Void,
         message: WebViewMessage,
         context: WebViewDocumentCallbackContext,
+        receiptEvidence: WebViewMessageReceiptEvidence,
         cancellationHandler: (@MainActor @Sendable (WebViewMessage) -> Void)?
     ) {
         let taskID = UUID()
@@ -3518,7 +3525,9 @@ public class WebViewCoordinator: NSObject {
                 self?.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
                 return
             }
-            await handler(message)
+            await WebViewMessageReceiptContext.$evidence.withValue(receiptEvidence) {
+                await handler(message)
+            }
             self.pendingDocumentCallbackTasks.removeValue(forKey: taskID)
         }
         pendingDocumentCallbackTasks[taskID] = WebViewPendingDocumentCallbackTask(
@@ -4655,8 +4664,16 @@ extension WebViewCoordinator: WKScriptMessageHandler {
               ) else {
             return
         }
-        let trustedUserAction = messageHandlers
+        // Capture application evidence at receipt, before either the broker's
+        // deferred admission or the handler scheduler can suspend this event.
+        let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
+            name: message.name,
+            mainDocumentURL: message.frameInfo.request.mainDocumentURL,
+            requestURL: message.frameInfo.request.url
+        ))
+        let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
+        let trustedUserAction = acceptsTrustedUserAction
             ? trustedUserActionAdmissions.consume(
                 action: message.name,
                 document: .init(
@@ -4666,6 +4683,59 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 frameInfo: message.frameInfo
             )
             : nil
+        if acceptsTrustedUserAction, trustedUserAction == nil {
+            // Isolated- and page-world script messages use independent WebKit
+            // delivery queues. The page command can therefore arrive just
+            // before the isolated-world activation that its capture listener
+            // posted first. Give that broker receipt one main-actor turn to
+            // land, then consume it against the same document and frame.
+            let handlerName = message.name
+            let frameInfo = message.frameInfo
+            let body = message.body
+            let javaScriptBindingToken = javaScriptBindingToken(
+                for: message.webView
+            )
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self,
+                      self.ownsDocumentCallbackContext(documentContext) else {
+                    return
+                }
+                let delayedTrustedUserAction = self
+                    .trustedUserActionAdmissions.consume(
+                        action: handlerName,
+                        document: .init(
+                            webViewID: documentContext.webViewID,
+                            generation: documentContext.generation
+                        ),
+                        frameInfo: frameInfo
+                    )
+                guard delayedTrustedUserAction != nil
+                    || !self.messageHandlers
+                        .requiredTrustedUserActionHandlerNames
+                        .contains(handlerName) else {
+                    return
+                }
+                let delayedMessage = WebViewMessage(
+                    frameInfo: frameInfo,
+                    uuid: UUID(),
+                    name: handlerName,
+                    body: body,
+                    receiptSequence: WebViewMessageReceiptSequencer.reserve(),
+                    javaScriptBindingToken: javaScriptBindingToken,
+                    trustedUserAction: delayedTrustedUserAction
+                )
+                self.scheduleDocumentMessageHandler(
+                    messageHandler,
+                    message: delayedMessage,
+                    context: documentContext,
+                    receiptEvidence: receiptEvidence,
+                    cancellationHandler:
+                        self.messageHandlers.cancellationHandlers[handlerName]
+                )
+            }
+            return
+        }
         guard trustedUserAction != nil
             || !messageHandlers.requiredTrustedUserActionHandlerNames
                 .contains(message.name) else {
@@ -4685,6 +4755,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             messageHandler,
             message: message,
             context: documentContext,
+            receiptEvidence: receiptEvidence,
             cancellationHandler: messageHandlers.cancellationHandlers[message.name]
         )
     }
@@ -7260,9 +7331,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     private var snapshotCaptureReadinessGeneration = 0
     private var bindingOwnerID: UUID?
     private var documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)?
+    private var bindingCommitFence: (
+        token: JavaScriptBindingToken,
+        fence: WebViewJavaScriptBindingCommitFence
+    )?
 
     var asyncCaller: AsyncCaller? = nil {
         didSet {
+            invalidateJavaScriptBindingCommitFence()
             asyncCallerReadinessGeneration += 1
             let generation = asyncCallerReadinessGeneration
             let isReady = asyncCaller != nil
@@ -7327,6 +7403,34 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             && token.generation == asyncCallerReadinessGeneration
             && token.documentGeneration == documentGenerationProvider?()
             && asyncCaller != nil
+    }
+
+    /// Capture on MainActor before suspension; evaluate synchronously on the
+    /// final writer's actor. No WebKit or actor-isolated state is read there.
+    public func makeJavaScriptBindingCommitFence(
+        requiring token: JavaScriptBindingToken
+    ) -> (@Sendable () -> Bool)? {
+        guard isCurrentJavaScriptBinding(token) else { return nil }
+        let fence: WebViewJavaScriptBindingCommitFence
+        if let existing = bindingCommitFence, existing.token == token {
+            fence = existing.fence
+        } else {
+            invalidateJavaScriptBindingCommitFence()
+            fence = WebViewJavaScriptBindingCommitFence()
+            bindingCommitFence = (token: token, fence: fence)
+        }
+        return { [weak self] in self != nil && fence.isCurrent }
+    }
+
+    private func invalidateJavaScriptBindingCommitFence() {
+        bindingCommitFence?.fence.invalidate()
+        bindingCommitFence = nil
+    }
+
+    // An obsolete coordinator must not revoke a successor's binding.
+    func invalidateJavaScriptBindingCommitFence(ownedBy ownerID: UUID) {
+        guard bindingOwnerID == ownerID else { return }
+        invalidateJavaScriptBindingCommitFence()
     }
 
     private func reportUnboundEvaluation(
