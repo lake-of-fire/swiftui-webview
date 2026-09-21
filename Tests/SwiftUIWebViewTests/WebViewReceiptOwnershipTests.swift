@@ -69,7 +69,9 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
         try await withWebView(name: name, handlers: handlers) { view in
             view.loadHTMLString(htmlPosting(name: name, body: "old"), baseURL: testURL)
             await fulfillment(of: [first], timeout: 10)
-            _ = try await view.evaluateJavaScript("window.webkit.messageHandlers.\(name).postMessage('fresh')")
+            _ = try await view.evaluateJavaScript(
+                "window.webkit.messageHandlers.\(name).postMessage('fresh'); true"
+            )
             await fulfillment(of: [fresh], timeout: 10)
             XCTAssertEqual(state.received, [1, 2])
             XCTAssertEqual(state.committed, [2], "Rejecting every event is not an ownership repair")
