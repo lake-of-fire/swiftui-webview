@@ -3487,6 +3487,9 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func invalidateDocumentCallbackContext() {
+        scriptCaller?.invalidateJavaScriptBindingCommitFence(
+            ownedBy: scriptCallerBindingOwnerID
+        )
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = false
         trustedUserActionAdmissions.invalidateAll()
@@ -3496,6 +3499,9 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     private func activateDocumentCallbackContext(for sourceWebView: WKWebView) {
         guard ownsWebView(sourceWebView) else { return }
+        scriptCaller?.invalidateJavaScriptBindingCommitFence(
+            ownedBy: scriptCallerBindingOwnerID
+        )
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = true
         trustedUserActionAdmissions.invalidateAll()
@@ -7325,9 +7331,14 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     private var snapshotCaptureReadinessGeneration = 0
     private var bindingOwnerID: UUID?
     private var documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)?
+    private var bindingCommitFence: (
+        token: JavaScriptBindingToken,
+        fence: WebViewJavaScriptBindingCommitFence
+    )?
 
     var asyncCaller: AsyncCaller? = nil {
         didSet {
+            invalidateJavaScriptBindingCommitFence()
             asyncCallerReadinessGeneration += 1
             let generation = asyncCallerReadinessGeneration
             let isReady = asyncCaller != nil
@@ -7392,6 +7403,34 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             && token.generation == asyncCallerReadinessGeneration
             && token.documentGeneration == documentGenerationProvider?()
             && asyncCaller != nil
+    }
+
+    /// Capture on MainActor before suspension; evaluate synchronously on the
+    /// final writer's actor. No WebKit or actor-isolated state is read there.
+    public func makeJavaScriptBindingCommitFence(
+        requiring token: JavaScriptBindingToken
+    ) -> (@Sendable () -> Bool)? {
+        guard isCurrentJavaScriptBinding(token) else { return nil }
+        let fence: WebViewJavaScriptBindingCommitFence
+        if let existing = bindingCommitFence, existing.token == token {
+            fence = existing.fence
+        } else {
+            invalidateJavaScriptBindingCommitFence()
+            fence = WebViewJavaScriptBindingCommitFence()
+            bindingCommitFence = (token: token, fence: fence)
+        }
+        return { [weak self] in self != nil && fence.isCurrent }
+    }
+
+    private func invalidateJavaScriptBindingCommitFence() {
+        bindingCommitFence?.fence.invalidate()
+        bindingCommitFence = nil
+    }
+
+    // An obsolete coordinator must not revoke a successor's binding.
+    func invalidateJavaScriptBindingCommitFence(ownedBy ownerID: UUID) {
+        guard bindingOwnerID == ownerID else { return }
+        invalidateJavaScriptBindingCommitFence()
     }
 
     private func reportUnboundEvaluation(
