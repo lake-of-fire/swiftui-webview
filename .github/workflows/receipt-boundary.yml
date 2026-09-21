@@ -24,6 +24,9 @@ jobs:
           git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/receipt-control/identity.txt"
           git hash-object Tests/SwiftUIWebViewTests/WebViewReceiptDispatchTests.swift >> "$RUNNER_TEMP/receipt-control/identity.txt"
           git restore --source=6628f7244d527959869a54f5f76b88a8aa845ebd -- Sources/SwiftUIWebView/SwiftUIWebView.swift
+          # The current branch has a later binding-fence test whose API does not exist in the restored pre-receipt source.
+          # Exclude that unrelated test so this negative control reaches the unchanged receipt assertions instead of failing compilation.
+          rm Tests/SwiftUIWebViewTests/WebViewJavaScriptBindingCommitFenceTests.swift
           set +e
           swift test --disable-experimental-prebuilts --filter WebViewReceiptDispatchTests > "$RUNNER_TEMP/receipt-control/tests.log" 2>&1
           status=$?
