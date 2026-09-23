@@ -11038,9 +11038,9 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
         // Keep this visual overlay out of the AppKit hit-test chain.  The
         // gesture recognizer is installed on the WebView itself so it can see
         // both native lookup targets and blank clicks used to dismiss the
-        // active lookup.  Returning this view for targets would make blank
-        // clicks go straight to WebKit and would prevent the recognizer from
-        // receiving the dismissal gesture.
+        // active lookup. Returning this view for targets would divert target
+        // clicks away from the WebView's recognizer, while blank clicks would
+        // still go straight to WebKit without the dismissal path.
         nil
     }
 }
