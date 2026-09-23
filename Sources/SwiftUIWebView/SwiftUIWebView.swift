@@ -11018,13 +11018,13 @@ private final class NativeLookupHitTestOverlayNSView: NSView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        let containsTarget = !isHidden
-            && alphaValue > 0
-            && store?.containsClaimableTarget(at: point, in: bounds.size) == true
-        guard containsTarget else {
-            return nil
-        }
-        return self
+        // Keep this visual overlay out of the AppKit hit-test chain.  The
+        // gesture recognizer is installed on the WebView itself so it can see
+        // both native lookup targets and blank clicks used to dismiss the
+        // active lookup.  Returning this view for targets would make blank
+        // clicks go straight to WebKit and would prevent the recognizer from
+        // receiving the dismissal gesture.
+        nil
     }
 }
 
@@ -11033,7 +11033,7 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
 
     weak var store: WebViewNativeLookupHitTestStore?
     private weak var interactionStore: WebViewNativeLookupHitTestStore?
-    private weak var pressedOverlay: NativeLookupHitTestOverlayNSView?
+    fileprivate weak var pressedOverlay: NativeLookupHitTestOverlayNSView?
     private var interactionTarget: WebViewNativeLookupHitTarget?
     private var interactionLookupID: UUID?
     private var mouseDownWasActiveTarget = false
@@ -11052,13 +11052,28 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
             in: view.bounds.size,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
         ) else {
-            state = .failed
+            let canDismissActiveLookup = MainActor.assumeIsolated {
+                store.activeLookupElementID?() != nil
+                    && !store.shouldPassThroughForWebTextSelection
+            }
+            guard canDismissActiveLookup else {
+                state = .failed
+                return
+            }
+
+            // Mirror the iOS recognizer's blank-tap path.  The interaction
+            // generation is captured at mouse-down so a delayed click cannot
+            // close a newer lookup that replaced the one visible at mouse-down.
+            interactionStore = store
+            interactionTarget = nil
+            interactionLookupID = store.captureActiveLookupInteractionID()
+            mouseDownWasActiveTarget = false
+            super.mouseDown(with: event)
             return
         }
         interactionStore = store
         interactionTarget = target
         interactionLookupID = store.captureActiveLookupInteractionID()
-        pressedOverlay = view as? NativeLookupHitTestOverlayNSView
         mouseDownWasActiveTarget = store.matchesActiveLookupTarget(target)
         store.beginNativeTouchStream(on: target)
         if store.showsPressedTargetOverlay {
@@ -11075,28 +11090,38 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
         guard state == .ended,
               let interactionStore,
               store === interactionStore,
-              let target = interactionTarget,
-              interactionStore.isCapturedNativeTouchCurrent(
-                target,
-                lookupInteractionID: interactionLookupID
-              ) else {
+              interactionStore.isActiveLookupInteractionCurrent(interactionLookupID) else {
             finishInteraction(clearPressedTarget: true)
             return false
         }
 
         let didComplete: Bool
-        if mouseDownWasActiveTarget {
-            interactionStore.onActiveTargetTouchDown?(target)
-            didComplete = true
+        if let target = interactionTarget {
+            guard interactionStore.isCapturedNativeTouchCurrent(
+                target,
+                lookupInteractionID: interactionLookupID
+            ) else {
+                finishInteraction(clearPressedTarget: true)
+                return false
+            }
+            if mouseDownWasActiveTarget {
+                interactionStore.onActiveTargetTouchDown?(target)
+                didComplete = true
+            } else {
+                let point = location(in: coordinateView)
+                let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
+                didComplete = interactionStore.handleTap(
+                    on: target,
+                    at: point,
+                    in: coordinateView.bounds.size,
+                    coordinateViewWindowOrigin: coordinateViewWindowOrigin
+                )
+            }
         } else {
-            let point = location(in: coordinateView)
-            let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
-            didComplete = interactionStore.handleTap(
-                on: target,
-                at: point,
-                in: coordinateView.bounds.size,
-                coordinateViewWindowOrigin: coordinateViewWindowOrigin
-            )
+            // The click missed every published target.  Close only the lookup
+            // that was current at mouse-down and only when selection is not
+            // active; the store owns those semantic guards.
+            didComplete = interactionStore.closeActiveLookupFromBlankTapIfNeeded()
         }
 
         if didComplete, !mouseDownWasActiveTarget {
@@ -11201,7 +11226,11 @@ public final class WebViewHostNSView: NSView {
     private func installNativeLookupHitTestGestureRecognizer() {
         nativeLookupHitTestGestureRecognizer.numberOfClicksRequired = 1
         nativeLookupHitTestGestureRecognizer.delaysPrimaryMouseButtonEvents = true
-        nativeLookupHitTestOverlayView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
+        nativeLookupHitTestGestureRecognizer.pressedOverlay = nativeLookupHitTestOverlayView
+        // The recognizer must observe the WebView's complete event stream so a
+        // blank click can dismiss an active lookup.  The visual overlay remains
+        // pass-through and is used only for the pressed-target indication.
+        webView.addGestureRecognizer(nativeLookupHitTestGestureRecognizer)
     }
 
     @objc private func handleNativeLookupHitTestClick(_ recognizer: NativeLookupHitTestClickGestureRecognizer) {
