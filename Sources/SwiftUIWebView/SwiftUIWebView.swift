@@ -11239,9 +11239,8 @@ extension WebView: NSViewRepresentable {
         )
         // Binding a fresh navigator can synchronously flush a queued HTML/data
         // navigation. Install scripts and their caller before that first load.
-        installInitialMacUserScripts(on: webView, coordinator: context.coordinator)
         bindScriptCallerIfNeeded(to: webView, context: context)
-        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
+        installInitialMacUserScriptsAndBind(on: webView, coordinator: context.coordinator)
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
@@ -11259,6 +11258,15 @@ extension WebView: NSViewRepresentable {
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         return hostView
+    }
+
+    @MainActor
+    func installInitialMacUserScriptsAndBind(
+        on webView: EnhancedWKWebView,
+        coordinator: WebViewCoordinator
+    ) {
+        installInitialMacUserScripts(on: webView, coordinator: coordinator)
+        coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
     }
 
     @MainActor

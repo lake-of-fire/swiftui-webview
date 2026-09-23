@@ -55,13 +55,14 @@ final class WebViewMacColdUserScriptTests: XCTestCase {
         withExtendedLifetime(webView) {}
     }
 
-    func testQueuedHTMLReceivesDocumentStartScriptDuringInitialMount() async {
+    func testQueuedHTMLReceivesDocumentStartScriptDuringInitialBinding() async {
         let scriptRan = expectation(description: "queued first document received script")
-        let handlers = WebViewMessageHandlers([("initialScriptProbe", { @MainActor message in
-            XCTAssertTrue(message.isMainFrame)
+        let handler = InitialDocumentScriptHandler()
+        handler.onMessage = { message in
+            XCTAssertTrue(message.frameInfo.isMainFrame)
             XCTAssertEqual(message.body as? String, "loading")
             scriptRan.fulfill()
-        })])
+        }
         let script = WebViewUserScript(
             source: "window.webkit.messageHandlers.initialScriptProbe.postMessage(document.readyState)",
             injectionTime: .atDocumentStart,
@@ -78,22 +79,21 @@ final class WebViewMacColdUserScriptTests: XCTestCase {
             navigator: navigator,
             state: .constant(.empty)
         )
-        .environment(\.webViewMessageHandlers, handlers)
-        let host = NSHostingView(rootView: view)
-        let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 320, height: 480),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
+        let webViewConfiguration = WKWebViewConfiguration()
+        webViewConfiguration.userContentController.add(handler, name: "initialScriptProbe")
+        let webView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+            configuration: webViewConfiguration
         )
-        window.contentView = host
-        window.orderFront(nil)
-        defer {
-            window.close()
-            withExtendedLifetime(host) {}
-        }
+        let coordinator = view.makeCoordinatorForTesting()
+        view.installInitialMacUserScriptsAndBind(
+            on: webView,
+            coordinator: coordinator
+        )
 
         await fulfillment(of: [scriptRan], timeout: 10)
+        withExtendedLifetime(webView) {}
+        withExtendedLifetime(coordinator) {}
     }
 
     func testMountingPooledWebViewKeepsMatchingInstalledScripts() {
