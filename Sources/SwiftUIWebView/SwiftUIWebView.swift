@@ -11231,16 +11231,17 @@ extension WebView: NSViewRepresentable {
         }
         context.coordinator.registerReturnOwner(for: webView, pool: resolvedWebViewPool)
 
-        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
         let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
             context: context,
             resolvedContentRules: resolvedContentRules
         )
-        // A startup navigation can begin before SwiftUI's first updateNSView.
-        // Install document-start scripts on the newly mounted WebView now.
+        // Binding a fresh navigator can synchronously flush a queued HTML/data
+        // navigation. Install scripts and their caller before that first load.
         installInitialMacUserScripts(on: webView, coordinator: context.coordinator)
+        bindScriptCallerIfNeeded(to: webView, context: context)
+        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
@@ -11252,8 +11253,6 @@ extension WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        bindScriptCallerIfNeeded(to: webView, context: context)
-
         refreshDarkModeSetting(webView: webView)
 
         let hostView = WebViewHostNSView(webView: webView)

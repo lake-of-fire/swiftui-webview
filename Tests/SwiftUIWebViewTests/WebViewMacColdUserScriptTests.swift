@@ -52,6 +52,48 @@ final class WebViewMacColdUserScriptTests: XCTestCase {
         )
 
         await fulfillment(of: [scriptRan], timeout: 5)
+        withExtendedLifetime(webView) {}
+    }
+
+    func testQueuedHTMLReceivesDocumentStartScriptDuringInitialMount() async {
+        let scriptRan = expectation(description: "queued first document received script")
+        let handlers = WebViewMessageHandlers([("initialScriptProbe", { @MainActor message in
+            XCTAssertTrue(message.isMainFrame)
+            XCTAssertEqual(message.body as? String, "loading")
+            scriptRan.fulfill()
+        })])
+        let script = WebViewUserScript(
+            source: "window.webkit.messageHandlers.initialScriptProbe.postMessage(document.readyState)",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
+        let navigator = WebViewNavigator()
+        navigator.loadHTML(
+            "<html><body>Queued first document</body></html>",
+            baseURL: URL(string: "https://example.com/queued")
+        )
+        let view = WebView(
+            config: WebViewConfig(userScripts: [script]),
+            navigator: navigator,
+            state: .constant(.empty)
+        )
+        .environment(\.webViewMessageHandlers, handlers)
+        let host = NSHostingView(rootView: view)
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 480),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        window.orderFront(nil)
+        defer {
+            window.close()
+            withExtendedLifetime(host) {}
+        }
+
+        await fulfillment(of: [scriptRan], timeout: 10)
     }
 
     func testMountingPooledWebViewKeepsMatchingInstalledScripts() {
