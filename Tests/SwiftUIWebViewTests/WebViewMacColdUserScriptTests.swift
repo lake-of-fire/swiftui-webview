@@ -53,5 +53,45 @@ final class WebViewMacColdUserScriptTests: XCTestCase {
 
         await fulfillment(of: [scriptRan], timeout: 5)
     }
+
+    func testMountingPooledWebViewKeepsMatchingInstalledScripts() {
+        let script = WebViewUserScript(
+            source: "window.initialScriptProbe = true",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page
+        )
+        let configuration = WebViewConfig(userScripts: [script])
+        let firstView = WebView(
+            config: configuration,
+            navigator: WebViewNavigator(),
+            state: .constant(.empty)
+        )
+        let webView = EnhancedWKWebView(
+            frame: .zero,
+            configuration: WKWebViewConfiguration()
+        )
+        firstView.installInitialMacUserScripts(
+            on: webView,
+            coordinator: firstView.makeCoordinatorForTesting()
+        )
+        let installedScripts = webView.configuration.userContentController.userScripts
+        XCTAssertFalse(installedScripts.isEmpty)
+
+        let secondView = WebView(
+            config: configuration,
+            navigator: WebViewNavigator(),
+            state: .constant(.empty)
+        )
+        secondView.installInitialMacUserScripts(
+            on: webView,
+            coordinator: secondView.makeCoordinatorForTesting()
+        )
+        let reusedScripts = webView.configuration.userContentController.userScripts
+        XCTAssertEqual(installedScripts.count, reusedScripts.count)
+        XCTAssertTrue(zip(installedScripts, reusedScripts).allSatisfy { pair in
+            pair.0 === pair.1
+        })
+    }
 }
 #endif

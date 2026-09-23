@@ -11267,6 +11267,10 @@ extension WebView: NSViewRepresentable {
         on webView: EnhancedWKWebView,
         coordinator: WebViewCoordinator
     ) {
+        if coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
+            coordinator.lastUserScriptsContentController = webView.configuration.userContentController
+            coordinator.lastInstalledScriptsSignature = webView.persistedUserScriptsSignature
+        }
         updateUserScripts(
             webView: webView,
             coordinator: coordinator,
