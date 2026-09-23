@@ -1851,6 +1851,21 @@ public final class WebViewNativeLookupHitTestStore {
         return true
     }
 
+    /// Closes the lookup only when the interaction that started the blank tap
+    /// is still current. Gesture recognizers can finish after a replacement
+    /// lookup has opened, so the generation check belongs beside the semantic
+    /// dismissal guard rather than only in an individual platform recognizer.
+    @MainActor
+    @discardableResult
+    func closeActiveLookupFromBlankTapIfNeeded(
+        capturedInteractionID: UUID?
+    ) -> Bool {
+        guard isActiveLookupInteractionCurrent(capturedInteractionID) else {
+            return false
+        }
+        return closeActiveLookupFromBlankTapIfNeeded()
+    }
+
     public func updateWebTextSelection(active: Bool) {
         webTextSelectionActive = active
     }
@@ -9414,7 +9429,9 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             guard movement <= Self.segmentTapMovementTolerance,
                   duration <= Self.segmentTapMaximumDuration,
                   store?.isActiveLookupInteractionCurrent(touchStartLookupInteractionID) == true,
-                  store?.closeActiveLookupFromBlankTapIfNeeded() == true else {
+                  store?.closeActiveLookupFromBlankTapIfNeeded(
+                      capturedInteractionID: touchStartLookupInteractionID
+                  ) == true else {
                 resetTrackingState()
                 state = .failed
                 return
@@ -11121,7 +11138,9 @@ private final class NativeLookupHitTestClickGestureRecognizer: NSClickGestureRec
             // The click missed every published target.  Close only the lookup
             // that was current at mouse-down and only when selection is not
             // active; the store owns those semantic guards.
-            didComplete = interactionStore.closeActiveLookupFromBlankTapIfNeeded()
+            didComplete = interactionStore.closeActiveLookupFromBlankTapIfNeeded(
+                capturedInteractionID: interactionLookupID
+            )
         }
 
         if didComplete, !mouseDownWasActiveTarget {

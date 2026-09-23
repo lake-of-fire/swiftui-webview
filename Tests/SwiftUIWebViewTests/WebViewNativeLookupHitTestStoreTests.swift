@@ -97,6 +97,25 @@ final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
         XCTAssertEqual(closeCount, 1)
     }
 
+    func testBlankTapDoesNotDismissAReplacementLookup() {
+        let store = WebViewNativeLookupHitTestStore()
+        var closeCount = 0
+        var interactionID = UUID()
+        store.activeLookupElementID = { "segment" }
+        store.activeLookupInteractionID = { interactionID }
+        store.onActiveLookupBlankTap = { closeCount += 1 }
+
+        let capturedInteractionID = store.captureActiveLookupInteractionID()
+        interactionID = UUID()
+
+        XCTAssertFalse(
+            store.closeActiveLookupFromBlankTapIfNeeded(
+                capturedInteractionID: capturedInteractionID
+            )
+        )
+        XCTAssertEqual(closeCount, 0)
+    }
+
     func testLookupInteractionOwnershipRejectsAReplacedLookup() {
         let store = WebViewNativeLookupHitTestStore()
         let firstLookupID = UUID()
