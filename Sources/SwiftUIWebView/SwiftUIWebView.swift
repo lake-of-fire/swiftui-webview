@@ -11238,6 +11238,14 @@ extension WebView: NSViewRepresentable {
             context: context,
             resolvedContentRules: resolvedContentRules
         )
+        // A startup navigation can begin before SwiftUI's first updateNSView.
+        // Install document-start scripts on the newly mounted WebView now.
+        updateUserScripts(
+            webView: webView,
+            coordinator: context.coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
+            config: config
+        )
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
