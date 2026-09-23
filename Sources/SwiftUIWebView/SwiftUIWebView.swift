@@ -11240,12 +11240,7 @@ extension WebView: NSViewRepresentable {
         )
         // A startup navigation can begin before SwiftUI's first updateNSView.
         // Install document-start scripts on the newly mounted WebView now.
-        updateUserScripts(
-            webView: webView,
-            coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
-            config: config
-        )
+        installInitialMacUserScripts(on: webView, coordinator: context.coordinator)
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
@@ -11265,6 +11260,19 @@ extension WebView: NSViewRepresentable {
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         return hostView
+    }
+
+    @MainActor
+    func installInitialMacUserScripts(
+        on webView: EnhancedWKWebView,
+        coordinator: WebViewCoordinator
+    ) {
+        updateUserScripts(
+            webView: webView,
+            coordinator: coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
+            config: config
+        )
     }
 
     @MainActor
