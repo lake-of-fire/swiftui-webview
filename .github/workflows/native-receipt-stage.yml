@@ -52,10 +52,19 @@ jobs:
           patch_path.write_bytes(patch)
           subprocess.run(['git', 'apply', '--index', '--check', '--whitespace=error-all', str(patch_path)], check=True)
           subprocess.run(['git', 'apply', '--index', '--whitespace=error-all', str(patch_path)], check=True)
+          # The first native compile found one test-only initializer label that
+          # does not exist on the production JavaScript result type. Keep the
+          # originally reviewed patch immutable and verify this exact correction.
+          test_path = pathlib.Path('Tests/SwiftUIWebViewTests/WebViewReceiptDocumentBindingTests.swift')
+          test_bytes = test_path.read_bytes()
+          assert hashlib.sha1(b'blob ' + str(len(test_bytes)).encode() + b'\0' + test_bytes).hexdigest() == '3dc55ac5e39ac81230d7797e5c411d642ea6b775'
+          assert test_bytes.count(b'.init(value: nil)') == 1
+          test_path.write_bytes(test_bytes.replace(b'.init(value: nil)', b'.init(nil)'))
+          subprocess.run(['git', 'add', '--', str(test_path)], check=True)
           expected = {
               'Sources/SwiftUIWebView/SwiftUIWebView.swift': 'b5e33cce616e439ee520c3feaf6571e7b1bc26df',
               'Sources/SwiftUIWebView/WebViewMessageReceiptEvidence.swift': '8e0ea92fd7d33b75d56014c0d21cbb22215e12ec',
-              'Tests/SwiftUIWebViewTests/WebViewReceiptDocumentBindingTests.swift': '3dc55ac5e39ac81230d7797e5c411d642ea6b775',
+              'Tests/SwiftUIWebViewTests/WebViewReceiptDocumentBindingTests.swift': 'b4de225039c4306797b58321df75beb7e9f213d9',
           }
           files = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z']).decode().split('\0')[:-1]
           assert set(files) == set(expected)
