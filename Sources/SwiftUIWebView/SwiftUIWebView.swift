@@ -11231,13 +11231,16 @@ extension WebView: NSViewRepresentable {
         }
         context.coordinator.registerReturnOwner(for: webView, pool: resolvedWebViewPool)
 
-        context.coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
         let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         applyCommonConfiguration(
             webView: webView,
             context: context,
             resolvedContentRules: resolvedContentRules
         )
+        // Binding a fresh navigator can synchronously flush a queued HTML/data
+        // navigation. Install scripts and their caller before that first load.
+        bindScriptCallerIfNeeded(to: webView, context: context)
+        installInitialMacUserScriptsAndBind(on: webView, coordinator: context.coordinator)
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
         if #available(macOS 11.0, *) {
@@ -11249,14 +11252,38 @@ extension WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        bindScriptCallerIfNeeded(to: webView, context: context)
-
         refreshDarkModeSetting(webView: webView)
 
         let hostView = WebViewHostNSView(webView: webView)
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         return hostView
+    }
+
+    @MainActor
+    func installInitialMacUserScriptsAndBind(
+        on webView: EnhancedWKWebView,
+        coordinator: WebViewCoordinator
+    ) {
+        installInitialMacUserScripts(on: webView, coordinator: coordinator)
+        coordinator.scheduleWebViewBinding(webView, paginationReason: "make-nsview")
+    }
+
+    @MainActor
+    func installInitialMacUserScripts(
+        on webView: EnhancedWKWebView,
+        coordinator: WebViewCoordinator
+    ) {
+        if coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
+            coordinator.lastUserScriptsContentController = webView.configuration.userContentController
+            coordinator.lastInstalledScriptsSignature = webView.persistedUserScriptsSignature
+        }
+        updateUserScripts(
+            webView: webView,
+            coordinator: coordinator,
+            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
+            config: config
+        )
     }
 
     @MainActor
