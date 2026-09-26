@@ -5,11 +5,22 @@ public struct WebViewMessageReceipt: Sendable {
     public let name: String
     public let mainDocumentURL: URL?
     public let requestURL: URL?
+    /// Exact native caller/document binding sampled before invoking any app
+    /// provider. Two views or two successive documents may have the same URL.
+    /// Nil means no caller binding was available; consumers must not invent one
+    /// later. This identifies the receipt owner, not permission to mutate data.
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
 
-    public init(name: String, mainDocumentURL: URL?, requestURL: URL?) {
+    public init(
+        name: String,
+        mainDocumentURL: URL?,
+        requestURL: URL?,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+    ) {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
         self.requestURL = requestURL
+        self.javaScriptBindingToken = javaScriptBindingToken
     }
 }
 
