@@ -1,0 +1,53 @@
+name: Native receipt document binding
+on:
+  pull_request:
+    paths:
+      - 'Sources/SwiftUIWebView/**'
+      - 'Tests/SwiftUIWebViewTests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - '.github/workflows/native-receipt-binding.yml'
+permissions:
+  contents: read
+jobs:
+  native:
+    name: native-webview (${{ matrix.configuration }})
+    runs-on: macos-26
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [debug, release]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Capture exact public source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/native-receipt-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/tested-commit.txt"
+          git ls-tree -r HEAD > "$evidence/source-manifest.txt"
+          git status --porcelain > "$evidence/source-status-before.txt"
+          git archive --format=tar.gz --output="$evidence/source.tar.gz" HEAD
+          swift --version | tee "$evidence/toolchain.txt"
+          xcodebuild -version | tee "$evidence/xcode.txt"
+      - name: Compile and execute the actual WebView package tests
+        shell: bash
+        env:
+          BUILD_CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          set -euo pipefail
+          swift test -c "$BUILD_CONFIGURATION" --disable-automatic-resolution 2>&1 \
+            | tee "$RUNNER_TEMP/native-receipt-evidence/test.log"
+          git status --porcelain > "$RUNNER_TEMP/native-receipt-evidence/source-status-after.txt"
+      - name: Retain evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-receipt-${{ matrix.configuration }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-receipt-evidence
+          if-no-files-found: error
+          retention-days: 7
