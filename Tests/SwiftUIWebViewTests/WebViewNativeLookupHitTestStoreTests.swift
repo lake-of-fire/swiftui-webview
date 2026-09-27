@@ -1,11 +1,72 @@
 import XCTest
-#if os(iOS)
+#if os(macOS)
+import AppKit
+#endif
+#if os(iOS) || os(macOS)
 import WebKit
 #endif
 @testable import SwiftUIWebView
 
 @MainActor
 final class WebViewNativeLookupHitTestStoreTests: XCTestCase {
+#if os(macOS)
+    func testMacHostRoutesBlankPointToWebViewWhileClaimingSegmentPoint() {
+        let webView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+        let host = WebViewHostNSView(webView: webView)
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 480),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+
+        let store = WebViewNativeLookupHitTestStore()
+        host.setNativeLookupHitTestStore(store)
+        store.updateTargets([
+            WebViewNativeLookupHitTarget(
+                elementID: "visible-word",
+                rects: [CGRect(x: 8, y: 8, width: 30, height: 24)]
+            )
+        ])
+        XCTAssertEqual(host.frame.size, CGSize(width: 320, height: 480))
+        XCTAssertEqual(webView.frame.size, host.frame.size)
+        XCTAssertTrue(store.containsClaimableTarget(at: CGPoint(x: 16, y: 16)))
+        let overlay = host.subviews.last
+        XCTAssertTrue(overlay?.hitTest(CGPoint(x: 16, y: 16)) === overlay)
+
+        let segmentPoint = host.convert(CGPoint(x: 16, y: 16), to: host.superview)
+        let segmentHit = host.hitTest(segmentPoint)
+        XCTAssertNotNil(segmentHit)
+        XCTAssertFalse(
+            segmentHit === webView || segmentHit?.isDescendant(of: webView) == true,
+            "A segment hit should be claimed by the native overlay; subviews=\(host.subviews.map { "\(type(of: $0)):\($0.frame)" })"
+        )
+
+        let blankPoint = host.convert(CGPoint(x: 200, y: 300), to: host.superview)
+        let blankHit = host.hitTest(blankPoint)
+        XCTAssertTrue(
+            blankHit === webView || blankHit?.isDescendant(of: webView) == true,
+            "A blank click must reach WebKit instead of the native segment overlay"
+        )
+        if let target = store.hitTarget(at: CGPoint(x: 16, y: 16)) {
+            store.beginNativeTouchStream(on: target)
+            let blankAfterLookup = host.hitTest(blankPoint)
+            XCTAssertTrue(
+                blankAfterLookup === webView || blankAfterLookup?.isDescendant(of: webView) == true,
+                "An active native touch stream must not make the blank area claimable"
+            )
+        } else {
+            XCTFail("Expected the visible segment target")
+        }
+        window.contentView = nil
+    }
+#endif
+
     func testActiveTextSelectionPassesNativeLookupTouchesThrough() {
         let store = WebViewNativeLookupHitTestStore()
         var dispatchedHit = false
