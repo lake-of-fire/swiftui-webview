@@ -7291,7 +7291,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    typealias AsyncCaller = @Sendable (
+    // Keep the installed evaluator on the caller's actor through WebKit dispatch.
+    // Erasing this isolation introduces a hop after an outer owner check.
+    typealias AsyncCaller = @MainActor @Sendable (
         String,
         [String: any Sendable]?,
         WKFrameInfo?,
