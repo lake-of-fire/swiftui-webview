@@ -4664,12 +4664,17 @@ extension WebViewCoordinator: WKScriptMessageHandler {
               ) else {
             return
         }
+        // Freeze native ownership before calling app providers: a provider can
+        // reenter binding setup synchronously. Both delivery paths must retain
+        // this exact token, not sample a replacement after evidence capture.
+        let receiptBindingToken = javaScriptBindingToken(for: sourceWebView)
         // Capture application evidence at receipt, before either the broker's
         // deferred admission or the handler scheduler can suspend this event.
         let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
             name: message.name,
             mainDocumentURL: message.frameInfo.request.mainDocumentURL,
-            requestURL: message.frameInfo.request.url
+            requestURL: message.frameInfo.request.url,
+            javaScriptBindingToken: receiptBindingToken
         ))
         let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
@@ -4692,9 +4697,6 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let handlerName = message.name
             let frameInfo = message.frameInfo
             let body = message.body
-            let javaScriptBindingToken = javaScriptBindingToken(
-                for: message.webView
-            )
             Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self,
@@ -4722,7 +4724,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     name: handlerName,
                     body: body,
                     receiptSequence: WebViewMessageReceiptSequencer.reserve(),
-                    javaScriptBindingToken: javaScriptBindingToken,
+                    javaScriptBindingToken: receiptBindingToken,
                     trustedUserAction: delayedTrustedUserAction
                 )
                 self.scheduleDocumentMessageHandler(
@@ -4747,7 +4749,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             name: message.name,
             body: message.body,
             receiptSequence: WebViewMessageReceiptSequencer.reserve(),
-            javaScriptBindingToken: javaScriptBindingToken(for: message.webView),
+            javaScriptBindingToken: receiptBindingToken,
             trustedUserAction: trustedUserAction
         )
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
@@ -7289,7 +7291,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    typealias AsyncCaller = @Sendable (
+    // Keep the installed evaluator on the caller's actor through WebKit dispatch.
+    // Erasing this isolation introduces a hop after an outer owner check.
+    typealias AsyncCaller = @MainActor @Sendable (
         String,
         [String: any Sendable]?,
         WKFrameInfo?,
