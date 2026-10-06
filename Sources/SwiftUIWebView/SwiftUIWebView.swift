@@ -7291,7 +7291,9 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         }
     }
 
-    typealias AsyncCaller = @Sendable (
+    // Keep the installed evaluator on the caller's actor through WebKit dispatch.
+    // Erasing this isolation introduces a hop after an outer owner check.
+    typealias AsyncCaller = @MainActor @Sendable (
         String,
         [String: any Sendable]?,
         WKFrameInfo?,
@@ -10609,7 +10611,7 @@ extension WebView: UIViewControllerRepresentable {
                 }
                 let resolvedWorld = world ?? .page
                 if let args {
-                    let value = try await webView.callAsyncJavaScript(
+                    let value = try await webView.callAsyncJavaScriptUsingCompletionHandler(
                         js,
                         arguments: args,
                         in: frame,
@@ -10617,7 +10619,7 @@ extension WebView: UIViewControllerRepresentable {
                     )
                     return WebViewScriptCaller.JavaScriptEvaluationResult(value)
                 } else {
-                    let result = try await webView.callAsyncJavaScript(
+                    let result = try await webView.callAsyncJavaScriptUsingCompletionHandler(
                         js,
                         in: frame,
                         contentWorld: resolvedWorld
@@ -11324,14 +11326,14 @@ extension WebView: NSViewRepresentable {
                 do {
                     let value: Any?
                     if let args {
-                        value = try await webView.callAsyncJavaScript(
+                        value = try await webView.callAsyncJavaScriptUsingCompletionHandler(
                             js,
                             arguments: args,
                             in: frame,
                             contentWorld: resolvedWorld
                         )
                     } else {
-                        value = try await webView.callAsyncJavaScript(
+                        value = try await webView.callAsyncJavaScriptUsingCompletionHandler(
                             js,
                             in: frame,
                             contentWorld: resolvedWorld
@@ -11374,9 +11376,9 @@ extension WebView: NSViewRepresentable {
             ) in
                 guard let webView else { return }
                 let resolvedWorld = world ?? .page
-                webView.evaluateJavaScript(
+                webView.__evaluateJavaScript(
                     js,
-                    in: frame,
+                    inFrame: frame,
                     in: resolvedWorld,
                     completionHandler: nil
                 )
