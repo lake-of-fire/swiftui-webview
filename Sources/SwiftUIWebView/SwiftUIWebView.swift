@@ -11378,7 +11378,7 @@ extension WebView: NSViewRepresentable {
                 let resolvedWorld = world ?? .page
                 webView.__evaluateJavaScript(
                     js,
-                    in: frame,
+                    inFrame: frame,
                     in: resolvedWorld,
                     completionHandler: nil
                 )

@@ -12,19 +12,11 @@ extension WKWebView {
         in frame: WKFrameInfo? = nil,
         contentWorld: WKContentWorld
     ) async throws -> Any? {
-        try await withCheckedThrowingContinuation { continuation in
-            __callAsyncJavaScript(
-                functionBody,
-                arguments: arguments,
-                in: frame,
-                in: contentWorld
-            ) { value, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: value)
-                }
-            }
-        }
+        try await __callAsyncJavaScript(
+            functionBody,
+            arguments: arguments,
+            inFrame: frame,
+            in: contentWorld
+        )
     }
 }
