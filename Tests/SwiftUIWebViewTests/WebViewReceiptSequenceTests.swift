@@ -120,6 +120,11 @@ final class WebViewReceiptSequenceTests: XCTestCase {
             controller.add(recorder, name: name)
         }
         defer {
+            // A failed expectation or receipt unwrap must release a suspended
+            // handler before document teardown cancels its owned task.
+            let suspended = state.releaseOlder
+            state.releaseOlder = nil
+            suspended?.resume()
             state.afterOlderCapture = nil
             view.stopLoading()
             coordinator.tearDownBindingsForDetachedWebView(view)
