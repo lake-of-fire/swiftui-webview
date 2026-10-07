@@ -4664,6 +4664,11 @@ extension WebViewCoordinator: WKScriptMessageHandler {
               ) else {
             return
         }
+        // Receipt order is native arrival order, independent of provider
+        // reentry, trusted-action deferral, and eventual handler scheduling.
+        // Consumers use this sequence to reject stale publications, so reserve
+        // it before app callbacks can deliver a newer message synchronously.
+        let receiptSequence = WebViewMessageReceiptSequencer.reserve()
         // Freeze native ownership before calling app providers: a provider can
         // reenter binding setup synchronously. Both delivery paths must retain
         // this exact token, not sample a replacement after evidence capture.
@@ -4723,7 +4728,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     uuid: UUID(),
                     name: handlerName,
                     body: body,
-                    receiptSequence: WebViewMessageReceiptSequencer.reserve(),
+                    receiptSequence: receiptSequence,
                     javaScriptBindingToken: receiptBindingToken,
                     trustedUserAction: delayedTrustedUserAction
                 )
@@ -4748,7 +4753,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             uuid: UUID(),
             name: message.name,
             body: message.body,
-            receiptSequence: WebViewMessageReceiptSequencer.reserve(),
+            receiptSequence: receiptSequence,
             javaScriptBindingToken: receiptBindingToken,
             trustedUserAction: trustedUserAction
         )
