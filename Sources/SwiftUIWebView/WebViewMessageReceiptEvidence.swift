@@ -10,17 +10,28 @@ public struct WebViewMessageReceipt: Sendable {
     /// Nil means no caller binding was available; consumers must not invent one
     /// later. This identifies the receipt owner, not permission to mutate data.
     public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
+    /// Untrusted negative evidence copied from the raw message at native receipt.
+    /// A reported restoration may withdraw an application's opening intent.
+    /// False never proves a fresh visit or grants permission to create data.
+    public let reportsBFCacheRestoration: Bool
+    /// Native WebKit frame identity at receipt, independent of page payload.
+    /// A child-frame restoration hint does not identify a restored main visit.
+    public let isMainFrame: Bool
 
     public init(
         name: String,
         mainDocumentURL: URL?,
         requestURL: URL?,
-        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
+        reportsBFCacheRestoration: Bool = false,
+        isMainFrame: Bool = false
     ) {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
         self.requestURL = requestURL
         self.javaScriptBindingToken = javaScriptBindingToken
+        self.reportsBFCacheRestoration = reportsBFCacheRestoration
+        self.isMainFrame = isMainFrame
     }
 }
 

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import OrderedCollections
 import LRUCache
 import Foundation
+import CoreFoundation
 #if os(iOS)
 import UIKit
 private typealias WebViewSnapshotPlatformImage = UIImage
@@ -4673,13 +4674,25 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         // reenter binding setup synchronously. Both delivery paths must retain
         // this exact token, not sample a replacement after evidence capture.
         let receiptBindingToken = javaScriptBindingToken(for: sourceWebView)
+        // Copy only a strict Boolean hint. The page cannot authorize a fresh
+        // visit; it can report restoration before provider or scheduler waits.
+        let reportsBFCacheRestoration: Bool
+        if let body = message.body as? [String: Any],
+           let value = body["isBFCacheRestore"] as? NSNumber,
+           CFGetTypeID(value) == CFBooleanGetTypeID() {
+            reportsBFCacheRestoration = value.boolValue
+        } else {
+            reportsBFCacheRestoration = false
+        }
         // Capture application evidence at receipt, before either the broker's
         // deferred admission or the handler scheduler can suspend this event.
         let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
             name: message.name,
             mainDocumentURL: message.frameInfo.request.mainDocumentURL,
             requestURL: message.frameInfo.request.url,
-            javaScriptBindingToken: receiptBindingToken
+            javaScriptBindingToken: receiptBindingToken,
+            reportsBFCacheRestoration: reportsBFCacheRestoration,
+            isMainFrame: message.frameInfo.isMainFrame
         ))
         let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
