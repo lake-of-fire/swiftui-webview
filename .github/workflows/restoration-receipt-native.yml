@@ -1,0 +1,72 @@
+name: Restoration receipt native qualification
+
+on:
+  push:
+    branches:
+      - fix/restoration-receipt-frame-20261008
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restoration-receipt-native
+  cancel-in-progress: true
+
+env:
+  IMPLEMENTATION_SHA: ff7c2ea3996ddd98e7161a369d2829aceb81d15b
+
+jobs:
+  native:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.IMPLEMENTATION_SHA }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Record exact source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$IMPLEMENTATION_SHA"
+          {
+            printf 'implementation=%s\n' "$actual"
+            git rev-parse 'HEAD^{tree}'
+            xcodebuild -version
+            swift --version
+            git ls-tree -r HEAD Sources Tests/SwiftUIWebViewTests/WebViewReceiptDispatchTests.swift Package.swift Package.resolved
+          } | tee restoration-receipt-inputs.txt
+          git archive --format=tar.gz --output=restoration-receipt-source.tar.gz \
+            HEAD Sources Tests/SwiftUIWebViewTests/WebViewReceiptDispatchTests.swift Package.swift Package.resolved
+      - name: Debug real-WebKit receipt tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test --configuration debug --filter WebViewReceiptDispatchTests \
+            2>&1 | tee restoration-receipt-debug.log
+      - name: Release real-WebKit receipt tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test --configuration release --filter WebViewReceiptDispatchTests \
+            2>&1 | tee restoration-receipt-release.log
+      - name: Verify read-only execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test "$(git rev-parse HEAD)" = "$IMPLEMENTATION_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: restoration-receipt-${{ env.IMPLEMENTATION_SHA }}
+          path: |
+            restoration-receipt-inputs.txt
+            restoration-receipt-source.tar.gz
+            restoration-receipt-debug.log
+            restoration-receipt-release.log
+          if-no-files-found: warn
+          retention-days: 14
