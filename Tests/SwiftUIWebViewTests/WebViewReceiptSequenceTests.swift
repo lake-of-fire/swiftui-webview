@@ -71,6 +71,10 @@ final class WebViewReceiptSequenceTests: XCTestCase {
         delivered.expectedFulfillmentCount = 2
         WebViewMessageReceiptCapture.register(key: key) { [weak state] receipt in
             guard let state, receipt.name == olderName || receipt.name == newerName else { return nil }
+            XCTAssertTrue(receipt.isMainFrame,
+                "The real top-frame WKScriptMessage must carry native frame ownership")
+            XCTAssertFalse(receipt.reportsBFCacheRestoration,
+                "A fresh document's ordinary script receipts must not invent a BFCache restore")
             if receipt.name == olderName { state.afterOlderCapture?() }
             return receipt.name
         }
