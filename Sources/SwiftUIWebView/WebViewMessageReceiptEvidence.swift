@@ -52,9 +52,10 @@ public enum WebViewMessageReceiptContext {
 }
 
 /// Configure named application evidence providers on the main actor before
-/// installing handlers. Providers are application-wide, not per-document state;
-/// the result is captured afresh at each native receipt and cannot be replaced
-/// while that message waits. No application/Realm dependency lives here.
+/// installing handlers. Registered providers are fixed application-wide facts;
+/// owner-specific providers belong to WebViewMessageHandlers instead. Results
+/// are captured afresh at native receipt and cannot be replaced while waiting.
+/// No application/Realm dependency lives here.
 @MainActor
 public enum WebViewMessageReceiptCapture {
     public typealias Provider = @MainActor @Sendable (WebViewMessageReceipt) -> (any Sendable)?
@@ -65,8 +66,16 @@ public enum WebViewMessageReceiptCapture {
         providers[key] = provider
     }
 
-    public static func capture(_ receipt: WebViewMessageReceipt) -> WebViewMessageReceiptEvidence {
-        let snapshot = providers.sorted { $0.key < $1.key }
+    public static func capture(
+        _ receipt: WebViewMessageReceipt,
+        scopedProviders: [String: Provider] = [:]
+    ) -> WebViewMessageReceiptEvidence {
+        // Colliding registrations cannot select an authority by ordering.
+        // Snapshot both collections before invoking any reentrant provider.
+        let collisions = Set(providers.keys).intersection(scopedProviders.keys)
+        let snapshot = providers.merging(scopedProviders) { _, _ in { _ in nil } }
+            .filter { !collisions.contains($0.key) }
+            .sorted { $0.key < $1.key }
         var values: [String: any Sendable] = [:]
         for (key, provider) in snapshot {
             if let value = provider(receipt) { values[key] = value }

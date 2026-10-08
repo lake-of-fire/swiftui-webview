@@ -25,6 +25,14 @@ final class WebViewReceiptDispatchTests: XCTestCase {
         try await assertReceiptLifetime(usesBrokerDeferral: true)
     }
 
+    func testScopedOrdinaryReceiptKeepsItsPreDispatchLifetime() async throws {
+        try await assertReceiptLifetime(usesBrokerDeferral: false, usesScopedProvider: true)
+    }
+
+    func testScopedBrokerDeferralKeepsTheOriginalReceiptLifetime() async throws {
+        try await assertReceiptLifetime(usesBrokerDeferral: true, usesScopedProvider: true)
+    }
+
     func testRestorationHintIsCapturedBeforeOrdinaryDispatch() async throws {
         try await assertReceiptLifetime(usesBrokerDeferral: false,
             payload: "{ isBFCacheRestore: true }", reportsBFCacheRestoration: true)
@@ -54,6 +62,7 @@ final class WebViewReceiptDispatchTests: XCTestCase {
 
     private func assertReceiptLifetime(
         usesBrokerDeferral: Bool,
+        usesScopedProvider: Bool = false,
         payload: String = "'old-lifetime'",
         reportsBFCacheRestoration: Bool = false,
         inChildFrame: Bool = false
@@ -62,7 +71,7 @@ final class WebViewReceiptDispatchTests: XCTestCase {
         let key = "test." + name
         let box = ReceiptLifetimeBox()
         let delivered = expectation(description: "real WebKit message reaches the production handler")
-        WebViewMessageReceiptCapture.register(key: key) { [weak box] receipt in
+        let provider: WebViewMessageReceiptCapture.Provider = { [weak box] receipt in
             guard let box, receipt.name == name else { return nil }
             box.captures += 1
             let original = box.lifetime
@@ -77,6 +86,9 @@ final class WebViewReceiptDispatchTests: XCTestCase {
                 reportsBFCacheRestoration: receipt.reportsBFCacheRestoration,
                 isMainFrame: receipt.isMainFrame)
         }
+        if !usesScopedProvider {
+            WebViewMessageReceiptCapture.register(key: key, provider: provider)
+        }
         var handlers = WebViewMessageHandlers([
             (name, { @MainActor _ in
                 let retained: CapturedReceiptLifetime? = WebViewMessageReceiptContext.evidence?.value(for: key)
@@ -87,7 +99,13 @@ final class WebViewReceiptDispatchTests: XCTestCase {
                 XCTAssertEqual(box.captures, 1, "Broker deferral must not reacquire a successor")
                 delivered.fulfill()
             })
-        ])
+        ], receiptEvidenceProviders: usesScopedProvider ? [key: provider] : [:])
+        if usesScopedProvider {
+            // Exercise the transformations used by app-owned providers while
+            // retaining the original global-provider histories above.
+            handlers = (handlers + WebViewMessageHandlers())
+                .updatingCancellationHandler(name) { _ in }
+        }
         if usesBrokerDeferral {
             // Optional activation with no broker receipt exercises the real
             // deferred path without inventing a trusted user gesture.
