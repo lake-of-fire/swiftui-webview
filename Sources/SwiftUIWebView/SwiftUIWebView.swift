@@ -4675,11 +4675,19 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         let receiptBindingToken = javaScriptBindingToken(for: sourceWebView)
         // Capture application evidence at receipt, before either the broker's
         // deferred admission or the handler scheduler can suspend this event.
+        // Capture the native frame boundary and the page's explicit persisted
+        // pageshow flag at the same receipt turn as the caller binding. The
+        // callback may reenter native providers before handler dispatch; never
+        // re-sample these fields from a later message or current navigation.
+        let reportsBFCacheRestoration =
+            (message.body as? [String: Any])?["isBFCacheRestore"] as? Bool == true
         let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
             name: message.name,
             mainDocumentURL: message.frameInfo.request.mainDocumentURL,
             requestURL: message.frameInfo.request.url,
-            javaScriptBindingToken: receiptBindingToken
+            javaScriptBindingToken: receiptBindingToken,
+            reportsBFCacheRestoration: message.frameInfo.isMainFrame && reportsBFCacheRestoration,
+            isMainFrame: message.frameInfo.isMainFrame
         ))
         let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
