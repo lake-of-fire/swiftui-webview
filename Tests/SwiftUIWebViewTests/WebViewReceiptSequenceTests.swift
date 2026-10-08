@@ -26,6 +26,8 @@ private final class ReceiptSequenceState {
     var latestSequence: UInt64 = 0
     var displayedName: String?
     var afterOlderCapture: (() -> Void)?
+    var releaseOlder: CheckedContinuation<Void, Never>?
+    var completed = [String]()
 }
 
 @MainActor
@@ -50,8 +52,13 @@ final class WebViewReceiptSequenceTests: XCTestCase {
                                      reenterFromProvider: false)
     }
 
+    func testNewerHandlerCompletesBeforeExplicitlySuspendedOlderHandler() async throws {
+        try await assertReceiptOrder(olderDeferred: true, newerDeferred: false,
+                                     reenterFromProvider: false, delayOlderCompletion: true)
+    }
+
     private func assertReceiptOrder(olderDeferred: Bool, newerDeferred: Bool,
-                                    reenterFromProvider: Bool) async throws {
+                                    reenterFromProvider: Bool, delayOlderCompletion: Bool = false) async throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let olderName = "receiptOlder" + suffix
         let newerName = "receiptNewer" + suffix
@@ -67,10 +74,20 @@ final class WebViewReceiptSequenceTests: XCTestCase {
             if receipt.name == olderName { state.afterOlderCapture?() }
             return receipt.name
         }
+        let olderSuspended = delayOlderCompletion
+            ? expectation(description: "older handler suspended") : nil
+        let newerCompleted = delayOlderCompletion
+            ? expectation(description: "newer handler completed") : nil
         let handler: @Sendable (WebViewMessage) async -> Void = { @MainActor message in
             let evidence: String? = WebViewMessageReceiptContext.evidence?.value(for: key)
             XCTAssertEqual(evidence, message.name, "Reentry must retain each receipt's evidence")
             XCTAssertNil(message.trustedUserAction, "Optional deferral must not invent activation")
+            if delayOlderCompletion && message.name == olderName {
+                await withCheckedContinuation { continuation in
+                    state.releaseOlder = continuation
+                    olderSuspended?.fulfill()
+                }
+            }
             if let sequence = message.receiptSequence {
                 state.delivered[message.name] = sequence
                 // Model the sequence gate used by native producer/publication
@@ -82,6 +99,8 @@ final class WebViewReceiptSequenceTests: XCTestCase {
             } else {
                 XCTFail("A native receipt must carry its reserved sequence")
             }
+            state.completed.append(message.name)
+            if delayOlderCompletion && message.name == newerName { newerCompleted?.fulfill() }
             delivered.fulfill()
         }
         var handlers = WebViewMessageHandlers([(olderName, handler), (newerName, handler)])
@@ -103,6 +122,11 @@ final class WebViewReceiptSequenceTests: XCTestCase {
             controller.add(recorder, name: name)
         }
         defer {
+            // A failed expectation or receipt unwrap must release a suspended
+            // handler before document teardown cancels its owned task.
+            let suspended = state.releaseOlder
+            state.releaseOlder = nil
+            suspended?.resume()
             state.afterOlderCapture = nil
             view.stopLoading()
             coordinator.tearDownBindingsForDetachedWebView(view)
@@ -129,7 +153,15 @@ final class WebViewReceiptSequenceTests: XCTestCase {
         if !reenterFromProvider {
             coordinator.userContentController(controller, didReceive: newer)
         }
+        if delayOlderCompletion {
+            await fulfillment(of: [try XCTUnwrap(olderSuspended), try XCTUnwrap(newerCompleted)], timeout: 10)
+            XCTAssertEqual(state.completed, [newerName])
+            let continuation = try XCTUnwrap(state.releaseOlder)
+            state.releaseOlder = nil
+            continuation.resume()
+        }
         await fulfillment(of: [delivered], timeout: 10)
+        if delayOlderCompletion { XCTAssertEqual(state.completed, [newerName, olderName]) }
         let olderSequence = try XCTUnwrap(state.delivered[olderName])
         let newerSequence = try XCTUnwrap(state.delivered[newerName])
         XCTAssertLessThan(olderSequence, newerSequence,
