@@ -34,5 +34,25 @@ final class WebViewMessageReceiptEvidenceTests: XCTestCase {
         let missing: Int? = evidence.value(for: "missing")
         XCTAssertNil(wrong)
         XCTAssertNil(missing)
+
+        // Even identical child/main URLs cannot establish native main-frame
+        // ownership without the exact WKFrameInfo flag.
+        let url = URL(string: "https://example.invalid/article")!
+        let unknown = WebViewMessageReceipt(name: "manabiReaderInitialized",
+            mainDocumentURL: url, requestURL: url)
+        XCTAssertFalse(unknown.isMainFrame)
+        XCTAssertFalse(unknown.reportsBFCacheRestoration)
+
+        let nativeMain = WebViewMessageReceipt(name: "manabiReaderInitialized",
+            mainDocumentURL: url, requestURL: url,
+            reportsBFCacheRestoration: true, isMainFrame: true)
+        XCTAssertTrue(nativeMain.isMainFrame)
+        XCTAssertTrue(nativeMain.reportsBFCacheRestoration)
+
+        let child = WebViewMessageReceipt(name: "manabiReaderInitialized",
+            mainDocumentURL: url, requestURL: url,
+            reportsBFCacheRestoration: false, isMainFrame: false)
+        XCTAssertFalse(child.isMainFrame)
+        XCTAssertFalse(child.reportsBFCacheRestoration)
     }
 }
