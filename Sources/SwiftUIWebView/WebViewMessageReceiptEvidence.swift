@@ -10,17 +10,28 @@ public struct WebViewMessageReceipt: Sendable {
     /// Nil means no caller binding was available; consumers must not invent one
     /// later. This identifies the receipt owner, not permission to mutate data.
     public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
+    /// Native WKFrameInfo.isMainFrame sampled at the original receipt turn.
+    /// Callers must not infer the frame from URL equality: a child can share
+    /// its parent's mainDocumentURL or navigate to the same URL.
+    public let isMainFrame: Bool
+    /// A main-frame script explicitly reported a persisted pageshow restore.
+    /// This is a fail-closed observation hint, not permission to mutate data.
+    public let reportsBFCacheRestoration: Bool
 
     public init(
         name: String,
         mainDocumentURL: URL?,
         requestURL: URL?,
-        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
+        reportsBFCacheRestoration: Bool = false,
+        isMainFrame: Bool = false
     ) {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
         self.requestURL = requestURL
         self.javaScriptBindingToken = javaScriptBindingToken
+        self.reportsBFCacheRestoration = reportsBFCacheRestoration
+        self.isMainFrame = isMainFrame
     }
 }
 
