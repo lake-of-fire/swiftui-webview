@@ -211,8 +211,8 @@ jobs:
 
           failed = False
           terminal = re.compile(
-              r"^\s*Test Case '(?P<identifier>.*?)'\s+(?P<result>passed|failed|skipped)(?:\b|$)",
-              re.IGNORECASE,
+              r"Test Case '(?P<identifier>-[^']+)' (?P<result>passed|failed|skipped) "
+              r"\((?P<duration>[0-9]+(?:\.[0-9]+)?) seconds\)\.$"
           )
           identity_patterns = (
               re.compile(r"^-\[(?:[A-Za-z_][\w]*\.)*(?P<class>[A-Za-z_][\w]*) (?P<method>test[A-Za-z0-9_]*)\]$"),
@@ -268,7 +268,7 @@ jobs:
                   lines = log_path.read_text(errors="replace").splitlines()
               records = []
               for line in lines:
-                  match = terminal.match(line)
+                  match = terminal.search(line)
                   if match:
                       records.append((parse_identity(match.group("identifier")), match.group("result").lower(), line))
 
@@ -308,3 +308,4 @@ jobs:
           path: qualification-evidence/
           if-no-files-found: error
           retention-days: 30
+
