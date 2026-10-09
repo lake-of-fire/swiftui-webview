@@ -72,6 +72,7 @@ private final class URLTransitionReceiptHost {
         _ = try await view.evaluateJavaScript("""
             \(script)
             window.webkit.messageHandlers['\(name)'].postMessage({label:'\(label)', url:location.href});
+            0;
             """)
     }
 
