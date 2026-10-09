@@ -1,0 +1,312 @@
+name: Native SPA URL transition receipts
+
+on:
+  push:
+    branches:
+      - fix/69e4-native-url-selection-intent-20261009
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - '.github/workflows/webview-spa-native.yml'
+  pull_request:
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Tests/**'
+      - '.github/workflows/webview-spa-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-spa-url-transition-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  native-webview-tests:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Check out the exact selected component head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the log formatter
+        shell: bash
+        run: brew install xcsift
+
+      - name: Record selected source and Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification-evidence
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git rev-parse HEAD | tee qualification-evidence/source-commit.txt
+          git rev-parse 'HEAD^{tree}' | tee qualification-evidence/source-tree.txt
+          git ls-tree -r HEAD | tee qualification-evidence/source-tree-leaves.txt
+          if git cat-file -e "$SOURCE_SHA:Package.resolved" 2>/dev/null; then
+            git show "$SOURCE_SHA:Package.resolved" > qualification-evidence/committed-Package.resolved
+            shasum -a 256 qualification-evidence/committed-Package.resolved \
+              > qualification-evidence/committed-Package.resolved.sha256
+          else
+            printf 'absent from selected source commit\n' \
+              > qualification-evidence/committed-Package.resolved.state
+          fi
+          git archive --format=tar "$SOURCE_SHA" \
+            > qualification-evidence/selected-source.tar
+          shasum -a 256 qualification-evidence/selected-source.tar \
+            > qualification-evidence/selected-source.tar.sha256
+          xcodebuild -version | tee qualification-evidence/xcode-version.txt
+          swift --version | tee qualification-evidence/swift-version.txt
+
+      - name: Resolve and retain the exact public SwiftPM dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_root="$RUNNER_TEMP/swiftuiwebview-selected-source"
+          mkdir -p "$package_root"
+          tar -xf qualification-evidence/selected-source.tar -C "$package_root"
+          cd "$package_root"
+          set +e
+          swift package resolve \
+            --scratch-path "$RUNNER_TEMP/swiftuiwebview-resolve" \
+            2>&1 | tee "$GITHUB_WORKSPACE/qualification-evidence/resolve.raw.log" \
+            | xcsift -w -E \
+            | tee "$GITHUB_WORKSPACE/qualification-evidence/resolve.filtered.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[*]}" \
+            > "$GITHUB_WORKSPACE/qualification-evidence/resolve.status"
+          failed=0
+          for status in "${statuses[@]}"; do
+            if [[ "$status" != '0' ]]; then failed=1; fi
+          done
+          if (( failed )); then exit 1; fi
+          test -f Package.resolved
+          cp Package.resolved "$GITHUB_WORKSPACE/qualification-evidence/resolved-Package.resolved"
+          shasum -a 256 "$GITHUB_WORKSPACE/qualification-evidence/resolved-Package.resolved" \
+            > "$GITHUB_WORKSPACE/qualification-evidence/resolved-Package.resolved.sha256"
+          tar -cf "$GITHUB_WORKSPACE/qualification-evidence/resolved-test-inputs.tar" \
+            -C "$package_root" .
+          shasum -a 256 "$GITHUB_WORKSPACE/qualification-evidence/resolved-test-inputs.tar" \
+            > "$GITHUB_WORKSPACE/qualification-evidence/resolved-test-inputs.tar.sha256"
+          printf '%s\n' "$package_root" \
+            > "$GITHUB_WORKSPACE/qualification-evidence/package-root.txt"
+
+      - name: Run the complete XCTest package in Debug and Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_root="$(cat qualification-evidence/package-root.txt)"
+          expected_lock="$(awk '{print $1}' qualification-evidence/resolved-Package.resolved.sha256)"
+          phase_status=0
+
+          run_swift_phase() {
+            local phase="$1"
+            local configuration="$2"
+            local scratch="$RUNNER_TEMP/swiftuiwebview-$phase"
+            set +e
+            (
+              cd "$package_root"
+              swift test \
+                --configuration "$configuration" \
+                --scratch-path "$scratch" \
+                --disable-experimental-prebuilts \
+                --skip-update
+            ) 2>&1 | tee "qualification-evidence/$phase.raw.log" \
+              | xcsift -w -E \
+              | tee "qualification-evidence/$phase.filtered.log"
+            local statuses=("${PIPESTATUS[@]}")
+            set -e
+            printf '%s\n' "${statuses[*]}" > "qualification-evidence/$phase.status"
+            local failed=0
+            for status in "${statuses[@]}"; do
+              if [[ "$status" != '0' ]]; then failed=1; fi
+            done
+            if [[ ! -f "$package_root/Package.resolved" ]] || \
+               [[ "$(shasum -a 256 "$package_root/Package.resolved" | awk '{print $1}')" != "$expected_lock" ]]; then
+              printf 'Package.resolved changed or disappeared during %s\n' "$phase" \
+                > "qualification-evidence/$phase.lock-integrity.txt"
+              failed=1
+            fi
+            if (( failed )); then phase_status=1; fi
+            printf '\n--- %s process statuses: %s ---\n' "$phase" "${statuses[*]}"
+            tail -n 24 "qualification-evidence/$phase.raw.log"
+          }
+
+          run_swift_phase debug debug
+          run_swift_phase release release
+          printf '%s\n' "$phase_status" > qualification-evidence/build-test-overall.status
+          exit "$phase_status"
+
+      - name: Require the URL-intent and native-receipt regression methods
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification-evidence
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          required = {
+              "WebViewURLTransitionIntentTests": [
+                  "testInitialNativeObservationDoesNotInventURLTransition",
+                  "testNativeTransitionsRetainOrderBeforeAnyDeferredPublication",
+                  "testFragmentChangeRetainsCanonicalTransitionIdentity",
+                  "testForeignNativeSourceCannotReplaceOwnedIntent",
+                  "testReplacementBindingPermanentlyWithdrawsPriorURLIntent",
+                  "testInvalidatedCaptureCannotCreateAuthorityFromLateURLObservation",
+              ],
+              "WebViewURLTransitionReceiptTests": [
+                  "testNativeSPAReceiptAndURLPublicationCarrySameOriginalIntent",
+                  "testNativeBaselineAndFragmentsCannotPublishFreshSelectionIntent",
+                  "testNativeRapidReturnCannotReuseIntentEvenWhenIntermediatePublicationIsDeferred",
+                  "testForgedLocationHintCannotReplaceNativeReceiptIntent",
+                  "testNativeDocumentDetachWithdrawsRetainedTransition",
+              ],
+              "WebViewReceiptDispatchTests": [
+                  "testOrdinaryReceiptKeepsItsPreDispatchLifetime",
+                  "testBrokerDeferralKeepsTheOriginalReceiptLifetime",
+                  "testRestorationHintIsCapturedBeforeOrdinaryDispatch",
+                  "testRestorationHintSurvivesBrokerDeferralWithoutRecapture",
+                  "testChildRestorationHintRetainsNativeChildFrameThroughBothDispatchRoutes",
+                  "testMissingStringAndNumericRestorationHintsDoNotReportRestore",
+              ],
+              "WebViewReceiptDocumentBindingTests": [
+                  "testLegacyReceiptInitializerDoesNotInventNativeBinding",
+                  "testOrdinaryDeliveryUsesTheExactReceiptBinding",
+                  "testBrokerDeferredDeliveryUsesTheExactReceiptBinding",
+                  "testOrdinaryProviderReentryCannotRetargetTheMessageBinding",
+                  "testBrokerProviderReentryCannotRetargetTheMessageBinding",
+                  "testSameURLAndSameMessageNameStillIdentifyDifferentNativeViews",
+                  "testSameURLDocumentReplacementKeepsOldEvidenceAndAllowsFreshReceipt",
+                  "testRealDeliveryWithoutCallerRetainsMissingBinding",
+              ],
+              "WebViewReceiptSequenceTests": [
+                  "testProviderReentryKeepsTheEarlierReceiptSequence",
+                  "testDeferredProviderReentryKeepsTheEarlierReceiptSequence",
+                  "testBrokerDeferralCannotMakeAnOlderReceiptNewer",
+                  "testLaterBrokerDeferralPreservesNativeArrivalOrder",
+                  "testNewerHandlerCompletesBeforeExplicitlySuspendedOlderHandler",
+              ],
+              "WebViewReceiptOwnershipTests": [
+                  "testOrdinaryStaleReceiptRejectsWhileFreshLifetimeSucceeds",
+                  "testBrokerDeferredStaleReceiptRejectsWhileFreshLifetimeSucceeds",
+                  "testConcurrentSameURLWebViewsKeepDistinctEvidenceAcrossSuspension",
+                  "testDocumentReplacementCancelsOldWorkButDeliversNewDocument",
+                  "testUnregisteredEvidenceRemainsMissingAtRealDelivery",
+              ],
+          }
+
+          failed = False
+          terminal = re.compile(
+              r"^\s*Test Case '(?P<identifier>.*?)'\s+(?P<result>passed|failed|skipped)(?:\b|$)",
+              re.IGNORECASE,
+          )
+          identity_patterns = (
+              re.compile(r"^-\[(?:[A-Za-z_][\w]*\.)*(?P<class>[A-Za-z_][\w]*) (?P<method>test[A-Za-z0-9_]*)\]$"),
+              re.compile(r"^(?:[A-Za-z_][\w]*\.)*(?P<class>[A-Za-z_][\w]*)\.(?P<method>test[A-Za-z0-9_]*)(?:\(\))?$"),
+          )
+
+          def parse_identity(identifier):
+              for pattern in identity_patterns:
+                  match = pattern.fullmatch(identifier)
+                  if match:
+                      return match.group("class"), match.group("method")
+              return None
+
+          expected_count = sum(map(len, required.values()))
+          for configuration in ("debug", "release"):
+              log_path = Path("qualification-evidence") / f"{configuration}.raw.log"
+              receipt = {
+                  "configuration": configuration,
+                  "source_commit": Path("qualification-evidence/source-commit.txt").read_text().strip()
+                      if Path("qualification-evidence/source-commit.txt").is_file() else None,
+                  "source_tree": Path("qualification-evidence/source-tree.txt").read_text().strip()
+                      if Path("qualification-evidence/source-tree.txt").is_file() else None,
+                  "package_resolved_sha256": Path("qualification-evidence/resolved-Package.resolved.sha256").read_text().split()[0]
+                      if Path("qualification-evidence/resolved-Package.resolved.sha256").is_file() else None,
+                  "scope": "Full SwiftUIWebView SwiftPM XCTest suite; exactly one passing terminal XCTest record required for each URL-transition and retained receipt method.",
+                  "expected_method_count": expected_count,
+                  "terminal_passing_method_count": 0,
+                  "pipeline_statuses": None,
+                  "resolve_pipeline_statuses": None,
+                  "result": "failed",
+                  "identities": [],
+                  "errors": [],
+              }
+              status_path = Path("qualification-evidence") / f"{configuration}.status"
+              try:
+                  statuses = [int(value) for value in status_path.read_text().split()]
+              except (OSError, ValueError):
+                  statuses = []
+              receipt["pipeline_statuses"] = statuses
+              if statuses != [0, 0, 0, 0]:
+                  receipt["errors"].append(f"{configuration} process statuses must be exactly [0, 0, 0, 0]")
+              try:
+                  resolve_statuses = [int(value) for value in Path("qualification-evidence/resolve.status").read_text().split()]
+              except (OSError, ValueError):
+                  resolve_statuses = []
+              receipt["resolve_pipeline_statuses"] = resolve_statuses
+              if resolve_statuses != [0, 0, 0, 0]:
+                  receipt["errors"].append("dependency resolution process statuses must be exactly [0, 0, 0, 0]")
+              if not log_path.is_file():
+                  receipt["errors"].append(f"missing test log: {log_path}")
+                  lines = []
+              else:
+                  lines = log_path.read_text(errors="replace").splitlines()
+              records = []
+              for line in lines:
+                  match = terminal.match(line)
+                  if match:
+                      records.append((parse_identity(match.group("identifier")), match.group("result").lower(), line))
+
+              for class_name, methods in required.items():
+                  for method in methods:
+                      matching = []
+                      for identity, outcome, line in records:
+                          if identity == (class_name, method):
+                              matching.append({"outcome": outcome, "record": line})
+                      identity = {"class": class_name, "method": method, "terminal_records": matching}
+                      receipt["identities"].append(identity)
+                      if len(matching) != 1 or matching[0]["outcome"] != "passed":
+                          receipt["errors"].append(
+                              f"{class_name}/{method}: expected one passing terminal XCTest record; found {matching}"
+                          )
+                      else:
+                          receipt["terminal_passing_method_count"] += 1
+              if receipt["errors"]:
+                  failed = True
+                  print(f"{configuration}: FAILED ({len(receipt['errors'])} verifier issues)")
+                  for error in receipt["errors"]:
+                      print(error)
+              else:
+                  receipt["result"] = "passed"
+                  print(f"{configuration}: passed {receipt['terminal_passing_method_count']}/{expected_count} required terminal test records; pipeline statuses {receipt['pipeline_statuses']}")
+              receipt_path = Path("qualification-evidence") / f"{configuration}-method-verification.json"
+              receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+          if failed:
+              raise SystemExit(1)
+          PY
+
+      - name: Retain source, dependency resolution, logs and process statuses
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-spa-url-transition-${{ github.run_id }}
+          path: qualification-evidence/
+          if-no-files-found: error
+          retention-days: 30
