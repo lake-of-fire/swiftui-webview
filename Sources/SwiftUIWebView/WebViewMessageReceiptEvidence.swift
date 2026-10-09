@@ -5,6 +5,9 @@ public struct WebViewMessageReceipt: Sendable {
     public let name: String
     public let mainDocumentURL: URL?
     public let requestURL: URL?
+    /// Current URL of the owning native WebView, sampled at receipt. Unlike a
+    /// frame request, this follows same-document history changes immediately.
+    public let nativeDocumentURL: URL?
     /// Exact native caller/document binding sampled before invoking any app
     /// provider. Two views or two successive documents may have the same URL.
     /// Nil means no caller binding was available; consumers must not invent one
@@ -22,6 +25,7 @@ public struct WebViewMessageReceipt: Sendable {
         name: String,
         mainDocumentURL: URL?,
         requestURL: URL?,
+        nativeDocumentURL: URL? = nil,
         javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
         reportsBFCacheRestoration: Bool = false,
         isMainFrame: Bool = false
@@ -29,6 +33,7 @@ public struct WebViewMessageReceipt: Sendable {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
         self.requestURL = requestURL
+        self.nativeDocumentURL = nativeDocumentURL
         self.javaScriptBindingToken = javaScriptBindingToken
         self.reportsBFCacheRestoration = reportsBFCacheRestoration
         self.isMainFrame = isMainFrame

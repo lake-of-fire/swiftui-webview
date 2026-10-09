@@ -4715,6 +4715,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             name: receiptName,
             mainDocumentURL: receiptFrame.request.mainDocumentURL,
             requestURL: receiptFrame.request.url,
+            nativeDocumentURL: sourceWebView.url,
             javaScriptBindingToken: receiptBindingToken,
             reportsBFCacheRestoration: reportsBFCacheRestoration,
             isMainFrame: receiptFrame.isMainFrame
