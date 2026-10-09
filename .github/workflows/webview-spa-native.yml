@@ -82,7 +82,6 @@ jobs:
             --scratch-path "$RUNNER_TEMP/swiftuiwebview-resolve" \
             2>&1 | tee "$GITHUB_WORKSPACE/qualification-evidence/resolve.raw.log"
           statuses=("${PIPESTATUS[@]}")
-          statuses=("${PIPESTATUS[@]}")
           set -e
           printf '%s\n' "${statuses[*]}" \
             > "$GITHUB_WORKSPACE/qualification-evidence/resolve.status"
