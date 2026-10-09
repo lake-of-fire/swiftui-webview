@@ -7,7 +7,9 @@ public final class WebViewURLTransitionIntent: @unchecked Sendable {
     public let id = UUID()
     public let destinationURL: URL
     public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken
-    internal let representsURLChange: Bool
+    /// Baseline document observations carry provenance without requesting a
+    /// successor selection. True transitions must keep their exact handoff.
+    public let representsURLChange: Bool
     private let lock = NSLock()
     private var current = true
 
