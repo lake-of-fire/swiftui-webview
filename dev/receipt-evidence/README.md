@@ -15,3 +15,22 @@ The product commit's parent is the exact Reader baseline, not the temporary prep
 ## Boundary not claimed
 
 Receipt capture closes the native-receipt-to-handler gap. An event generated in JavaScript before a lifetime transition but delivered to native afterward is a different producer-boundary question. An application cannot claim that this generic transport alone proves producer lifetime authority. The coordinated Core change must consume this evidence without late recapture, retain final same-Realm checks, and run its real retained-lifetime regression matrix.
+
+
+## Receipt binding token
+
+The receipt header also retains the exact JavaScript binding token captured
+before application providers run. Ordinary and broker-deferred messages carry
+that same token; neither route rereads a binding installed by a provider or a
+later callback. The token is evidence, and final application authority still
+requires its existing document and Realm validation.
+
+`WebViewReceiptBindingTokenTests` covers both routes with real WebKit delivery.
+A provider synchronously rebinds the caller, and each handler must receive the
+original token alongside its original captured evidence. The original lifetime
+negative-control methods remain unchanged.
+
+`ReceiptHarness.swift` now imports and links the production `SwiftUIWebView`
+module because its receipt header references the framework's binding-token
+type. The earlier standalone-header harness results above belong to their
+historical inputs. No execution of the updated portable harness is claimed here.

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUIWebView
 
 @main struct ReceiptHarness {
     @MainActor static func main() async {

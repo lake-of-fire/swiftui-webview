@@ -5,11 +5,16 @@ public struct WebViewMessageReceipt: Sendable {
     public let name: String
     public let mainDocumentURL: URL?
     public let requestURL: URL?
+    public let javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken?
 
-    public init(name: String, mainDocumentURL: URL?, requestURL: URL?) {
+    public init(
+        name: String, mainDocumentURL: URL?, requestURL: URL?,
+        javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil
+    ) {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
         self.requestURL = requestURL
+        self.javaScriptBindingToken = javaScriptBindingToken
     }
 }
 

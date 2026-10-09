@@ -4666,10 +4666,12 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         }
         // Capture application evidence at receipt, before either the broker's
         // deferred admission or the handler scheduler can suspend this event.
+        let receiptBindingToken = javaScriptBindingToken(for: sourceWebView)
         let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
             name: message.name,
             mainDocumentURL: message.frameInfo.request.mainDocumentURL,
-            requestURL: message.frameInfo.request.url
+            requestURL: message.frameInfo.request.url,
+            javaScriptBindingToken: receiptBindingToken
         ))
         let acceptsTrustedUserAction = messageHandlers
             .trustedUserActionHandlerNames.contains(message.name)
@@ -4692,9 +4694,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             let handlerName = message.name
             let frameInfo = message.frameInfo
             let body = message.body
-            let javaScriptBindingToken = javaScriptBindingToken(
-                for: message.webView
-            )
+            let javaScriptBindingToken = receiptBindingToken
             Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self,
@@ -4747,7 +4747,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             name: message.name,
             body: message.body,
             receiptSequence: WebViewMessageReceiptSequencer.reserve(),
-            javaScriptBindingToken: javaScriptBindingToken(for: message.webView),
+            javaScriptBindingToken: receiptBindingToken,
             trustedUserAction: trustedUserAction
         )
         //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
