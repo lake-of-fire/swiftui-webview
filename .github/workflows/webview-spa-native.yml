@@ -80,9 +80,8 @@ jobs:
           set +e
           swift package resolve \
             --scratch-path "$RUNNER_TEMP/swiftuiwebview-resolve" \
-            2>&1 | tee "$GITHUB_WORKSPACE/qualification-evidence/resolve.raw.log" \
-            | xcsift -w -E \
-            | tee "$GITHUB_WORKSPACE/qualification-evidence/resolve.filtered.log"
+            2>&1 | tee "$GITHUB_WORKSPACE/qualification-evidence/resolve.raw.log"
+          statuses=("${PIPESTATUS[@]}")
           statuses=("${PIPESTATUS[@]}")
           set -e
           printf '%s\n' "${statuses[*]}" \
@@ -261,8 +260,8 @@ jobs:
               except (OSError, ValueError):
                   resolve_statuses = []
               receipt["resolve_pipeline_statuses"] = resolve_statuses
-              if resolve_statuses != [0, 0, 0, 0]:
-                  receipt["errors"].append("dependency resolution process statuses must be exactly [0, 0, 0, 0]")
+              if resolve_statuses != [0, 0]:
+                  receipt["errors"].append("dependency resolution process statuses must be exactly [0, 0]")
               if not log_path.is_file():
                   receipt["errors"].append(f"missing test log: {log_path}")
                   lines = []
