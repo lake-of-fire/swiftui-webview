@@ -1339,6 +1339,7 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var backList: [WKBackForwardListItem]
     public internal(set) var forwardList: [WKBackForwardListItem]
     public internal(set) var paginationState: WebViewPaginationState?
+    public internal(set) var urlTransitionIntent: WebViewURLTransitionIntent? = nil
 
     public mutating func markReaderRenderReady() {
         hasReaderRenderReady = true
@@ -1379,6 +1380,7 @@ public struct WebViewState: Equatable, Sendable {
         && lhs.backList == rhs.backList
         && lhs.forwardList == rhs.forwardList
         && lhs.paginationState == rhs.paginationState
+        && lhs.urlTransitionIntent?.id == rhs.urlTransitionIntent?.id
     }
 }
 
@@ -3507,6 +3509,7 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func invalidateDocumentCallbackContext() {
+        urlPublicationReceiptSequencer.invalidate()
         scriptCaller?.invalidateJavaScriptBindingCommitFence(
             ownedBy: scriptCallerBindingOwnerID
         )
@@ -3524,6 +3527,8 @@ public class WebViewCoordinator: NSObject {
         )
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = true
+        urlPublicationReceiptSequencer.configure(webViewID: ObjectIdentifier(sourceWebView),
+            binding: javaScriptBindingToken(for: sourceWebView), url: sourceWebView.url)
         trustedUserActionAdmissions.invalidateAll()
     }
 
@@ -3838,6 +3843,7 @@ public class WebViewCoordinator: NSObject {
 
     @MainActor
     private func clearScriptCallerBinding() {
+        urlPublicationReceiptSequencer.invalidate()
         scriptCaller?.clearBinding(ownedBy: scriptCallerBindingOwnerID)
         scriptCallerBoundWebView = nil
     }
@@ -3932,6 +3938,8 @@ public class WebViewCoordinator: NSObject {
             }
         )
         scriptCallerBoundWebView = webView
+        urlPublicationReceiptSequencer.configure(webViewID: ObjectIdentifier(webView),
+            binding: javaScriptBindingToken(for: webView), url: webView.url)
     }
 
     @MainActor
@@ -4192,13 +4200,14 @@ public class WebViewCoordinator: NSObject {
                   let newURL = maybeNewURL else {
                 return
             }
-            let receiptSequence = self.urlPublicationReceiptSequencer.reserve()
+            let receipt = self.urlPublicationReceiptSequencer.observe(newURL, from: ObjectIdentifier(webView))
             Task { @MainActor [weak self, weak webView] in
                 guard let self, let webView else { return }
                 self.handleObservedURLChange(
                     newURL,
                     from: webView,
-                    receiptSequence: receiptSequence
+                    receiptSequence: receipt.sequence,
+                    nativeTransition: receipt.intent
                 )
             }
         }
@@ -4320,9 +4329,18 @@ public class WebViewCoordinator: NSObject {
         _ newURL: URL,
         from sourceWebView: WKWebView,
         receiptSequence: UInt64,
-        forceHistoryStatePublication: Bool = false
+        forceHistoryStatePublication: Bool = false,
+        nativeTransition: WebViewURLTransitionIntent? = nil
     ) {
+        // A page-reported URL is only a notification hint. Check the native
+        // source before it can advance or revoke transition provenance.
+        guard ownsWebView(sourceWebView), sourceWebView.url == newURL else { return }
+        let transition = nativeTransition
+            ?? urlPublicationReceiptSequencer.observe(newURL, from: ObjectIdentifier(sourceWebView)).intent
+        guard transition?.isCurrent != false else { return }
         let currentState = webView.state
+        let transitionChanged = transition?.representsURLChange == true
+            && transition?.id != currentState.urlTransitionIntent?.id
         let backList = sourceWebView.backForwardList.backList
         let forwardList = sourceWebView.backForwardList.forwardList
         let hasHistoryStateChange = forceHistoryStatePublication
@@ -4330,6 +4348,7 @@ public class WebViewCoordinator: NSObject {
             || currentState.canGoForward != sourceWebView.canGoForward
             || currentState.backList != backList
             || currentState.forwardList != forwardList
+            || transitionChanged
         guard ownsWebView(sourceWebView),
               receiptSequence > latestURLPublicationReceiptSequence,
               Self.shouldPublishObservedURL(
@@ -4349,7 +4368,7 @@ public class WebViewCoordinator: NSObject {
                 || currentState.canGoForward != sourceWebView.canGoForward
                 || currentState.backList != backList
                 || currentState.forwardList != forwardList
-                || forceHistoryStatePublication else {
+                || forceHistoryStatePublication || transitionChanged else {
             return
         }
 
@@ -4359,7 +4378,10 @@ public class WebViewCoordinator: NSObject {
             canGoBack: sourceWebView.canGoBack,
             canGoForward: sourceWebView.canGoForward,
             backList: backList,
-            forwardList: forwardList
+            forwardList: forwardList,
+            // Baseline/fragment-only publication updates browser chrome but
+            // cannot manufacture a new native content selection handoff.
+            urlTransitionIntent: transition?.representsURLChange == true ? transition : nil
         )
     }
 
@@ -4388,8 +4410,11 @@ public class WebViewCoordinator: NSObject {
         canGoForward: Bool? = nil,
         backList: [WKBackForwardListItem]? = nil,
         forwardList: [WKBackForwardListItem]? = nil,
+        urlTransitionIntent: WebViewURLTransitionIntent? = nil,
         error: Error? = nil
     ) -> WebViewState {
+        let publicationSource = navigator.webView
+        let publicationBinding = publicationSource.flatMap { javaScriptBindingToken(for: $0) }
         var newState = webView.state
         newState.isLoading = isLoading
         var pageURLChanged = false
@@ -4420,15 +4445,29 @@ public class WebViewCoordinator: NSObject {
         if pageURLChanged {
             newState.mainFrameHTTPStatusCode = nil
         }
+        let transitionChanged = urlTransitionIntent?.representsURLChange == true
+            && newState.urlTransitionIntent?.id != urlTransitionIntent?.id
+        if pageURLChanged || urlTransitionIntent != nil {
+            newState.urlTransitionIntent = urlTransitionIntent
+        }
         //        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
-        
-        if pageURLChanged {
+        // A Binding setter can synchronously replace document ownership or state.
+        guard navigator.webView === publicationSource,
+              publicationSource.flatMap({ javaScriptBindingToken(for: $0) }) == publicationBinding,
+              webView.state == newState,
+              urlTransitionIntent?.isCurrent != false else { return newState }
+
+        if pageURLChanged || transitionChanged {
             onURLChanged?(newState)
         }
 
+        guard navigator.webView === publicationSource,
+              publicationSource.flatMap({ javaScriptBindingToken(for: $0) }) == publicationBinding,
+              webView.state == newState,
+              urlTransitionIntent?.isCurrent != false else { return newState }
         updateLoadingProgress(isLoading: isLoading, estimatedProgress: navigator.webView?.estimatedProgress)
-            
+
         return newState
     }
 
@@ -4564,12 +4603,14 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             return
         } else if message.name == "swiftUIWebViewLocationChanged" {
             guard let urlString = message.body as? String,
-                  let newURL = URL(string: urlString) else { return }
+                  let newURL = URL(string: urlString), newURL == sourceWebView.url else { return }
+            let receipt = urlPublicationReceiptSequencer.observe(newURL, from: ObjectIdentifier(sourceWebView))
             handleObservedURLChange(
                 newURL,
                 from: sourceWebView,
-                receiptSequence: urlPublicationReceiptSequencer.reserve(),
-                forceHistoryStatePublication: true
+                receiptSequence: receipt.sequence,
+                forceHistoryStatePublication: true,
+                nativeTransition: receipt.intent
             )
             return
         } else if message.name == "swiftUIWebViewImageUpdated" {
@@ -4699,6 +4740,23 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         // reenter binding setup synchronously. Both delivery paths must retain
         // this exact token, not sample a replacement after evidence capture.
         let receiptBindingToken = javaScriptBindingToken(for: sourceWebView)
+        let receiptNativeDocumentURL = sourceWebView.url
+        // Reconcile native URL ownership before app evidence capture. KVO has
+        // already recorded every observed transition before its actor hop; this
+        // path also works when WebKit delivers the script callback first.
+        let receiptTransition: WebViewURLTransitionIntent?
+        if let nativeURL = receiptNativeDocumentURL {
+            let receipt = urlPublicationReceiptSequencer.observe(nativeURL, from: ObjectIdentifier(sourceWebView))
+            receiptTransition = receipt.intent?.javaScriptBindingToken == receiptBindingToken ? receipt.intent : nil
+            handleObservedURLChange(nativeURL, from: sourceWebView,
+                receiptSequence: receipt.sequence,
+                nativeTransition: receiptTransition)
+        } else {
+            receiptTransition = nil
+        }
+        guard ownsDocumentCallbackContext(documentContext),
+              javaScriptBindingToken(for: sourceWebView) == receiptBindingToken,
+              receiptTransition?.isCurrent != false else { return }
         // Copy only a strict Boolean hint. The page cannot authorize a fresh
         // visit; it can report restoration before provider or scheduler waits.
         let reportsBFCacheRestoration: Bool
@@ -4715,10 +4773,11 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             name: receiptName,
             mainDocumentURL: receiptFrame.request.mainDocumentURL,
             requestURL: receiptFrame.request.url,
-            nativeDocumentURL: sourceWebView.url,
+            nativeDocumentURL: receiptNativeDocumentURL,
             javaScriptBindingToken: receiptBindingToken,
             reportsBFCacheRestoration: reportsBFCacheRestoration,
-            isMainFrame: receiptFrame.isMainFrame
+            isMainFrame: receiptFrame.isMainFrame,
+            urlTransitionIntent: receiptTransition
         ))
         let acceptsTrustedUserAction = receiptHandlers
             .trustedUserActionHandlerNames.contains(receiptName)
