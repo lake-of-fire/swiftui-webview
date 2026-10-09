@@ -17,6 +17,8 @@ public struct WebViewMessageReceipt: Sendable {
     /// Native WebKit frame identity at receipt, independent of page payload.
     /// A child-frame restoration hint does not identify a restored main visit.
     public let isMainFrame: Bool
+    /// Native transition retained before URL publication/evidence-provider callouts.
+    public let urlTransitionIntent: WebViewURLTransitionIntent?
 
     public init(
         name: String,
@@ -24,7 +26,8 @@ public struct WebViewMessageReceipt: Sendable {
         requestURL: URL?,
         javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
         reportsBFCacheRestoration: Bool = false,
-        isMainFrame: Bool = false
+        isMainFrame: Bool = false,
+        urlTransitionIntent: WebViewURLTransitionIntent? = nil
     ) {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
@@ -32,6 +35,7 @@ public struct WebViewMessageReceipt: Sendable {
         self.javaScriptBindingToken = javaScriptBindingToken
         self.reportsBFCacheRestoration = reportsBFCacheRestoration
         self.isMainFrame = isMainFrame
+        self.urlTransitionIntent = urlTransitionIntent
     }
 }
 
