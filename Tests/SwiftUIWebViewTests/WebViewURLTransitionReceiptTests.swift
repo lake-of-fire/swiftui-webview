@@ -18,6 +18,7 @@ private final class URLTransitionReceiptState {
     var messages: [String: CapturedURLTransitionReceipt] = [:]
     var onMessage: ((String) -> Void)?
     var onLoaded: (() -> Void)?
+    var onStateSet: (() -> Void)?
 }
 
 @MainActor
@@ -50,7 +51,7 @@ private final class URLTransitionReceiptHost {
             state.onMessage?(label)
         }
         let model = WebView(navigator: WebViewNavigator(),
-            state: Binding(get: { state.webState }, set: { state.webState = $0 }),
+            state: Binding(get: { state.webState }, set: { state.webState = $0; state.onStateSet?() }),
             scriptCaller: caller,
             onNavigationFinished: { _ in state.onLoaded?() },
             onURLChanged: { snapshot in state.publications.append(snapshot) })
@@ -79,6 +80,7 @@ private final class URLTransitionReceiptHost {
     func close() {
         state.onMessage = nil
         state.onLoaded = nil
+        state.onStateSet = nil
         view.stopLoading()
         coordinator.tearDownBindingsForDetachedWebView(view)
         view.navigationDelegate = nil
@@ -119,7 +121,7 @@ final class WebViewURLTransitionReceiptTests: XCTestCase {
         XCTAssertTrue(intent.isCurrent)
         XCTAssertTrue(intent.representsURLChange)
         XCTAssertEqual(captured.receipt.javaScriptBindingToken, intent.javaScriptBindingToken)
-        XCTAssertEqual(captured.receipt.mainDocumentURL ?? captured.receipt.requestURL, b,
+        XCTAssertEqual(captured.receipt.nativeDocumentURL, b,
             "The application may reserve this destination only from native receipt evidence")
         XCTAssertEqual(captured.publishedURL, b)
         XCTAssertEqual(captured.publishedIntentID, intent.id)
@@ -192,4 +194,25 @@ final class WebViewURLTransitionReceiptTests: XCTestCase {
         host.close()
         XCTAssertFalse(intent.isCurrent)
     }
+    func testReentrantBindingSetterCannotPublishRetiredURLIntent() async throws {
+        let host = await loadedHost()
+        let originalBinding = try XCTUnwrap(host.caller.currentJavaScriptBindingToken)
+        let intent = WebViewURLTransitionIntent(
+            destinationURL: URL(string: "https://example.invalid/native-transition/B")!,
+            javaScriptBindingToken: originalBinding)
+        var replaced = false
+        host.state.onStateSet = {
+            guard !replaced else { return }
+            replaced = true
+            host.state.onStateSet = nil
+            host.coordinator.installScriptCallerBinding(for: host.view,
+                asyncCaller: { _, _, _, _ in .init(nil) }, unsafeCaller: nil, snapshotCapture: nil)
+        }
+        _ = host.coordinator.setLoading(false, pageURL: intent.destinationURL, urlTransitionIntent: intent)
+        XCTAssertTrue(replaced)
+        XCTAssertNotEqual(originalBinding, host.caller.currentJavaScriptBindingToken)
+        XCTAssertEqual(host.state.publications.count, 0,
+            "A Binding setter that replaces native ownership must suppress the original callback")
+    }
+
 }

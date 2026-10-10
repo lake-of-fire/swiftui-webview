@@ -279,6 +279,9 @@ public extension EnvironmentValues {
 }
 
 public struct WebViewMessageHandlers: Sendable {
+    /// Named app providers owned by this handler collection, never a global
+    /// owner registration. Composition collisions permanently withdraw evidence.
+    public let receiptEvidenceProviders: [String: WebViewMessageReceiptCapture.Provider]
     public let handlers: OrderedDictionary<String, @Sendable (WebViewMessage) async -> Void>
     public let cancellationHandlers: OrderedDictionary<
         String,
@@ -296,8 +299,10 @@ public struct WebViewMessageHandlers: Sendable {
             @MainActor @Sendable (WebViewMessage) -> Void
         > = [:],
         trustedUserActionHandlerNames: Set<String> = [],
-        requiredTrustedUserActionHandlerNames: Set<String> = []
+        requiredTrustedUserActionHandlerNames: Set<String> = [],
+        receiptEvidenceProviders: [String: WebViewMessageReceiptCapture.Provider] = [:]
     ) {
+        self.receiptEvidenceProviders = receiptEvidenceProviders
         self.handlers = handlers
         self.cancellationHandlers = cancellationHandlers
         self.trustedUserActionHandlerNames = trustedUserActionHandlerNames
@@ -313,15 +318,22 @@ public struct WebViewMessageHandlers: Sendable {
             @MainActor @Sendable (WebViewMessage) -> Void
         > = [:],
         trustedUserActionHandlerNames: Set<String> = [],
-        requiredTrustedUserActionHandlerNames: Set<String> = []
+        requiredTrustedUserActionHandlerNames: Set<String> = [],
+        receiptEvidenceProviders: [String: WebViewMessageReceiptCapture.Provider] = [:]
     ) {
         self.init(
             OrderedDictionary(uniqueKeysWithValues: pairs),
             cancellationHandlers: cancellationHandlers,
             trustedUserActionHandlerNames: trustedUserActionHandlerNames,
             requiredTrustedUserActionHandlerNames:
-                requiredTrustedUserActionHandlerNames
+                requiredTrustedUserActionHandlerNames,
+            receiptEvidenceProviders: receiptEvidenceProviders
         )
+    }
+
+    @MainActor
+    public func captureReceiptEvidence(_ receipt: WebViewMessageReceipt) -> WebViewMessageReceiptEvidence {
+        WebViewMessageReceiptCapture.capture(receipt, scopedProviders: receiptEvidenceProviders)
     }
 
     static func runComposedHandlers<Message: Sendable>(
@@ -368,7 +380,10 @@ public struct WebViewMessageHandlers: Sendable {
                     .union(other.trustedUserActionHandlerNames),
             requiredTrustedUserActionHandlerNames:
                 requiredTrustedUserActionHandlerNames
-                    .union(other.requiredTrustedUserActionHandlerNames)
+                    .union(other.requiredTrustedUserActionHandlerNames),
+            receiptEvidenceProviders: receiptEvidenceProviders.merging(other.receiptEvidenceProviders) {
+                _, _ in { _ in nil }
+            }
         )
     }
     
@@ -384,7 +399,8 @@ public struct WebViewMessageHandlers: Sendable {
             cancellationHandlers: cancellationHandlers,
             trustedUserActionHandlerNames: trustedUserActionHandlerNames,
             requiredTrustedUserActionHandlerNames:
-                requiredTrustedUserActionHandlerNames
+                requiredTrustedUserActionHandlerNames,
+            receiptEvidenceProviders: receiptEvidenceProviders
         )
     }
 
@@ -399,7 +415,8 @@ public struct WebViewMessageHandlers: Sendable {
             cancellationHandlers: copy,
             trustedUserActionHandlerNames: trustedUserActionHandlerNames,
             requiredTrustedUserActionHandlerNames:
-                requiredTrustedUserActionHandlerNames
+                requiredTrustedUserActionHandlerNames,
+            receiptEvidenceProviders: receiptEvidenceProviders
         )
     }
 
@@ -414,7 +431,8 @@ public struct WebViewMessageHandlers: Sendable {
             trustedUserActionHandlerNames:
                 trustedUserActionHandlerNames.union([name]),
             requiredTrustedUserActionHandlerNames:
-                requiredTrustedUserActionHandlerNames.union([name])
+                requiredTrustedUserActionHandlerNames.union([name]),
+            receiptEvidenceProviders: receiptEvidenceProviders
         )
     }
 
@@ -429,7 +447,8 @@ public struct WebViewMessageHandlers: Sendable {
             trustedUserActionHandlerNames:
                 trustedUserActionHandlerNames.union([name]),
             requiredTrustedUserActionHandlerNames:
-                requiredTrustedUserActionHandlerNames
+                requiredTrustedUserActionHandlerNames,
+            receiptEvidenceProviders: receiptEvidenceProviders
         )
     }
 }
@@ -4382,6 +4401,8 @@ public class WebViewCoordinator: NSObject {
         urlTransitionIntent: WebViewURLTransitionIntent? = nil,
         error: Error? = nil
     ) -> WebViewState {
+        let publicationSource = navigator.webView
+        let publicationBinding = publicationSource.flatMap { javaScriptBindingToken(for: $0) }
         var newState = webView.state
         newState.isLoading = isLoading
         var pageURLChanged = false
@@ -4419,13 +4440,22 @@ public class WebViewCoordinator: NSObject {
         }
         //        debugPrint("# new state:", newState, "old:", webView.state)
         webView.state = newState
-        
+        // A Binding setter can synchronously replace document ownership or state.
+        guard navigator.webView === publicationSource,
+              publicationSource.flatMap({ javaScriptBindingToken(for: $0) }) == publicationBinding,
+              webView.state == newState,
+              urlTransitionIntent?.isCurrent != false else { return newState }
+
         if pageURLChanged || transitionChanged {
             onURLChanged?(newState)
         }
 
+        guard navigator.webView === publicationSource,
+              publicationSource.flatMap({ javaScriptBindingToken(for: $0) }) == publicationBinding,
+              webView.state == newState,
+              urlTransitionIntent?.isCurrent != false else { return newState }
         updateLoadingProgress(isLoading: isLoading, estimatedProgress: navigator.webView?.estimatedProgress)
-            
+
         return newState
     }
 
@@ -4677,7 +4707,13 @@ extension WebViewCoordinator: WKScriptMessageHandler {
          return
          }*/
         
-        guard let messageHandler = messageHandlers.handlers[message.name],
+        // Keep handler ownership and raw native inputs from this receipt even
+        // if an application provider synchronously reenters configuration.
+        let receiptHandlers = messageHandlers
+        let receiptName = message.name
+        let receiptFrame = message.frameInfo
+        let receiptBody = message.body
+        guard let messageHandler = receiptHandlers.handlers[receiptName],
               let documentContext = captureDocumentCallbackContext(
                 for: sourceWebView
               ) else {
@@ -4692,11 +4728,12 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         // reenter binding setup synchronously. Both delivery paths must retain
         // this exact token, not sample a replacement after evidence capture.
         let receiptBindingToken = javaScriptBindingToken(for: sourceWebView)
+        let receiptNativeDocumentURL = sourceWebView.url
         // Reconcile native URL ownership before app evidence capture. KVO has
         // already recorded every observed transition before its actor hop; this
         // path also works when WebKit delivers the script callback first.
         let receiptTransition: WebViewURLTransitionIntent?
-        if let nativeURL = sourceWebView.url {
+        if let nativeURL = receiptNativeDocumentURL {
             let receipt = urlPublicationReceiptSequencer.observe(nativeURL, from: ObjectIdentifier(sourceWebView))
             receiptTransition = receipt.intent?.javaScriptBindingToken == receiptBindingToken ? receipt.intent : nil
             handleObservedURLChange(nativeURL, from: sourceWebView,
@@ -4705,10 +4742,13 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         } else {
             receiptTransition = nil
         }
+        guard ownsDocumentCallbackContext(documentContext),
+              javaScriptBindingToken(for: sourceWebView) == receiptBindingToken,
+              receiptTransition?.isCurrent != false else { return }
         // Copy only a strict Boolean hint. The page cannot authorize a fresh
         // visit; it can report restoration before provider or scheduler waits.
         let reportsBFCacheRestoration: Bool
-        if let body = message.body as? [String: Any],
+        if let body = receiptBody as? [String: Any],
            let value = body["isBFCacheRestore"] as? NSNumber,
            CFGetTypeID(value) == CFBooleanGetTypeID() {
             reportsBFCacheRestoration = value.boolValue
@@ -4717,25 +4757,26 @@ extension WebViewCoordinator: WKScriptMessageHandler {
         }
         // Capture application evidence at receipt, before either the broker's
         // deferred admission or the handler scheduler can suspend this event.
-        let receiptEvidence = WebViewMessageReceiptCapture.capture(.init(
-            name: message.name,
-            mainDocumentURL: message.frameInfo.request.mainDocumentURL,
-            requestURL: message.frameInfo.request.url,
+        let receiptEvidence = receiptHandlers.captureReceiptEvidence(.init(
+            name: receiptName,
+            mainDocumentURL: receiptFrame.request.mainDocumentURL,
+            requestURL: receiptFrame.request.url,
+            nativeDocumentURL: receiptNativeDocumentURL,
             javaScriptBindingToken: receiptBindingToken,
             reportsBFCacheRestoration: reportsBFCacheRestoration,
-            isMainFrame: message.frameInfo.isMainFrame,
+            isMainFrame: receiptFrame.isMainFrame,
             urlTransitionIntent: receiptTransition
         ))
-        let acceptsTrustedUserAction = messageHandlers
-            .trustedUserActionHandlerNames.contains(message.name)
+        let acceptsTrustedUserAction = receiptHandlers
+            .trustedUserActionHandlerNames.contains(receiptName)
         let trustedUserAction = acceptsTrustedUserAction
             ? trustedUserActionAdmissions.consume(
-                action: message.name,
+                action: receiptName,
                 document: .init(
                     webViewID: documentContext.webViewID,
                     generation: documentContext.generation
                 ),
-                frameInfo: message.frameInfo
+                frameInfo: receiptFrame
             )
             : nil
         if acceptsTrustedUserAction, trustedUserAction == nil {
@@ -4744,9 +4785,9 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             // before the isolated-world activation that its capture listener
             // posted first. Give that broker receipt one main-actor turn to
             // land, then consume it against the same document and frame.
-            let handlerName = message.name
-            let frameInfo = message.frameInfo
-            let body = message.body
+            let handlerName = receiptName
+            let frameInfo = receiptFrame
+            let body = receiptBody
             Task { @MainActor [weak self] in
                 await Task.yield()
                 guard let self,
@@ -4763,7 +4804,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                         frameInfo: frameInfo
                     )
                 guard delayedTrustedUserAction != nil
-                    || !self.messageHandlers
+                    || !receiptHandlers
                         .requiredTrustedUserActionHandlerNames
                         .contains(handlerName) else {
                     return
@@ -4783,32 +4824,32 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                     context: documentContext,
                     receiptEvidence: receiptEvidence,
                     cancellationHandler:
-                        self.messageHandlers.cancellationHandlers[handlerName]
+                        receiptHandlers.cancellationHandlers[handlerName]
                 )
             }
             return
         }
         guard trustedUserAction != nil
-            || !messageHandlers.requiredTrustedUserActionHandlerNames
-                .contains(message.name) else {
+            || !receiptHandlers.requiredTrustedUserActionHandlerNames
+                .contains(receiptName) else {
             return
         }
         let message = WebViewMessage(
-            frameInfo: message.frameInfo,
+            frameInfo: receiptFrame,
             uuid: UUID(),
-            name: message.name,
-            body: message.body,
+            name: receiptName,
+            body: receiptBody,
             receiptSequence: receiptSequence,
             javaScriptBindingToken: receiptBindingToken,
             trustedUserAction: trustedUserAction
         )
-        //        debugPrint("# RECV:", message.name, message.frameInfo.isMainFrame, message.frameInfo.request.url, message.frameInfo.securityOrigin.description)
+        //        debugPrint("# RECV:", receiptName, receiptFrame.isMainFrame, receiptFrame.request.url, receiptFrame.securityOrigin.description)
         scheduleDocumentMessageHandler(
             messageHandler,
             message: message,
             context: documentContext,
             receiptEvidence: receiptEvidence,
-            cancellationHandler: messageHandlers.cancellationHandlers[message.name]
+            cancellationHandler: receiptHandlers.cancellationHandlers[receiptName]
         )
     }
 }

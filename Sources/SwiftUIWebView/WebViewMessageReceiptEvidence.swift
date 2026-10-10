@@ -5,6 +5,9 @@ public struct WebViewMessageReceipt: Sendable {
     public let name: String
     public let mainDocumentURL: URL?
     public let requestURL: URL?
+    /// Current URL of the owning native WebView, sampled at receipt. Unlike a
+    /// frame request, this follows same-document history changes immediately.
+    public let nativeDocumentURL: URL?
     /// Exact native caller/document binding sampled before invoking any app
     /// provider. Two views or two successive documents may have the same URL.
     /// Nil means no caller binding was available; consumers must not invent one
@@ -17,13 +20,13 @@ public struct WebViewMessageReceipt: Sendable {
     /// Native WebKit frame identity at receipt, independent of page payload.
     /// A child-frame restoration hint does not identify a restored main visit.
     public let isMainFrame: Bool
-    /// Native transition retained before URL publication/evidence-provider callouts.
     public let urlTransitionIntent: WebViewURLTransitionIntent?
 
     public init(
         name: String,
         mainDocumentURL: URL?,
         requestURL: URL?,
+        nativeDocumentURL: URL? = nil,
         javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken? = nil,
         reportsBFCacheRestoration: Bool = false,
         isMainFrame: Bool = false,
@@ -32,6 +35,7 @@ public struct WebViewMessageReceipt: Sendable {
         self.name = name
         self.mainDocumentURL = mainDocumentURL
         self.requestURL = requestURL
+        self.nativeDocumentURL = nativeDocumentURL
         self.javaScriptBindingToken = javaScriptBindingToken
         self.reportsBFCacheRestoration = reportsBFCacheRestoration
         self.isMainFrame = isMainFrame
@@ -56,9 +60,10 @@ public enum WebViewMessageReceiptContext {
 }
 
 /// Configure named application evidence providers on the main actor before
-/// installing handlers. Providers are application-wide, not per-document state;
-/// the result is captured afresh at each native receipt and cannot be replaced
-/// while that message waits. No application/Realm dependency lives here.
+/// installing handlers. Registered providers are fixed application-wide facts;
+/// owner-specific providers belong to WebViewMessageHandlers instead. Results
+/// are captured afresh at native receipt and cannot be replaced while waiting.
+/// No application/Realm dependency lives here.
 @MainActor
 public enum WebViewMessageReceiptCapture {
     public typealias Provider = @MainActor @Sendable (WebViewMessageReceipt) -> (any Sendable)?
@@ -69,8 +74,16 @@ public enum WebViewMessageReceiptCapture {
         providers[key] = provider
     }
 
-    public static func capture(_ receipt: WebViewMessageReceipt) -> WebViewMessageReceiptEvidence {
-        let snapshot = providers.sorted { $0.key < $1.key }
+    public static func capture(
+        _ receipt: WebViewMessageReceipt,
+        scopedProviders: [String: Provider] = [:]
+    ) -> WebViewMessageReceiptEvidence {
+        // Colliding registrations cannot select an authority by ordering.
+        // Snapshot both collections before invoking any reentrant provider.
+        let collisions = Set(providers.keys).intersection(scopedProviders.keys)
+        let snapshot = providers.merging(scopedProviders) { _, _ in { _ in nil } }
+            .filter { !collisions.contains($0.key) }
+            .sorted { $0.key < $1.key }
         var values: [String: any Sendable] = [:]
         for (key, provider) in snapshot {
             if let value = provider(receipt) { values[key] = value }

@@ -38,6 +38,22 @@ final class WebViewReceiptDocumentBindingTests: XCTestCase {
         XCTAssertNil(receipt.javaScriptBindingToken)
     }
 
+    func testNativeDocumentURLSurvivesReceiptDeferralIndependentlyOfFrameRequest() async {
+        let predecessor = URL(string: "https://example.invalid/predecessor")!
+        let selected = URL(string: "https://example.invalid/selected")!
+        let receipt = WebViewMessageReceipt(name: "initialize", mainDocumentURL: predecessor,
+            requestURL: predecessor, nativeDocumentURL: selected, isMainFrame: true)
+        let evidence = WebViewMessageReceiptCapture.capture(receipt, scopedProviders: [
+            "nativeURL": { $0.nativeDocumentURL }
+        ])
+        await WebViewMessageReceiptContext.$evidence.withValue(evidence) {
+            await Task.yield()
+            let retained: URL? = WebViewMessageReceiptContext.evidence?.value(for: "nativeURL")
+            XCTAssertEqual(retained, selected)
+            XCTAssertEqual(receipt.requestURL, predecessor)
+        }
+    }
+
     func testOrdinaryDeliveryUsesTheExactReceiptBinding() async throws {
         try await assertDelivery(brokerDeferred: false, rebindDuringProvider: false)
     }
