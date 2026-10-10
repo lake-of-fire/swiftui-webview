@@ -98,4 +98,30 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         XCTAssertFalse(first.isCurrent)
         XCTAssertNil(sequence.observe(url, from: ObjectIdentifier(caller)).intent)
     }
+    func testWithdrawalCallbacksAreExactOnceAndCanReenterSequencer() throws {
+        let caller = try caller()
+        let sequence = WebViewURLPublicationReceiptSequencer()
+        let url = URL(string: "https://example.invalid/A")!
+        sequence.configure(webViewID: ObjectIdentifier(caller), binding: caller.currentJavaScriptBindingToken, url: url)
+        let first = try XCTUnwrap(sequence.observe(url, from: ObjectIdentifier(caller)).intent)
+        let successorURL = URL(string: "https://example.invalid/B")!
+        let count = WithdrawalCallbackCount()
+        first.onWithdrawal {
+            count.increment()
+            _ = sequence.observe(successorURL, from: ObjectIdentifier(caller))
+        }
+        _ = sequence.observe(successorURL, from: ObjectIdentifier(caller))
+        sequence.invalidate()
+        XCTAssertEqual(count.value, 1)
+        first.onWithdrawal { count.increment() }
+        XCTAssertEqual(count.value, 2)
+    }
+
+}
+
+private final class WithdrawalCallbackCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func increment() { lock.lock(); count += 1; lock.unlock() }
 }

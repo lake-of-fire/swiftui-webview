@@ -12,6 +12,7 @@ public final class WebViewURLTransitionIntent: @unchecked Sendable {
     public let representsURLChange: Bool
     private let lock = NSLock()
     private var current = true
+    private var withdrawalObservers: [@Sendable () -> Void] = []
 
     internal init(destinationURL: URL,
                   javaScriptBindingToken: WebViewScriptCaller.JavaScriptBindingToken,
@@ -27,10 +28,26 @@ public final class WebViewURLTransitionIntent: @unchecked Sendable {
         return current
     }
 
+    /// Registers settlement for this identity only; callbacks run without the intent lock.
+    public func onWithdrawal(_ observer: @escaping @Sendable () -> Void) {
+        lock.lock()
+        if current {
+            withdrawalObservers.append(observer)
+            lock.unlock()
+        } else {
+            lock.unlock()
+            observer()
+        }
+    }
+
     internal func withdraw() {
         lock.lock()
-        defer { lock.unlock() }
+        guard current else { lock.unlock(); return }
         current = false
+        let observers = withdrawalObservers
+        withdrawalObservers.removeAll()
+        lock.unlock()
+        observers.forEach { $0() }
     }
 }
 
@@ -58,9 +75,10 @@ internal final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable 
                    binding: WebViewScriptCaller.JavaScriptBindingToken?,
                    url: URL?) {
         lock.lock()
-        defer { lock.unlock() }
+        var retired: WebViewURLTransitionIntent?
+        defer { lock.unlock(); retired?.withdraw() }
         guard self.webViewID != webViewID || self.binding != binding else { return }
-        intent?.withdraw()
+        retired = intent
         self.webViewID = webViewID
         self.binding = binding
         intent = nil
@@ -72,8 +90,8 @@ internal final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable 
 
     func invalidate() {
         lock.lock()
-        defer { lock.unlock() }
-        intent?.withdraw()
+        let retired = intent
+        defer { lock.unlock(); retired?.withdraw() }
         intent = nil
         webViewID = nil
         binding = nil
@@ -81,7 +99,8 @@ internal final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable 
 
     func observe(_ url: URL, from sourceID: ObjectIdentifier) -> Receipt {
         lock.lock()
-        defer { lock.unlock() }
+        var retired: WebViewURLTransitionIntent?
+        defer { lock.unlock(); retired?.withdraw() }
         nextSequence &+= 1
         guard webViewID == sourceID, let binding else { return Receipt(sequence: nextSequence, intent: nil) }
         let destination = Self.canonicalURL(url)
@@ -89,7 +108,7 @@ internal final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable 
             return Receipt(sequence: nextSequence, intent: intent)
         }
         let isChange = intent != nil
-        intent?.withdraw()
+        retired = intent
         let next = WebViewURLTransitionIntent(destinationURL: destination,
             javaScriptBindingToken: binding, representsURLChange: isChange)
         intent = next
