@@ -2956,18 +2956,6 @@ internal struct WebViewContentRulesBypassGate {
     }
 }
 
-private final class WebViewURLPublicationReceiptSequencer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var nextSequence: UInt64 = 0
-
-    func reserve() -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        nextSequence &+= 1
-        return nextSequence
-    }
-}
-
 internal let webViewReaderDocumentSummaryScript = """
 (function() {
     const body = document.body;
