@@ -9,6 +9,12 @@ private final class ReceiptLifetimeBox {
     var captures = 0
 }
 
+private struct CapturedReceiptLifetime: Sendable {
+    let lifetime: Int
+    let reportsBFCacheRestoration: Bool
+    let isMainFrame: Bool
+}
+
 @MainActor
 final class WebViewReceiptDispatchTests: XCTestCase {
     func testOrdinaryReceiptKeepsItsPreDispatchLifetime() async throws {
@@ -19,29 +25,87 @@ final class WebViewReceiptDispatchTests: XCTestCase {
         try await assertReceiptLifetime(usesBrokerDeferral: true)
     }
 
-    private func assertReceiptLifetime(usesBrokerDeferral: Bool) async throws {
+    func testScopedOrdinaryReceiptKeepsItsPreDispatchLifetime() async throws {
+        try await assertReceiptLifetime(usesBrokerDeferral: false, usesScopedProvider: true)
+    }
+
+    func testScopedBrokerDeferralKeepsTheOriginalReceiptLifetime() async throws {
+        try await assertReceiptLifetime(usesBrokerDeferral: true, usesScopedProvider: true)
+    }
+
+    func testRestorationHintIsCapturedBeforeOrdinaryDispatch() async throws {
+        try await assertReceiptLifetime(usesBrokerDeferral: false,
+            payload: "{ isBFCacheRestore: true }", reportsBFCacheRestoration: true)
+    }
+
+    func testRestorationHintSurvivesBrokerDeferralWithoutRecapture() async throws {
+        try await assertReceiptLifetime(usesBrokerDeferral: true,
+            payload: "{ isBFCacheRestore: true }", reportsBFCacheRestoration: true)
+    }
+
+    func testChildRestorationHintRetainsNativeChildFrameThroughBothDispatchRoutes() async throws {
+        for deferred in [false, true] {
+            try await assertReceiptLifetime(usesBrokerDeferral: deferred,
+                payload: "{ isBFCacheRestore: true }", reportsBFCacheRestoration: true,
+                inChildFrame: true)
+        }
+    }
+
+    func testMissingStringAndNumericRestorationHintsDoNotReportRestore() async throws {
+        for deferred in [false, true] {
+            for payload in ["{}", "{ isBFCacheRestore: 'true' }",
+                            "{ isBFCacheRestore: 1 }", "{ isBFCacheRestore: false }"] {
+                try await assertReceiptLifetime(usesBrokerDeferral: deferred, payload: payload)
+            }
+        }
+    }
+
+    private func assertReceiptLifetime(
+        usesBrokerDeferral: Bool,
+        usesScopedProvider: Bool = false,
+        payload: String = "'old-lifetime'",
+        reportsBFCacheRestoration: Bool = false,
+        inChildFrame: Bool = false
+    ) async throws {
         let name = "receiptBoundary" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let key = "test." + name
         let box = ReceiptLifetimeBox()
         let delivered = expectation(description: "real WebKit message reaches the production handler")
-        WebViewMessageReceiptCapture.register(key: key) { [weak box] receipt in
+        let provider: WebViewMessageReceiptCapture.Provider = { [weak box] receipt in
             guard let box, receipt.name == name else { return nil }
             box.captures += 1
             let original = box.lifetime
+            XCTAssertEqual(receipt.reportsBFCacheRestoration, reportsBFCacheRestoration,
+                           "The provider must receive the raw hint synchronously")
+            XCTAssertEqual(receipt.isMainFrame, !inChildFrame,
+                           "Only WebKit frame identity can scope the restoration hint")
             // Deterministically advance between receipt capture and handler entry.
             // The document, WebView, and message stay identical.
             box.lifetime = 2
-            return original
+            return CapturedReceiptLifetime(lifetime: original,
+                reportsBFCacheRestoration: receipt.reportsBFCacheRestoration,
+                isMainFrame: receipt.isMainFrame)
+        }
+        if !usesScopedProvider {
+            WebViewMessageReceiptCapture.register(key: key, provider: provider)
         }
         var handlers = WebViewMessageHandlers([
             (name, { @MainActor _ in
-                let retained: Int? = WebViewMessageReceiptContext.evidence?.value(for: key)
-                XCTAssertEqual(retained, 1)
+                let retained: CapturedReceiptLifetime? = WebViewMessageReceiptContext.evidence?.value(for: key)
+                XCTAssertEqual(retained?.lifetime, 1)
+                XCTAssertEqual(retained?.reportsBFCacheRestoration, reportsBFCacheRestoration)
+                XCTAssertEqual(retained?.isMainFrame, !inChildFrame)
                 XCTAssertEqual(box.lifetime, 2)
                 XCTAssertEqual(box.captures, 1, "Broker deferral must not reacquire a successor")
                 delivered.fulfill()
             })
-        ])
+        ], receiptEvidenceProviders: usesScopedProvider ? [key: provider] : [:])
+        if usesScopedProvider {
+            // Exercise the transformations used by app-owned providers while
+            // retaining the original global-provider histories above.
+            handlers = (handlers + WebViewMessageHandlers())
+                .updatingCancellationHandler(name) { _ in }
+        }
         if usesBrokerDeferral {
             // Optional activation with no broker receipt exercises the real
             // deferred path without inventing a trusted user gesture.
@@ -64,8 +128,10 @@ final class WebViewReceiptDispatchTests: XCTestCase {
             coordinator.tearDownBindingsForDetachedWebView(view)
             view.navigationDelegate = nil
         }
+        let script = "<script>window.webkit.messageHandlers.\(name).postMessage(\(payload))</script>"
+        let html = inChildFrame ? "<iframe srcdoc=\"\(script)\"></iframe>" : script
         view.loadHTMLString(
-            "<script>window.webkit.messageHandlers.\(name).postMessage('old-lifetime')</script>",
+            html,
             baseURL: URL(string: "https://example.invalid/receipt-boundary")
         )
         await fulfillment(of: [delivered], timeout: 10)
