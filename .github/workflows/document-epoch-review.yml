@@ -1,0 +1,116 @@
+name: Native WebView verification
+on:
+  push:
+    branches: [fix/invalid-frame-retirement-20260909, codex/reader-hotfix-upstream-2026-09-07]
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - '.github/workflows/document-epoch-review.yml'
+  pull_request:
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - '.github/workflows/document-epoch-review.yml'
+permissions:
+  contents: read
+concurrency:
+  group: native-webview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [debug, release, asan]
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Capture exact source and toolchain
+        run: |
+          if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
+          mkdir -p "$RUNNER_TEMP/native-webview"
+          git rev-parse HEAD HEAD^{tree} > "$RUNNER_TEMP/native-webview/identity.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/native-webview/tree.txt"
+          swift --version > "$RUNNER_TEMP/native-webview/toolchain.txt"
+          xcodebuild -version >> "$RUNNER_TEMP/native-webview/toolchain.txt"
+      - name: Test published source without modifications
+        shell: bash
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -euo pipefail
+          case "$CONFIGURATION" in
+            debug) swift test 2>&1 | tee "$RUNNER_TEMP/native-webview/tests.log" ;;
+            release) swift test -c release 2>&1 | tee "$RUNNER_TEMP/native-webview/tests.log" ;;
+            asan) swift test --sanitize=address 2>&1 | tee "$RUNNER_TEMP/native-webview/tests.log" ;;
+          esac
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-webview-${{ matrix.configuration }}
+          path: ${{ runner.temp }}/native-webview/
+          retention-days: 7
+          if-no-files-found: error
+  document-epoch-regression-control:
+    # Keep the negative control scoped to this review branch. It never publishes
+    # its old-source checkout or runs with write credentials.
+    if: github.event_name == 'push' && github.ref_name == 'fix/invalid-frame-retirement-20260909'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Run new regression tests against pre-fix production source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_26.3.app ]; then sudo xcode-select -s /Applications/Xcode_26.3.app; fi
+          mkdir -p "$RUNNER_TEMP/epoch-control"
+          test "$(git hash-object Tests/SwiftUIWebViewTests/WebViewDocumentEpochEvaluationTests.swift)" = 7d26f4a2c23aa46d5e2eb6a0050cc7da3290ce2a
+          git restore --source=f4874e22c977a782bcbd579c4653919d64edd610 -- Sources/SwiftUIWebView/SwiftUIWebView.swift
+          test "$(git hash-object Sources/SwiftUIWebView/SwiftUIWebView.swift)" = 82dd6b4010e94a50714761223f86f1f124bf5453
+          set +e
+          swift test --filter WebViewDocumentEpochEvaluationTests > "$RUNNER_TEMP/epoch-control/tests.log" 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          python3 <<'PY'
+          import os, re
+          from pathlib import Path
+          log = Path(os.environ['RUNNER_TEMP'], 'epoch-control', 'tests.log').read_text()
+          expected = {
+              'testSameWebViewCommitRejectsPrimaryResultInEveryRoute',
+              'testProvisionalNavigationRejectsInFlightEvaluationInEveryRoute',
+              'testPreservedDocumentAfterProvisionalFailureDoesNotReviveOldToken',
+              'testProcessTerminationRejectsInFlightEvaluationInEveryRoute',
+              'testTerminalNavigationFailureRejectsInFlightEvaluationInEveryRoute',
+              'testStaleUnsupportedErrorCannotStartCoercionRetry',
+              'testNavigationDuringCoercionRetryCannotReturnOldValue',
+              'testLaterChildNavigationRejectsWholeOptionalAndStrictAggregate',
+              'testStaleInvalidFrameErrorCannotRetireNewDocumentRegistration',
+              'testRequiredTokenFromPriorDocumentRejectsBeforeDispatch',
+          }
+          failed = set(re.findall(r"Test Case '-\[.*?WebViewDocumentEpochEvaluationTests (\w+)\]' failed", log))
+          assert failed == expected, (failed, expected, log[-4000:])
+          assert re.search(r'Executed 13 tests, with \d+ failures \(0 unexpected\)', log), log[-4000:]
+          print('Confirmed ten failing regression methods on pre-fix production; three controls pass.')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: document-epoch-negative-control
+          path: ${{ runner.temp }}/epoch-control/
+          retention-days: 7
+          if-no-files-found: error

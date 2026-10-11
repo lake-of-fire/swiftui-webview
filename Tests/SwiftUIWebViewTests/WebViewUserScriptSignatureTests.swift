@@ -2,6 +2,7 @@ import WebKit
 import XCTest
 @testable import SwiftUIWebView
 
+@MainActor
 final class WebViewUserScriptSignatureTests: XCTestCase {
     func testConfigurationSignatureChangesForInstalledScriptConfiguration() {
         let base = WebViewUserScript(

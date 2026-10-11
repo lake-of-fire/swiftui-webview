@@ -12,8 +12,12 @@ struct LoadingProgressPublicationState: Equatable, Sendable {
 
     mutating func update(isLoading: Bool?, estimatedProgress: Double?) -> (generation: UInt, progress: Double?) {
         generation &+= 1
-        if let isLoading { self.isLoading = isLoading }
-        if let estimatedProgress { self.estimatedProgress = estimatedProgress }
+        if let isLoading {
+            self.isLoading = isLoading
+        }
+        if let estimatedProgress {
+            self.estimatedProgress = estimatedProgress
+        }
         return (generation, currentProgress)
     }
 
