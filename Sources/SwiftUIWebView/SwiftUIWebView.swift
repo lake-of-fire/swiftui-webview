@@ -4198,7 +4198,7 @@ public class WebViewCoordinator: NSObject {
             }
         }
     }
-    
+
     @MainActor
     func setWebView(_ webView: WKWebView) {
         let previousWebView = navigator.webView
@@ -4438,7 +4438,7 @@ public class WebViewCoordinator: NSObject {
             )
         }
     }
-    
+
     @discardableResult func setLoading(
         _ isLoading: Bool,
         pageURL: URL? = nil,
@@ -7162,7 +7162,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard let webView else { return false }
         return contentRulesBypassGate.cancelAll(webViewID: ObjectIdentifier(webView))
     }
-    
+
     @MainActor
     public func go(_ item: WKBackForwardListItem) {
         guard let webView else { return }
@@ -7170,7 +7170,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             webView.go(to: item)
         }
     }
-    
+
     @MainActor
     public func goBack() {
         guard let webView else { return }
@@ -7178,7 +7178,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             webView.goBack()
         }
     }
-    
+
     @MainActor
     public func goForward() {
         guard let webView else { return }
@@ -8355,7 +8355,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
             }
         }
     }
-    
+
     /// Returns whether this call changed the exact frame registration.
     @MainActor
     public func addMultiTargetFrame(_ frame: WKFrameInfo, uuid: String, canonicalURL: URL? = nil) -> Bool {
@@ -9266,7 +9266,7 @@ public class EnhancedWKWebView: WKWebView {
     public override var isOpaque: Bool {
         return true
     }
-    
+
     public override func keyDown(with event: NSEvent) {
         //                    print(">> key \(event.keyCode)")
         switch event.keyCode {
@@ -10020,7 +10020,7 @@ public class WebViewController: UIViewController {
         }
         updateObscuredInsets(reason: "viewSafeAreaInsetsDidChange")
     }
-    
+
     @MainActor
     func configureHostLayout(obscuredInsets incomingInsets: UIEdgeInsets, pageURL: URL) {
         guard [incomingInsets.top, incomingInsets.left, incomingInsets.bottom, incomingInsets.right]
@@ -11188,8 +11188,8 @@ extension WebView: UIViewControllerRepresentable {
             config: config
         )
         //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
-        
-        
+
+
         mountedWebView.buildMenu = buildMenu
         if mountedWebView.scrollView.bounces != bounces {
             mountedWebView.scrollView.bounces = bounces
@@ -11740,7 +11740,7 @@ extension WebView: NSViewRepresentable {
         //        uiView.scrollView.alwaysBounceVertical = bounces
         
         refreshDarkModeSetting(webView: webView)
-        
+
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
         if (webView.value(forKey: "drawsBackground") as? Bool) != resolvedDrawsBackground {
             webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
