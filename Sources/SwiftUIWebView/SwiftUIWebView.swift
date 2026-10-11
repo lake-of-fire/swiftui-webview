@@ -1615,11 +1615,19 @@ public final class WebViewNativeLookupHitTestStore {
     private var nativeTouchEntryID: UUID?
     private var suppressUnhandledTapUntil: TimeInterval = 0
     private var webTextSelectionActive = false
+    private var webTextSelectionTextLength = 0
+    private var webTextSelectionUpdatedAt: TimeInterval?
+    public var onTargetsChanged: (() -> Void)?
+    public var onOverlaySegmentHitObserved: ((WebViewNativeLookupHitTarget, CGPoint, CGSize) -> Void)?
+    public var onOverlayPointHitTested: ((CGPoint, CGSize, WebViewNativeLookupHitTarget?) -> Void)?
+    public var onTouchStartHitTested: ((CGPoint, CGSize, WebViewNativeLookupHitTarget?) -> Void)?
+    public var onNativeTouchStreamFinished: ((String) -> Void)?
+    public var onCaptureModeChanged: ((Bool) -> Void)?
+    public var onWebTextSelectionActiveChanged: ((Bool) -> Void)?
 #if DEBUG
     private var targetRevision: UInt64 = 0
     private var targetChangeObservers: [UUID: () -> Void] = [:]
     private var uiTestTargetPublicationProbeTextStorage = "none"
-    public var onTargetsChanged: (() -> Void)?
 #endif
     public var onHit: ((WebViewNativeLookupHit) -> Void)?
     public var onActiveTargetTouchDown: (@MainActor (WebViewNativeLookupHitTarget) -> Void)?
@@ -1633,7 +1641,16 @@ public final class WebViewNativeLookupHitTestStore {
     public var activeLookupTargetMatches: (@MainActor (WebViewNativeLookupHitTarget) -> Bool)?
     public var activeElementID: String?
     public var showsPressedTargetOverlay = false
-    public var capturesSegmentTouchesInOverlay = false
+    @available(*, deprecated, message: "Page-turn lifetime is owned by reader navigation tokens and request identities.")
+    public var preservesActiveLookupDuringPageTurn = false
+    /// Compatibility notification only; native capture routing is fixed by the host.
+    public var capturesSegmentTouchesInOverlay = false {
+        didSet {
+            if oldValue != capturesSegmentTouchesInOverlay {
+                onCaptureModeChanged?(capturesSegmentTouchesInOverlay)
+            }
+        }
+    }
     public var isEnabled = true {
         didSet {
             guard oldValue != isEnabled else { return }
@@ -1646,6 +1663,23 @@ public final class WebViewNativeLookupHitTestStore {
     public var activeNativeTouchElementID: String? { nativeTouchElementID }
     public var shouldSuppressUnhandledTapForNativeLookup: Bool {
         nativeTouchElementID != nil || Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
+    }
+
+    public var webTextSelectionDiagnostics: [String: Any] {
+        [
+            "webTextSelectionActive": webTextSelectionActive,
+            "webTextSelectionTextLength": webTextSelectionTextLength,
+            "webTextSelectionAgeMs": webTextSelectionUpdatedAt.map {
+                (Date().timeIntervalSinceReferenceDate - $0) * 1_000
+            } as Any,
+        ]
+    }
+    public var shouldSuppressScrollForWebTextSelection: Bool { webTextSelectionActive }
+    public func consumeUnhandledTapSuppressionForNativeLookup() -> Bool {
+        if nativeTouchElementID != nil { return true }
+        let suppress = Date().timeIntervalSinceReferenceDate < suppressUnhandledTapUntil
+        suppressUnhandledTapUntil = 0
+        return suppress
     }
 
     public var hasActiveWebTextSelection: Bool { webTextSelectionActive }
@@ -1747,16 +1781,16 @@ public final class WebViewNativeLookupHitTestStore {
         nativeTouchElementID = nil
         nativeTouchEntryID = nil
         suppressUnhandledTapUntil = 0
-        webTextSelectionActive = false
+        updateWebTextSelection(active: false, textLength: 0, source: "removeAllTargets")
         if hadTargets {
             targetsDidChange()
         }
     }
 
     private func targetsDidChange() {
+        onTargetsChanged?()
 #if DEBUG
         targetRevision &+= 1
-        onTargetsChanged?()
         for observer in Array(targetChangeObservers.values) {
             observer()
         }
@@ -1874,15 +1908,17 @@ public final class WebViewNativeLookupHitTestStore {
     }
 
     public func updateWebTextSelection(active: Bool) {
-        webTextSelectionActive = active
+        updateWebTextSelection(active: active, textLength: 0, source: "compatibility")
     }
 
-    public func updateWebTextSelection(
-        active: Bool,
-        textLength _: Int,
-        source _: String
-    ) {
+    public func updateWebTextSelection(active: Bool, textLength: Int, source: String) {
+        let wasActive = webTextSelectionActive
         webTextSelectionActive = active
+        webTextSelectionTextLength = textLength
+        webTextSelectionUpdatedAt = Date().timeIntervalSinceReferenceDate
+        if active != wasActive {
+            onWebTextSelectionActiveChanged?(active)
+        }
     }
 
     @MainActor
@@ -1950,12 +1986,20 @@ public final class WebViewNativeLookupHitTestStore {
         self.nativeTouchEntryID = nil
     }
 
-    public func finishNativeTouchStream(reason _: String) {
+    public func finishNativeTouchStream(reason: String, suppressUnhandledTap: Bool = true) {
         if nativeTouchElementID != nil {
-            suppressUnhandledTapUntil = Date().timeIntervalSinceReferenceDate + 0.5
+            suppressUnhandledTapUntil = suppressUnhandledTap
+                ? Date().timeIntervalSinceReferenceDate + 0.5 : 0
+        } else if !suppressUnhandledTap {
+            suppressUnhandledTapUntil = 0
         }
         nativeTouchElementID = nil
         nativeTouchEntryID = nil
+        onNativeTouchStreamFinished?(reason)
+    }
+
+    public func endNativeTouchStream(reason: String, suppressUnhandledTap: Bool = true) {
+        finishNativeTouchStream(reason: reason, suppressUnhandledTap: suppressUnhandledTap)
     }
 
     public func hitTarget(
@@ -3045,7 +3089,10 @@ public class WebViewCoordinator: NSObject {
     private var webViewUnloadControllerGeneration: UInt64?
     private var webViewUnloadGate = WebViewUnloadTransactionGate()
     private weak var snapshotHostController: WebViewController?
+    weak var hostLayoutController: WebViewController?
     internal weak var scrollBottomObservedScrollView: UIScrollView?
+    internal var navigationScrollSemanticsGeneration: UInt64 = 0
+    internal var scrollCallbackGeneration: UInt64 = 0
     internal var scrollBottomContentSizeObservation: NSKeyValueObservation?
     internal var scrollBottomBoundsObservation: NSKeyValueObservation?
     internal var scrollBottomContentInsetObservation: NSKeyValueObservation?
@@ -4209,6 +4256,7 @@ public class WebViewCoordinator: NSObject {
                       self.ownsWebView(webView) else {
                     return
                 }
+                guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
                 self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
             }
         }
@@ -4222,6 +4270,7 @@ public class WebViewCoordinator: NSObject {
                       self.ownsWebView(webView) else {
                     return
                 }
+                guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
                 self.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
             }
         }
@@ -4505,7 +4554,8 @@ public class WebViewCoordinator: NSObject {
             } catch {
                 return
             }
-            guard let self else { return }
+            guard let self,
+                  !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
             switch self.loadingProgressPublicationState.resolve(generation: generation) {
             case .stale:
                 return
@@ -4972,6 +5022,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
             return
         }
+#if os(iOS)
+        if hostLayoutController?.webView === webView {
+            hostLayoutController?.reapplyObscuredInsets(reason: "navigationFinish")
+        }
+#endif
         navigator.cancelReaderLoadHeartbeat(reason: "didFinishNavigation")
 #if DEBUG
         debugPrint("# READER webView.nav.finish",
@@ -5237,6 +5292,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         hasCommittedDocument = true
         scriptCaller?.removeAllMultiTargetFrames()
         activateDocumentCallbackContext(for: webView)
+#if os(iOS)
+        if hostLayoutController?.webView === webView {
+            hostLayoutController?.reapplyObscuredInsets(reason: "navigationCommit")
+        }
+#endif
 #if DEBUG
         debugPrint("# READER webView.nav.commit",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -5353,6 +5413,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
+#if os(iOS)
+        if hostLayoutController?.webView === webView {
+            hostLayoutController?.reapplyObscuredInsets(reason: "navigationStart")
+        }
+#endif
 #if DEBUG
         debugPrint("# READER webView.nav.start",
                    "url=\(webView.url?.absoluteString ?? "<nil>")",
@@ -5674,6 +5739,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor fileprivate var readerLoadIssuedAt: Date?
     @MainActor fileprivate var readerLoadDirectDataReturnedAt: Date?
     @MainActor fileprivate var readerLoadProvisionalStartedAt: Date?
+    @MainActor fileprivate var hasPendingInternalReaderLoadBeforeProvisionalStart: Bool {
+        publishedInternalReaderLoadID != nil
+            && isInternalReaderLoaderURL(readerLoadRequestedURL)
+            && readerLoadProvisionalStartedAt == nil
+    }
     @MainActor fileprivate var readerLoadCommittedAt: Date?
     public var attachFallbackURL: URL?
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
@@ -9310,6 +9380,13 @@ private final class NativeLookupHitTestOverlayView: UIView {
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        let store = self.store
+        let target = store?.hitTarget(at: point, in: bounds.size,
+            coordinateViewWindowOrigin: convert(.zero, to: nil))
+        store?.onOverlayPointHitTested?(point, bounds.size, target)
+        if self.store === store, let target {
+            store?.onOverlaySegmentHitObserved?(target, point, bounds.size)
+        }
         return false
     }
 }
@@ -9358,14 +9435,19 @@ private final class NativeLookupHitTestTapGestureRecognizer: UIGestureRecognizer
             state = .failed
             return
         }
+        let store = self.store
         let point = touch.location(in: coordinateView)
         let lookupInteractionID = store?.captureActiveLookupInteractionID()
         let coordinateViewWindowOrigin = coordinateView.convert(CGPoint.zero, to: nil)
-        guard let target = store?.hitTarget(
+        let hitTarget = store?.hitTarget(
             at: point,
             in: coordinateView.bounds.size,
             coordinateViewWindowOrigin: coordinateViewWindowOrigin
-        ) else {
+        )
+        store?.onTouchStartHitTested?(point, coordinateView.bounds.size, hitTarget)
+        guard self.store === store, self.coordinateView === coordinateView,
+              view != nil, state == .possible else { return }
+        guard let target = hitTarget else {
             let canDismissActiveLookup = store?.activeLookupElementID?() != nil
                 && store?.shouldPassThroughForWebTextSelection != true
             if canDismissActiveLookup {
@@ -9847,6 +9929,13 @@ public class WebViewController: UIViewController {
     private let nativeLookupHitTestOverlayView = NativeLookupHitTestOverlayView()
     private let nativeLookupHitTestGestureRecognizer = NativeLookupHitTestTapGestureRecognizer()
     private weak var nativeLookupHitTestStore: WebViewNativeLookupHitTestStore?
+    weak var layoutCoordinator: WebViewCoordinator?
+    private var lastAppliedWebKitObscuredInsets: UIEdgeInsets?
+    private var obscuredInsetsApplicationGeneration: UInt64 = 0
+    private var obscuredInsetsPublicationGeneration: UInt64 = 0
+    private var requestedHostLayout: (insets: UIEdgeInsets, pageURL: URL)?
+    private var webTextSelectionBaseScrollEnabled = true
+    private var webTextSelectionIsPaginated = false
     private var lastKnownWebViewSize: CGSize = .zero
     private weak var snapshotBoundsAdjustmentWebView: EnhancedWKWebView?
     private var snapshotBoundsAdjustmentOriginalBounds: CGRect?
@@ -9886,7 +9975,10 @@ public class WebViewController: UIViewController {
     
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        updateObscuredInsets()
+        if let requestedHostLayout {
+            configureHostLayout(obscuredInsets: requestedHostLayout.insets, pageURL: requestedHostLayout.pageURL)
+        }
+        updateObscuredInsets(reason: "viewDidLayoutSubviews")
         guard !isWebViewUnloaded else { return }
         let size = webView.bounds.size
         if size.width > 1, size.height > 1 {
@@ -9923,60 +10015,200 @@ public class WebViewController: UIViewController {
     
     override public func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
-        updateObscuredInsets()
+        if let requestedHostLayout {
+            configureHostLayout(obscuredInsets: requestedHostLayout.insets, pageURL: requestedHostLayout.pageURL)
+        }
+        updateObscuredInsets(reason: "viewSafeAreaInsetsDidChange")
     }
     
-    private func updateObscuredInsets() {
-        guard let webView = view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+    @MainActor
+    func configureHostLayout(obscuredInsets incomingInsets: UIEdgeInsets, pageURL: URL) {
+        guard [incomingInsets.top, incomingInsets.left, incomingInsets.bottom, incomingInsets.right]
+            .allSatisfy({ $0.isFinite }) else { return }
+        requestedHostLayout = (incomingInsets, pageURL)
+        let topSafeAreaInset = view.window?.safeAreaInsets.top ?? 0
+        let bottomSafeAreaInset = view.window?.safeAreaInsets.bottom ?? 0
+
+        let isBookWebViewUpdate =
+            [pageURL, webView.url].compactMap { $0 }.contains { url in
+                ["ebook", "reader-file"].contains(url.scheme?.lowercased() ?? "")
+                    || url.pathExtension.lowercased() == "epub"
+            }
+        let proposedTopObscuredInset = max(0, incomingInsets.top)
+        let resolvedTopObscuredInset = isBookWebViewUpdate
+            ? max(proposedTopObscuredInset, topSafeAreaInset)
+            : proposedTopObscuredInset
+        let rawIncomingBottomObscuredInset = max(0, incomingInsets.bottom)
+        let incomingBottomObscuredInset = isBookWebViewUpdate ? 0 : rawIncomingBottomObscuredInset
+        let effectiveIncomingBottomObscuredInset = isBookWebViewUpdate
+            ? bottomSafeAreaInset
+            : incomingBottomObscuredInset
+        let treatsIncomingBottomAsAdditionalClearance =
+            bottomSafeAreaInset > 0
+            && effectiveIncomingBottomObscuredInset > 0
+            && effectiveIncomingBottomObscuredInset < bottomSafeAreaInset
+        let resolvedAdditionalBottomSafeAreaInset = treatsIncomingBottomAsAdditionalClearance
+            ? effectiveIncomingBottomObscuredInset
+            : max(0, effectiveIncomingBottomObscuredInset - bottomSafeAreaInset)
+        let proposedObscuredBottomInset = treatsIncomingBottomAsAdditionalClearance
+            ? bottomSafeAreaInset + effectiveIncomingBottomObscuredInset
+            : effectiveIncomingBottomObscuredInset
+        let resolvedObscuredBottomInset = proposedObscuredBottomInset
+        let additionalSafeAreaInsets = UIEdgeInsets(
+            top: 0,
+            left: max(0, incomingInsets.left - (view.window?.safeAreaInsets.left ?? 0)),
+            bottom: resolvedAdditionalBottomSafeAreaInset,
+            right: max(0, incomingInsets.right - (view.window?.safeAreaInsets.right ?? 0))
+        )
+        let resolvedObscuredInsets = UIEdgeInsets(
+            top: resolvedTopObscuredInset,
+            left: max(0, incomingInsets.left),
+            bottom: resolvedObscuredBottomInset,
+            right: max(0, incomingInsets.right)
+        )
+        if self.additionalSafeAreaInsets != additionalSafeAreaInsets {
+            self.additionalSafeAreaInsets = additionalSafeAreaInsets
+        }
+        if self.obscuredInsets != resolvedObscuredInsets {
+            self.obscuredInsets = resolvedObscuredInsets
+        }
+    }
+
+    private func applyObscuredInsets(_ insets: UIEdgeInsets, reason: String) {
+        let webView = self.webView
+        guard !isWebViewUnloaded, webView.superview === view else { return }
+        obscuredInsetsApplicationGeneration &+= 1
+        let generation = obscuredInsetsApplicationGeneration
+        func stillOwnsApplication() -> Bool {
+            self.webView === webView && !isWebViewUnloaded
+                && webView.superview === view
+                && obscuredInsetsApplicationGeneration == generation
+        }
+        if lastAppliedWebKitObscuredInsets == insets, webView.scrollView.contentInset == insets {
+            syncPageObscuredInsetsState(webView: webView, insets: insets, reason: reason)
+            return
+        }
+        let contentInsetsKey = ["obsc", "uredCon", "tentIn", "sets"].joined()
+        let legacyInsetsKey = ["o", "bscu", "red", "Ins", "ets"].joined()
+        let key: String
+        if webView.responds(to: NSSelectorFromString("setObscuredContentInsets:")) {
+            key = contentInsetsKey
+        } else {
+            key = legacyInsetsKey
+        }
+        let scrollView = webView.scrollView
+        let previousOffset = scrollView.contentOffset
+        let previousAdjusted = scrollView.adjustedContentInset
+        let previousMaximumY = max(-previousAdjusted.top,
+            scrollView.contentSize.height - scrollView.bounds.height + previousAdjusted.bottom)
+        let pinnedTop = previousOffset.y <= -previousAdjusted.top + 1
+        let pinnedBottom = !pinnedTop && previousOffset.y >= previousMaximumY - 1
+        let previousMaximumX = max(-previousAdjusted.left,
+            scrollView.contentSize.width - scrollView.bounds.width + previousAdjusted.right)
+        let pinnedLeading = previousOffset.x <= -previousAdjusted.left + 1
+        let pinnedTrailing = !pinnedLeading && previousOffset.x >= previousMaximumX - 1
+        webView.setValue(insets, forKey: key)
+        guard stillOwnsApplication() else { return }
+        if scrollView.contentInset != insets {
+            scrollView.contentInset = insets
+        }
+        guard stillOwnsApplication() else { return }
+        var resolvedOffset = previousOffset
+        if pinnedTop {
+            resolvedOffset.y = -scrollView.adjustedContentInset.top
+        } else if pinnedBottom {
+            resolvedOffset.y = max(-scrollView.adjustedContentInset.top,
+                scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+        }
+        if pinnedLeading {
+            resolvedOffset.x = -scrollView.adjustedContentInset.left
+        } else if pinnedTrailing {
+            resolvedOffset.x = max(-scrollView.adjustedContentInset.left,
+                scrollView.contentSize.width - scrollView.bounds.width + scrollView.adjustedContentInset.right)
+        }
+        if scrollView.contentOffset != resolvedOffset { scrollView.contentOffset = resolvedOffset }
+        guard stillOwnsApplication() else { return }
+        lastAppliedWebKitObscuredInsets = insets
+        syncPageObscuredInsetsState(webView: webView, insets: insets, reason: reason)
+
+        // WebKit treats _obscuredInsets as the content inset/visible-content-rect input.
+        // Do not also mirror it into minimum/maximum viewport insets; that changes viewport
+        // sizing semantics and can move CSS/visual viewport behavior independently.
+    }
+
+    private func syncPageObscuredInsetsState(
+        webView: WKWebView,
+        insets: UIEdgeInsets,
+        reason: String
+    ) {
+        obscuredInsetsPublicationGeneration &+= 1
+        let publicationGeneration = obscuredInsetsPublicationGeneration
+        guard let coordinator = layoutCoordinator,
+              coordinator.hostLayoutController === self,
+              coordinator.navigator.webView === webView,
+              let context = coordinator.captureDocumentCallbackContext(for: webView),
+              [insets.top, insets.left, insets.bottom, insets.right].allSatisfy({ $0.isFinite }) else { return }
+        let escapedReason = reason
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        let script = """
+        (() => {
+          const existing = window.__swiftUIWebViewObscuredInsets || {};
+          window.__swiftUIWebViewObscuredInsets = {
+            ...existing,
+            obscuredTopInset: \(insets.top),
+            obscuredLeftInset: \(insets.left),
+            obscuredBottomInset: \(insets.bottom),
+            obscuredRightInset: \(insets.right),
+            obscuredTopInsetSource: 'webview-obscured-insets:\(escapedReason)',
+            revision: Date.now()
+          };
+        })();
+        """
+        Task { @MainActor [weak self, weak coordinator, weak webView] in
+            guard let self, let coordinator, let webView,
+                  self.webView === webView, !self.isWebViewUnloaded,
+                  webView.superview === self.view,
+                  self.layoutCoordinator === coordinator,
+                  coordinator.hostLayoutController === self,
+                  self.obscuredInsetsPublicationGeneration == publicationGeneration,
+                  coordinator.ownsDocumentCallbackContext(context) else { return }
+            // No suspension between the exact document check and WebKit dispatch.
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+
+    private func updateObscuredInsets(reason: String = "unknown") {
         let insets = UIEdgeInsets(
             top: obscuredInsets.top,
             left: obscuredInsets.left,
             bottom: obscuredInsets.bottom,
             right: obscuredInsets.right
         )
-        //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
-        //        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
-        let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
-        let key = argument.compactMap({ $0 as? String }).joined()
-        webView.setValue(insets, forKey: key)
-        
-        let windowSafeAreaInsets = view.window?.safeAreaInsets ?? .zero
-        let unobscuredInsets = UIEdgeInsets(
-            top: max(0, windowSafeAreaInsets.top - insets.top),
-            left: 0,
-            bottom: max(0, windowSafeAreaInsets.bottom - insets.bottom),
-            right: 0
+        guard [insets.top, insets.left, insets.bottom, insets.right].allSatisfy({ $0.isFinite }),
+              webView.bounds.width.isFinite, webView.bounds.height.isFinite else { return }
+        let boundedInsets = UIEdgeInsets(
+            top: min(max(0, insets.top), max(0, webView.bounds.height - 1)),
+            left: min(max(0, insets.left), max(0, webView.bounds.width - 1)),
+            bottom: min(max(0, insets.bottom), max(0, webView.bounds.height - max(0, insets.top) - 1)),
+            right: min(max(0, insets.right), max(0, webView.bounds.width - max(0, insets.left) - 1))
         )
-        let unobscuredArgument: [Any] = ["un", "obsc", "uredSa", "feAre", "aInsets"]
-        webView.setValue(
-            unobscuredInsets,
-            forKey: unobscuredArgument.compactMap({ $0 as? String }).joined()
-        )
-        if #available(iOS 15.5, *) {
-            let viewportBounds = webView.bounds
-            let hasUsableViewportBounds =
-                viewportBounds.width.isFinite
-                && viewportBounds.height.isFinite
-                && viewportBounds.width > 1
-                && viewportBounds.height > 1
-            let insetsFitViewport =
-                hasUsableViewportBounds
-                && insets.left + insets.right < viewportBounds.width
-                && insets.top + insets.bottom < viewportBounds.height
-            if insetsFitViewport {
-                webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
-            }
+        guard webView.bounds.width > 1, webView.bounds.height > 1 else { return }
+        applyObscuredInsets(boundedInsets, reason: reason)
+    }
+
+    @MainActor
+    func reapplyObscuredInsets(reason: String) {
+        if let requestedHostLayout {
+            configureHostLayout(obscuredInsets: requestedHostLayout.insets, pageURL: requestedHostLayout.pageURL)
         }
-        
-        //            webView.setValue(insets, forKey: "unobscuredSafeAreaInsets")
-        //            webView.setValue(insets, forKey: "obscuredInsets")
-        //        webView.safeAreaInsetsDidChange()
-        //            let argument2: [Any] = ["_h", "ave", "Set", "O", "bscu", "red", "Ins", "ets"]
-        //            let key2 = argument2.compactMap({ $0 as? String }).joined()
-        //            webView.setValue(true, forKey: key2)
-        //            webView.setValue(true, forKey: "_haveSetUnobscuredSafeAreaInsets")
-        //        }
-        // TODO: investigate _isChangingObscuredInsetsInteractively
+        lastAppliedWebKitObscuredInsets = nil
+        updateObscuredInsets(reason: reason)
+        view.setNeedsLayout()
+        webView.setNeedsLayout()
+        webView.scrollView.setNeedsLayout()
     }
 
     @MainActor
@@ -9986,24 +10218,33 @@ public class WebViewController: UIViewController {
             detachWebView()
         }
         webView = newWebView
+        lastAppliedWebKitObscuredInsets = nil
         attachWebView(newWebView)
         isWebViewUnloaded = false
+        applyWebTextSelectionScrollSuppression(reason: "replaceWebView")
         updateObscuredInsets()
     }
 
     @MainActor
     func setNativeLookupHitTestStore(_ store: WebViewNativeLookupHitTestStore) {
         guard nativeLookupHitTestStore !== store else { return }
-        if nativeLookupHitTestStore != nil {
+        if let previousStore = nativeLookupHitTestStore {
             nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(
                 reason: "nativeLookup.storeReplacement"
             )
+            // Cancellation publishes to the old store and may install a newer one.
+            guard nativeLookupHitTestStore === previousStore else { return }
         }
         nativeLookupHitTestOverlayView.clearPressedTarget()
         nativeLookupHitTestStore = store
         nativeLookupHitTestOverlayView.store = store
         nativeLookupHitTestGestureRecognizer.store = store
         nativeLookupHitTestGestureRecognizer.coordinateView = nativeLookupHitTestOverlayView
+        store.onWebTextSelectionActiveChanged = { [weak self, weak store] _ in
+            guard let self, self.nativeLookupHitTestStore === store else { return }
+            self.applyWebTextSelectionScrollSuppression(reason: "selectionChanged")
+        }
+        applyWebTextSelectionScrollSuppression(reason: "storeReplacement")
         store.onPressedTargetHandoffCompleted = { [weak self, weak store] elementID in
             guard let self, nativeLookupHitTestStore === store else { return }
             nativeLookupHitTestOverlayView.clearPressedTarget(matching: elementID)
@@ -10013,6 +10254,21 @@ public class WebViewController: UIViewController {
             nativeLookupHitTestOverlayView.clearPressedTarget()
             nativeLookupHitTestGestureRecognizer.cancelForExternalInteraction(reason: reason)
         }
+    }
+
+    @MainActor
+    func applyWebTextSelectionScrollSuppression(reason _: String) {
+        guard !isWebViewUnloaded, webView.superview === view else { return }
+        let selectionActive = nativeLookupHitTestStore?.shouldSuppressScrollForWebTextSelection == true
+        webView.scrollView.isScrollEnabled = webTextSelectionBaseScrollEnabled
+            && !(selectionActive && webTextSelectionIsPaginated)
+    }
+
+    @MainActor
+    func configureWebTextSelectionScrollSuppression(isScrollEnabled: Bool, isPaginated: Bool, reason: String) {
+        webTextSelectionBaseScrollEnabled = isScrollEnabled
+        webTextSelectionIsPaginated = isPaginated
+        applyWebTextSelectionScrollSuppression(reason: reason)
     }
 
     @MainActor
@@ -10674,6 +10930,13 @@ extension WebView: UIViewControllerRepresentable {
         )
         bindScriptCallerIfNeeded(to: webView, context: context)
         context.coordinator.textSelection = $textSelection
+        controller.layoutCoordinator = context.coordinator
+        context.coordinator.hostLayoutController = controller
+        controller.configureWebTextSelectionScrollSuppression(
+            isScrollEnabled: config.isScrollEnabled,
+            isPaginated: config.paginationConfiguration.mode.isPaginated,
+            reason: "configureWebView"
+        )
         controller.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
         controller.setNativeLookupHitTestingEnabled(
             nativeLookupHitTestingEnabled,
@@ -10939,9 +11202,11 @@ extension WebView: UIViewControllerRepresentable {
         if mountedWebView.scrollView.contentInsetAdjustmentBehavior != contentInsetAdjustmentBehavior {
             mountedWebView.scrollView.contentInsetAdjustmentBehavior = contentInsetAdjustmentBehavior
         }
-        if mountedWebView.scrollView.isScrollEnabled != config.isScrollEnabled {
-            mountedWebView.scrollView.isScrollEnabled = config.isScrollEnabled
-        }
+        controller.configureWebTextSelectionScrollSuppression(
+            isScrollEnabled: config.isScrollEnabled,
+            isPaginated: config.paginationConfiguration.mode.isPaginated,
+            reason: "updateUIViewController"
+        )
 #if os(iOS)
         if mountedWebView.hidesTopScrollEdgeEffect != config.hidesTopScrollEdgeEffect {
             mountedWebView.hidesTopScrollEdgeEffect = config.hidesTopScrollEdgeEffect
@@ -10953,45 +11218,11 @@ extension WebView: UIViewControllerRepresentable {
             containerView: controller.view,
             coordinator: context.coordinator
         )
-        // TODO: Fix for RTL languages, if it matters for _obscuredInsets.
-        //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
-        let topSafeAreaInset = controller.view.window?.safeAreaInsets.top ?? 0
-        let bottomSafeAreaInset = controller.view.window?.safeAreaInsets.bottom ?? 0
-
-        //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading, bottom: obscuredInsets.bottom, right: obscuredInsets.trailing)
-        //        print(obscuredInsets)
-        let incomingBottomObscuredInset = max(0, obscuredInsets.bottom)
-        let treatsIncomingBottomAsAdditionalClearance =
-            bottomSafeAreaInset > 0
-            && incomingBottomObscuredInset > 0
-            && incomingBottomObscuredInset < bottomSafeAreaInset
-        let resolvedAdditionalBottomSafeAreaInset = treatsIncomingBottomAsAdditionalClearance
-            ? incomingBottomObscuredInset
-            : max(0, incomingBottomObscuredInset - bottomSafeAreaInset)
-        let resolvedObscuredBottomInset = treatsIncomingBottomAsAdditionalClearance
-            ? bottomSafeAreaInset + incomingBottomObscuredInset
-            : incomingBottomObscuredInset
-        let additionalSafeAreaInsets = UIEdgeInsets(
-            top: max(0, obscuredInsets.top - topSafeAreaInset),
-            left: 0,
-            bottom: resolvedAdditionalBottomSafeAreaInset,
-            right: 0
+        controller.configureHostLayout(
+            obscuredInsets: UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.leading,
+                bottom: obscuredInsets.bottom, right: obscuredInsets.trailing),
+            pageURL: state.pageURL
         )
-        if controller.additionalSafeAreaInsets != additionalSafeAreaInsets {
-            controller.additionalSafeAreaInsets = additionalSafeAreaInsets
-        }
-        //        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: obscuredInsets.bottom, right: 0)
-        
-        let resolvedObscuredInsets = UIEdgeInsets(
-            top: obscuredInsets.top,
-            left: max(0, obscuredInsets.leading),
-            bottom: resolvedObscuredBottomInset,
-            right: max(0, obscuredInsets.trailing)
-        )
-        if controller.obscuredInsets != resolvedObscuredInsets {
-            controller.obscuredInsets = resolvedObscuredInsets
-        }
-        // _obscuredInsets ignores sides, probably
     }
     
     public static func dismantleUIViewController(_ controller: WebViewController, coordinator: WebViewCoordinator) {
