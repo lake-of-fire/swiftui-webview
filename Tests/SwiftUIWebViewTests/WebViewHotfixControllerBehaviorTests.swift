@@ -29,7 +29,168 @@ private final class HotfixPendingNavigationDelegate: NSObject, WKNavigationDeleg
 }
 
 @MainActor
+private final class HotfixPendingRequestWebView: EnhancedWKWebView {
+    var requests: [URLRequest] = []
+    var issuedNavigation: WKNavigation?
+    var outgoingURLDuringProvisionalReceipt: URL?
+
+    override var url: URL? { outgoingURLDuringProvisionalReceipt ?? super.url }
+
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        requests.append(request)
+        let navigation = super.load(request)
+        issuedNavigation = navigation
+        return navigation
+    }
+}
+
+@MainActor
+private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
+    let policy: XCTestExpectation
+    let coordinator: WebViewCoordinator
+    let expectedRequestURL: URL
+    let outgoingURL: URL
+    let outgoingFinished: XCTestExpectation
+    private var didHoldPolicy = false
+    var decision: ((WKNavigationActionPolicy) -> Void)?
+
+    init(policy: XCTestExpectation, coordinator: WebViewCoordinator, expectedRequestURL: URL,
+         outgoingURL: URL, outgoingFinished: XCTestExpectation) {
+        self.policy = policy
+        self.coordinator = coordinator
+        self.expectedRequestURL = expectedRequestURL
+        self.outgoingURL = outgoingURL
+        self.outgoingFinished = outgoingFinished
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard !didHoldPolicy, navigationAction.request.url == expectedRequestURL else {
+            decisionHandler(.allow)
+            return
+        }
+        didHoldPolicy = true
+        decision = decisionHandler
+        policy.fulfill()
+    }
+
+    // The test delivers provisional start at the held policy boundary with a
+    // controlled outgoing-URL observation. Do not deliver it a second time.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard didHoldPolicy else { return }
+        coordinator.webView(webView, didCommit: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if !didHoldPolicy, webView.url == outgoingURL {
+            outgoingFinished.fulfill()
+            return
+        }
+        coordinator.webView(webView, didFinish: navigation)
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let html = urlSchemeTask.request.url == outgoingURL ? "<html><body>Outgoing document</body></html>" : """
+        <html data-mnb-reader-render-ready="1"><body>
+        <script>history.replaceState(null, '', 'internal://local/reader-final');</script>
+        <main id="reader-content">本文</main></body></html>
+        """
+        let bytes = Data(html.utf8)
+        urlSchemeTask.didReceive(URLResponse(url: urlSchemeTask.request.url!, mimeType: "text/html",
+                                            expectedContentLength: bytes.count, textEncodingName: "utf-8"))
+        urlSchemeTask.didReceive(bytes)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
+
+@MainActor
 final class WebViewHotfixControllerBehaviorTests: XCTestCase {
+    func testPendingRequestStartWithOutgoingURLCannotReplayAfterReaderReady() async throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let ready = expectation(description: "production document summary publishes render readiness")
+        var state = WebViewState.empty
+        var didPublishReady = false
+        let model = WebView(navigator: navigator, state: Binding(get: { state }, set: {
+            state = $0
+            if state.hasReaderRenderReady, !didPublishReady {
+                didPublishReady = true
+                ready.fulfill()
+            }
+        }))
+        let coordinator = model.makeCoordinatorForTesting()
+        let policy = expectation(description: "mounted request reaches native policy")
+        let request = URLRequest(url: URL(string: "internal://local/load/reader")!)
+        let outgoingURL = URL(string: "internal://local/outgoing")!
+        let outgoingFinished = expectation(description: "real outgoing document finishes")
+        let boundary = HotfixReaderRequestBoundary(
+            policy: policy,
+            coordinator: coordinator,
+            expectedRequestURL: request.url!,
+            outgoingURL: outgoingURL,
+            outgoingFinished: outgoingFinished
+        )
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(boundary, forURLScheme: "internal")
+        let web = HotfixPendingRequestWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+                                             configuration: configuration)
+        let controller = WebViewController(webView: web)
+        let window = HotfixSafeAreaWindow(frame: web.frame)
+        window.rootViewController = controller
+        window.isHidden = false
+        controller.view.layoutIfNeeded()
+        defer {
+            let decision = boundary.decision
+            boundary.decision = nil
+            decision?(.cancel)
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        // Begin only after the real reader host has completed attachment and layout.
+        web.navigationDelegate = boundary
+        web.load(URLRequest(url: outgoingURL))
+        await fulfillment(of: [outgoingFinished], timeout: 10)
+        XCTAssertEqual(web.url, outgoingURL)
+        guard web.url == outgoingURL else { return }
+        let outgoingDocumentURL = try XCTUnwrap(web.url)
+        coordinator.setWebView(web)
+        let outgoingNavigation = web.issuedNavigation
+        navigator.load(request)
+        await fulfillment(of: [policy], timeout: 10)
+        let navigation = try XCTUnwrap(web.issuedNavigation)
+        XCTAssertFalse(navigation === outgoingNavigation, "The receipt must belong to the reader request")
+        // WebKit may publish the requested URL before policy even completes.
+        // Control only the synchronous receipt's URL observation to exercise the
+        // supported outgoing-document ordering with a real committed URL and the
+        // WKNavigation returned by this request. All document work stays native.
+        web.outgoingURLDuringProvisionalReceipt = outgoingDocumentURL
+        XCTAssertEqual(web.url, outgoingURL)
+        XCTAssertNotEqual(web.url, request.url)
+        coordinator.webView(web, didStartProvisionalNavigation: navigation)
+        web.outgoingURLDuringProvisionalReceipt = nil
+        let decision = try XCTUnwrap(boundary.decision)
+        boundary.decision = nil
+        decision(.allow)
+        await fulfillment(of: [ready], timeout: 10)
+        let finalURL = URL(string: "internal://local/reader-final")!
+        XCTAssertEqual(web.url, finalURL, "The actual document must have replaced its loader URL")
+        XCTAssertEqual(state.pageURL, finalURL)
+        let issuedCount = web.requests.count
+        let readyURL = state.pageURL
+        // The real host rechecks attachment after final document readiness.
+        navigator.handleWindowAttachmentChanged(webView: web)
+        XCTAssertEqual(web.requests.count, issuedCount, "A consumed request cannot replay after readiness")
+        XCTAssertEqual(state.pageURL, readyURL)
+        XCTAssertTrue(state.hasReaderRenderReady)
+        let text = try await web.evaluateJavaScript("document.getElementById('reader-content').textContent")
+        XCTAssertEqual(text as? String, "本文")
+    }
+
     private func host(size: CGSize = CGSize(width: 320, height: 480)) -> (UIWindow, WebViewController) {
         let web = EnhancedWKWebView(frame: CGRect(origin: .zero, size: size), configuration: .init())
         web.scrollView.contentInsetAdjustmentBehavior = .never

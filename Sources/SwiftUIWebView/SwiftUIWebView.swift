@@ -5534,7 +5534,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
 #endif
-        if navigator.pendingRequest?.url == webView.url {
+        if navigator.consumePendingRequest(startedBy: navigation) {
             if swiftUIWebViewDebugBuildEnabled
                 && (swiftUIWebViewPageTurnDiagnosticsEnabled || !navigator.shouldLoadFallbackOnAttach) {
                 debugPrint(
@@ -5546,8 +5546,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
                     ] as [String : Any]
                 )
             }
-            navigator.pendingRequest = nil
-            navigator.cancelPendingRequestLoadTask()
         }
 #if os(iOS)
         beginSampledPageTopColorNavigation(webView)
@@ -5704,6 +5702,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     fileprivate var pendingRequest: URLRequest?
+    private var pendingRequestNavigation: WKNavigation?
     fileprivate var pendingHTML: (html: String, baseURL: URL?)?
     fileprivate var pendingHTMLContentID: WebViewPoolContentID?
     fileprivate var pendingDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
@@ -6227,12 +6226,24 @@ public class WebViewNavigator: NSObject, ObservableObject {
         pendingRequestLoadTask = nil
     }
 
+    /// Provisional start can still expose the outgoing document URL. Retire only
+    /// the queued request that issued this exact native navigation.
+    @MainActor
+    fileprivate func consumePendingRequest(startedBy navigation: WKNavigation?) -> Bool {
+        guard let navigation, pendingRequestNavigation === navigation else { return false }
+        pendingRequest = nil
+        pendingRequestNavigation = nil
+        cancelPendingRequestLoadTask()
+        return true
+    }
+
     @MainActor
     private func supersedePendingLoads(attachFallbackReason: String? = nil) {
         if let attachFallbackReason {
             cancelAttachFallbackLoadTask(reason: attachFallbackReason)
         }
         pendingRequest = nil
+        pendingRequestNavigation = nil
         pendingHTML = nil
         pendingHTMLContentID = nil
         pendingDataLoad = nil
@@ -6410,6 +6421,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     } else {
                         navigation = webView.load(request)
                     }
+                    self.pendingRequestNavigation = navigation
                     beginPooledContentUnkeyedNavigation(
                         webView,
                         navigation: navigation
@@ -6603,6 +6615,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
                 navigation = webView.load(request)
             }
+            pendingRequestNavigation = navigation
             beginPooledContentUnkeyedNavigation(
                 webView,
                 navigation: navigation
@@ -6621,6 +6634,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 url,
                 allowingReadAccessTo: url
             )
+            pendingRequestNavigation = navigation
             beginPooledContentUnkeyedNavigation(
                 webView,
                 navigation: navigation
@@ -6628,6 +6642,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         case .loadRequest:
             markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
             let navigation = webView.load(request)
+            pendingRequestNavigation = navigation
             beginPooledContentUnkeyedNavigation(
                 webView,
                 navigation: navigation
