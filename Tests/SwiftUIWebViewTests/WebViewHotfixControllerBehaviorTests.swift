@@ -29,7 +29,124 @@ private final class HotfixPendingNavigationDelegate: NSObject, WKNavigationDeleg
 }
 
 @MainActor
+private final class HotfixPendingRequestWebView: EnhancedWKWebView {
+    var requests: [URLRequest] = []
+    var issuedNavigation: WKNavigation?
+
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        requests.append(request)
+        let navigation = super.load(request)
+        issuedNavigation = navigation
+        return navigation
+    }
+}
+
+@MainActor
+private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
+    let policy: XCTestExpectation
+    let coordinator: WebViewCoordinator
+    var decision: ((WKNavigationActionPolicy) -> Void)?
+
+    init(policy: XCTestExpectation, coordinator: WebViewCoordinator) {
+        self.policy = policy
+        self.coordinator = coordinator
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        decision = decisionHandler
+        policy.fulfill()
+    }
+
+    // The test delivers this receipt at the held policy boundary, while the
+    // outgoing URL is still observable. Do not deliver it a second time.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        coordinator.webView(webView, didCommit: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        coordinator.webView(webView, didFinish: navigation)
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let html = """
+        <html data-mnb-reader-render-ready="1"><body>
+        <script>history.replaceState(null, '', 'internal://local/reader-final');</script>
+        <main id="reader-content">本文</main></body></html>
+        """
+        let bytes = Data(html.utf8)
+        urlSchemeTask.didReceive(URLResponse(url: urlSchemeTask.request.url!, mimeType: "text/html",
+                                            expectedContentLength: bytes.count, textEncodingName: "utf-8"))
+        urlSchemeTask.didReceive(bytes)
+        urlSchemeTask.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
+
+@MainActor
 final class WebViewHotfixControllerBehaviorTests: XCTestCase {
+    func testPendingRequestStartWithOutgoingURLCannotReplayAfterReaderReady() async throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let ready = expectation(description: "production document summary publishes render readiness")
+        var state = WebViewState.empty
+        var didPublishReady = false
+        let model = WebView(navigator: navigator, state: Binding(get: { state }, set: {
+            state = $0
+            if state.hasReaderRenderReady, !didPublishReady {
+                didPublishReady = true
+                ready.fulfill()
+            }
+        }))
+        let coordinator = model.makeCoordinatorForTesting()
+        let policy = expectation(description: "queued request reaches native policy")
+        let boundary = HotfixReaderRequestBoundary(policy: policy, coordinator: coordinator)
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(boundary, forURLScheme: "internal")
+        let web = HotfixPendingRequestWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+                                             configuration: configuration)
+        let request = URLRequest(url: URL(string: "internal://local/load/reader")!)
+        web.navigationDelegate = boundary
+        coordinator.setWebView(web)
+        navigator.load(request) // Queue while the bound WebView has no host.
+        let controller = WebViewController(webView: web)
+        let window = HotfixSafeAreaWindow(frame: web.frame)
+        window.rootViewController = controller
+        window.isHidden = false
+        controller.view.layoutIfNeeded()
+        defer {
+            let decision = boundary.decision
+            boundary.decision = nil
+            decision?(.cancel)
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        await fulfillment(of: [policy], timeout: 10)
+        let navigation = try XCTUnwrap(web.issuedNavigation)
+        XCTAssertNotEqual(web.url, request.url, "Policy must still expose the outgoing document")
+        coordinator.webView(web, didStartProvisionalNavigation: navigation)
+        let decision = try XCTUnwrap(boundary.decision)
+        boundary.decision = nil
+        decision(.allow)
+        await fulfillment(of: [ready], timeout: 10)
+        let finalURL = URL(string: "internal://local/reader-final")!
+        XCTAssertEqual(web.url, finalURL, "The actual document must have replaced its loader URL")
+        XCTAssertEqual(state.pageURL, finalURL)
+        let issuedCount = web.requests.count
+        let readyURL = state.pageURL
+        // The real host rechecks attachment after final document readiness.
+        navigator.handleWindowAttachmentChanged(webView: web)
+        XCTAssertEqual(web.requests.count, issuedCount, "A consumed request cannot replay after readiness")
+        XCTAssertEqual(state.pageURL, readyURL)
+        XCTAssertTrue(state.hasReaderRenderReady)
+        let text = try await web.evaluateJavaScript("document.getElementById('reader-content').textContent")
+        XCTAssertEqual(text as? String, "本文")
+    }
+
     private func host(size: CGSize = CGSize(width: 320, height: 480)) -> (UIWindow, WebViewController) {
         let web = EnhancedWKWebView(frame: CGRect(origin: .zero, size: size), configuration: .init())
         web.scrollView.contentInsetAdjustmentBehavior = .never
