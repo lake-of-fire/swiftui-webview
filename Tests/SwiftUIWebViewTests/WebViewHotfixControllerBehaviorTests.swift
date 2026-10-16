@@ -32,6 +32,9 @@ private final class HotfixPendingNavigationDelegate: NSObject, WKNavigationDeleg
 private final class HotfixPendingRequestWebView: EnhancedWKWebView {
     var requests: [URLRequest] = []
     var issuedNavigation: WKNavigation?
+    var outgoingURLDuringProvisionalReceipt: URL?
+
+    override var url: URL? { outgoingURLDuringProvisionalReceipt ?? super.url }
 
     override func load(_ request: URLRequest) -> WKNavigation? {
         requests.append(request)
@@ -46,13 +49,18 @@ private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate,
     let policy: XCTestExpectation
     let coordinator: WebViewCoordinator
     let expectedRequestURL: URL
+    let outgoingURL: URL
+    let outgoingFinished: XCTestExpectation
     private var didHoldPolicy = false
     var decision: ((WKNavigationActionPolicy) -> Void)?
 
-    init(policy: XCTestExpectation, coordinator: WebViewCoordinator, expectedRequestURL: URL) {
+    init(policy: XCTestExpectation, coordinator: WebViewCoordinator, expectedRequestURL: URL,
+         outgoingURL: URL, outgoingFinished: XCTestExpectation) {
         self.policy = policy
         self.coordinator = coordinator
         self.expectedRequestURL = expectedRequestURL
+        self.outgoingURL = outgoingURL
+        self.outgoingFinished = outgoingFinished
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -66,18 +74,23 @@ private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate,
         policy.fulfill()
     }
 
-    // The test delivers this receipt at the held policy boundary, while the
-    // outgoing URL is still observable. Do not deliver it a second time.
+    // The test delivers provisional start at the held policy boundary with a
+    // controlled outgoing-URL observation. Do not deliver it a second time.
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard didHoldPolicy else { return }
         coordinator.webView(webView, didCommit: navigation)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if !didHoldPolicy, webView.url == outgoingURL {
+            outgoingFinished.fulfill()
+            return
+        }
         coordinator.webView(webView, didFinish: navigation)
     }
 
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
-        let html = """
+        let html = urlSchemeTask.request.url == outgoingURL ? "<html><body>Outgoing document</body></html>" : """
         <html data-mnb-reader-render-ready="1"><body>
         <script>history.replaceState(null, '', 'internal://local/reader-final');</script>
         <main id="reader-content">本文</main></body></html>
@@ -110,10 +123,14 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
         let coordinator = model.makeCoordinatorForTesting()
         let policy = expectation(description: "mounted request reaches native policy")
         let request = URLRequest(url: URL(string: "internal://local/load/reader")!)
+        let outgoingURL = URL(string: "internal://local/outgoing")!
+        let outgoingFinished = expectation(description: "real outgoing document finishes")
         let boundary = HotfixReaderRequestBoundary(
             policy: policy,
             coordinator: coordinator,
-            expectedRequestURL: request.url!
+            expectedRequestURL: request.url!,
+            outgoingURL: outgoingURL,
+            outgoingFinished: outgoingFinished
         )
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(boundary, forURLScheme: "internal")
@@ -136,12 +153,26 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
         }
         // Begin only after the real reader host has completed attachment and layout.
         web.navigationDelegate = boundary
+        web.load(URLRequest(url: outgoingURL))
+        await fulfillment(of: [outgoingFinished], timeout: 10)
+        XCTAssertEqual(web.url, outgoingURL)
+        guard web.url == outgoingURL else { return }
+        let outgoingDocumentURL = try XCTUnwrap(web.url)
         coordinator.setWebView(web)
+        let outgoingNavigation = web.issuedNavigation
         navigator.load(request)
         await fulfillment(of: [policy], timeout: 10)
         let navigation = try XCTUnwrap(web.issuedNavigation)
-        XCTAssertNotEqual(web.url, request.url, "Policy must still expose the outgoing document")
+        XCTAssertFalse(navigation === outgoingNavigation, "The receipt must belong to the reader request")
+        // WebKit may publish the requested URL before policy even completes.
+        // Control only the synchronous receipt's URL observation to exercise the
+        // supported outgoing-document ordering with a real committed URL and the
+        // WKNavigation returned by this request. All document work stays native.
+        web.outgoingURLDuringProvisionalReceipt = outgoingDocumentURL
+        XCTAssertEqual(web.url, outgoingURL)
+        XCTAssertNotEqual(web.url, request.url)
         coordinator.webView(web, didStartProvisionalNavigation: navigation)
+        web.outgoingURLDuringProvisionalReceipt = nil
         let decision = try XCTUnwrap(boundary.decision)
         boundary.decision = nil
         decision(.allow)
