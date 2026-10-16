@@ -45,15 +45,23 @@ private final class HotfixPendingRequestWebView: EnhancedWKWebView {
 private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
     let policy: XCTestExpectation
     let coordinator: WebViewCoordinator
+    let expectedRequestURL: URL
+    private var didHoldPolicy = false
     var decision: ((WKNavigationActionPolicy) -> Void)?
 
-    init(policy: XCTestExpectation, coordinator: WebViewCoordinator) {
+    init(policy: XCTestExpectation, coordinator: WebViewCoordinator, expectedRequestURL: URL) {
         self.policy = policy
         self.coordinator = coordinator
+        self.expectedRequestURL = expectedRequestURL
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard !didHoldPolicy, navigationAction.request.url == expectedRequestURL else {
+            decisionHandler(.allow)
+            return
+        }
+        didHoldPolicy = true
         decision = decisionHandler
         policy.fulfill()
     }
@@ -100,16 +108,17 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
             }
         }))
         let coordinator = model.makeCoordinatorForTesting()
-        let policy = expectation(description: "queued request reaches native policy")
-        let boundary = HotfixReaderRequestBoundary(policy: policy, coordinator: coordinator)
+        let policy = expectation(description: "mounted request reaches native policy")
+        let request = URLRequest(url: URL(string: "internal://local/load/reader")!)
+        let boundary = HotfixReaderRequestBoundary(
+            policy: policy,
+            coordinator: coordinator,
+            expectedRequestURL: request.url!
+        )
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(boundary, forURLScheme: "internal")
         let web = HotfixPendingRequestWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480),
                                              configuration: configuration)
-        let request = URLRequest(url: URL(string: "internal://local/load/reader")!)
-        web.navigationDelegate = boundary
-        coordinator.setWebView(web)
-        navigator.load(request) // Queue while the bound WebView has no host.
         let controller = WebViewController(webView: web)
         let window = HotfixSafeAreaWindow(frame: web.frame)
         window.rootViewController = controller
@@ -125,6 +134,10 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
             window.isHidden = true
             window.rootViewController = nil
         }
+        // Begin only after the real reader host has completed attachment and layout.
+        web.navigationDelegate = boundary
+        coordinator.setWebView(web)
+        navigator.load(request)
         await fulfillment(of: [policy], timeout: 10)
         let navigation = try XCTUnwrap(web.issuedNavigation)
         XCTAssertNotEqual(web.url, request.url, "Policy must still expose the outgoing document")
