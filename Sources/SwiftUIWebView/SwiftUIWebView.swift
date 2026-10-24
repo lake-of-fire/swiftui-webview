@@ -5643,7 +5643,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 if isInternalReaderLoaderNavigation, decision != .allow {
                     navigator.clearActiveInternalReaderLoadSignal()
                 }
-                return (decision, preferences)
+                // App callbacks may authorize navigation, but an allowed
+                // reader-loader still needs its source-host block policy and
+                // per-site scripts installed before WebKit commits it.
+                if decision != .allow || !isInternalReaderLoaderNavigation {
+                    return (decision, preferences)
+                }
             }
         }
         // The readable document keeps its internal origin. Apply host policy
