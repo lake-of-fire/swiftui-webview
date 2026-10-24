@@ -5596,6 +5596,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
             : nil
         let isInternalReaderLoaderNavigation = isMainDocumentNavigation
             && canonicalContentURLForReaderLoader(navigationAction.request.url) != nil
+        // A malformed loader request has no trustworthy article identity.
+        // Reject it before app callbacks can explicitly allow navigation.
+        if isMainDocumentNavigation,
+           isInternalReaderLoaderURL(navigationAction.request.url),
+           !isInternalReaderLoaderNavigation {
+            navigator.clearActiveInternalReaderLoadSignal()
+            rejectContentRulesPolicy(
+                ownedBy: contentRulesBypassOwner,
+                on: webView
+            )
+            return (.cancel, preferences)
+        }
         if isMainDocumentNavigation,
            let requestedURL = navigationAction.request.url,
            let loaderRequestedURL = navigator.readerLoadRequestedURL,
