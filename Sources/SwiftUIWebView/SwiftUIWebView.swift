@@ -203,53 +203,51 @@ private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
 
 @inline(__always)
 func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
-    guard let url,
-          url.scheme?.lowercased() == "internal",
-          url.host?.lowercased() == "local",
-          url.path == "/load/reader",
-          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let readerURLValues = components.queryItems?.filter({ $0.name == "reader-url" }),
-          readerURLValues.count == 1,
-          let readerURLValue = readerURLValues.first?.value
-    else {
-        return nil
-    }
-
-    func supportedContentURL(from value: String) -> URL? {
-        guard let resolved = URL(string: value),
-              let scheme = resolved.scheme?.lowercased() else { return nil }
+    guard let url, isInternalReaderLoaderURL(url) else { return nil }
+    func supportedTarget(_ candidate: URL) -> Bool {
+        guard let scheme = candidate.scheme?.lowercased() else { return false }
         switch scheme {
         case "http", "https":
-            guard resolved.host != nil else { return nil }
+            return candidate.host?.isEmpty == false
         case "reader-file":
-            break
-        case "internal":
-            guard resolved.absoluteString.hasPrefix("internal://local/snippet?key=") else {
-                return nil
-            }
+            return true
+        case "internal", "about":
+            if isInternalReaderLoaderURL(candidate) { return true }
+            guard let parts = URLComponents(url: candidate, resolvingAgainstBaseURL: false),
+                  parts.user == nil, parts.password == nil, parts.port == nil,
+                  let items = parts.queryItems, items.count == 1,
+                  items[0].name == "key", items[0].value?.isEmpty == false else { return false }
+            return scheme == "about" ? parts.path == "snippet"
+                : parts.host?.lowercased() == "local" && parts.path == "/snippet"
         default:
-            return nil
+            return false
         }
-        guard let fragment = components.fragment,
-              var resolvedComponents = URLComponents(url: resolved, resolvingAgainstBaseURL: false) else {
-            return resolved
+    }
+    var source = url
+    var visited = Set<URL>()
+    while isInternalReaderLoaderURL(source) {
+        guard visited.insert(source).inserted,
+              let parts = URLComponents(url: source, resolvingAgainstBaseURL: false),
+              parts.user == nil, parts.password == nil, parts.port == nil,
+              let items = parts.queryItems, items.count == 1,
+              items[0].name == "reader-url", let value = items[0].value, !value.isEmpty else { return nil }
+        let candidate: URL?
+        if let parsed = URL(string: value), parsed.scheme != nil {
+            candidate = parsed
+        } else {
+            candidate = value.removingPercentEncoding.flatMap { URL(string: $0) }
         }
-        resolvedComponents.fragment = fragment
-        return resolvedComponents.url
+        guard let candidate, supportedTarget(candidate) else { return nil }
+        if let fragment = parts.percentEncodedFragment {
+            var content = URLComponents(url: candidate, resolvingAgainstBaseURL: false)
+            content?.percentEncodedFragment = fragment
+            guard let resolved = content?.url else { return nil }
+            source = resolved
+        } else {
+            source = candidate
+        }
     }
-
-    // URLComponents has already decoded the query-item value once. Parse that
-    // value first so escaped reserved characters such as %2F remain part of
-    // the content URL. Decode only as a compatibility fallback for legacy
-    // reader-loader URLs whose value itself was percent-encoded twice.
-    if let resolved = supportedContentURL(from: readerURLValue) {
-        return resolved
-    }
-    guard let decoded = readerURLValue.removingPercentEncoding,
-          let resolved = supportedContentURL(from: decoded) else {
-        return nil
-    }
-    return resolved
+    return supportedTarget(source) ? source : nil
 }
 
 @inline(__always)
@@ -12383,4 +12381,3 @@ extension WebView {
  }
  }
  */
-

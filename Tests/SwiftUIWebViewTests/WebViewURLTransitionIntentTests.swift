@@ -27,6 +27,29 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         }
     }
 
+    func testReaderLoaderRejectsInvalidAuthoritiesAndExtraItems() throws {
+        for value in [
+            "internal://user@local/load/reader?reader-url=https://example.org",
+            "internal://local:8080/load/reader?reader-url=https://example.org",
+            "internal://local/load/reader?reader-url=https://example.org&other=1",
+        ] {
+            XCTAssertNil(canonicalContentURLForReaderLoader(try XCTUnwrap(URL(string: value))), value)
+        }
+    }
+
+    func testReaderLoaderRetainsLegacyNestedAndAboutSnippetSources() throws {
+        for value in ["https://example.org/a%2Fb?q=x%26y", "about:snippet?key=legacy%252Fnote"] {
+            let source = try XCTUnwrap(URL(string: value))
+            var loader = source
+            for _ in 0 ..< 3 {
+                var parts = try XCTUnwrap(URLComponents(string: "internal://local/load/reader"))
+                parts.queryItems = [URLQueryItem(name: "reader-url", value: loader.absoluteString)]
+                loader = try XCTUnwrap(parts.url)
+            }
+            XCTAssertEqual(canonicalContentURLForReaderLoader(loader), source)
+        }
+    }
+
     private func caller() throws -> WebViewScriptCaller {
         let caller = WebViewScriptCaller()
         caller.installBinding(ownedBy: UUID(), asyncCaller: { _, _, _, _ in .init(nil) },
@@ -148,4 +171,3 @@ private final class WithdrawalCallbackCount: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     func increment() { lock.lock(); count += 1; lock.unlock() }
 }
-
