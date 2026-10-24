@@ -5644,10 +5644,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         if let onNavigationAction {
             let decision = await onNavigationAction(navigationAction)
             // An app callback can suspend while a newer main-document policy
-            // starts on this same WebView. Its older decision no longer owns
-            // loading state, reader-load signals, or per-site scripts.
+            // starts on this same WebView. Neither an older document nor one of
+            // its subframes still owns loading state, reader-load signals, or
+            // per-site scripts. Subframes do not advance the generation.
             guard ownsWebView(webView),
-                  !isMainDocumentNavigation || navigationPolicyGeneration == policyGeneration else {
+                  navigationPolicyGeneration == policyGeneration else {
                 return (.cancel, preferences)
             }
             if let decision {

@@ -7,6 +7,14 @@ import XCTest
 @MainActor
 final class WebViewURLTransitionIntentTests: XCTestCase {
     func testRetiredLoaderPolicyCannotClearSuccessorLoadingState() async throws {
+        try await assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: false)
+    }
+
+    func testRetiredSubframePolicyCannotClearSuccessorLoadingState() async throws {
+        try await assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: true)
+    }
+
+    private func assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: Bool) async throws {
         let first = try XCTUnwrap(URL(string:
             "internal://local/load/reader?reader-url=https://blocked.example/article"))
         let second = try XCTUnwrap(URL(string:
@@ -22,18 +30,27 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
             source.navigationDelegate = nil
         }
         var actions: [WKNavigationAction] = []
-        for url in [first, second] {
-            let captured = expectation(description: "Capture main-document policy")
+        for (index, url) in [first, second].enumerated() {
+            let captured = expectation(description: "Capture navigation policy")
             capture.receive = { action in
                 actions.append(action)
                 captured.fulfill()
             }
-            XCTAssertNotNil(source.load(URLRequest(url: url)))
+            capture.allowsMainDocument = isSubframe && index == 0
+            if capture.allowsMainDocument {
+                XCTAssertNotNil(source.loadHTMLString(
+                    "<html><body><iframe src='\(url.absoluteString)'></iframe></body></html>",
+                    baseURL: URL(string: "https://fixture.invalid")
+                ))
+            } else {
+                XCTAssertNotNil(source.load(URLRequest(url: url)))
+            }
             await fulfillment(of: [captured], timeout: 10)
         }
         XCTAssertEqual(actions.count, 2)
         guard actions.count == 2 else { return }
-        XCTAssertTrue(actions.allSatisfy { $0.targetFrame?.isMainFrame == true })
+        XCTAssertEqual(actions[0].targetFrame?.isMainFrame, !isSubframe)
+        XCTAssertEqual(actions[1].targetFrame?.isMainFrame, true)
         source.navigationDelegate = nil
 
         var state = WebViewState.empty
@@ -246,9 +263,14 @@ private final class WithdrawalCallbackCount: @unchecked Sendable {
 @MainActor
 private final class LoaderPolicyActionCapture: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
     var receive: ((WKNavigationAction) -> Void)?
+    var allowsMainDocument = false
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if allowsMainDocument, navigationAction.targetFrame?.isMainFrame == true {
+            decisionHandler(.allow)
+            return
+        }
         let callback = receive
         receive = nil
         decisionHandler(.cancel)
