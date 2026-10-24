@@ -209,7 +209,13 @@ func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
         switch scheme {
         case "http", "https":
             return candidate.host?.isEmpty == false
-        case "reader-file", "ebook", "ebook-url", "epub", "pdf", "pdf-url":
+        case "reader-file":
+            guard let parts = URLComponents(url: candidate, resolvingAgainstBaseURL: false) else { return false }
+            return parts.host?.lowercased() == "file"
+                && parts.user == nil && parts.password == nil && parts.port == nil
+                && (parts.percentEncodedPath.hasPrefix("/load/local/")
+                    || parts.percentEncodedPath.hasPrefix("/load/icloud/"))
+        case "ebook", "ebook-url", "epub", "pdf", "pdf-url":
             return true
         case "internal", "about":
             if isInternalReaderLoaderURL(candidate) { return true }
