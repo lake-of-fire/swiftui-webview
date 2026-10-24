@@ -1,9 +1,93 @@
 import Foundation
+import SwiftUI
+import WebKit
 import XCTest
 @testable import SwiftUIWebView
 
 @MainActor
 final class WebViewURLTransitionIntentTests: XCTestCase {
+    func testRetiredLoaderPolicyCannotClearSuccessorLoadingState() async throws {
+        try await assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: false)
+    }
+
+    func testRetiredSubframePolicyCannotClearSuccessorLoadingState() async throws {
+        try await assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: true)
+    }
+
+    private func assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: Bool) async throws {
+        let first = try XCTUnwrap(URL(string:
+            "internal://local/load/reader?reader-url=https://blocked.example/article"))
+        let second = try XCTUnwrap(URL(string:
+            "internal://local/load/reader?reader-url=https://allowed.example/article"))
+        let capture = LoaderPolicyActionCapture()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.setURLSchemeHandler(capture, forURLScheme: "internal")
+        let source = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        source.navigationDelegate = capture
+        defer {
+            source.stopLoading()
+            source.navigationDelegate = nil
+        }
+        var actions: [WKNavigationAction] = []
+        for (index, url) in [first, second].enumerated() {
+            let captured = expectation(description: "Capture navigation policy")
+            capture.receive = { action in
+                actions.append(action)
+                captured.fulfill()
+            }
+            capture.allowsMainDocument = isSubframe && index == 0
+            if capture.allowsMainDocument {
+                XCTAssertNotNil(source.loadHTMLString(
+                    "<html><body><iframe src='\(url.absoluteString)'></iframe></body></html>",
+                    baseURL: URL(string: "https://fixture.invalid")
+                ))
+            } else {
+                XCTAssertNotNil(source.load(URLRequest(url: url)))
+            }
+            await fulfillment(of: [captured], timeout: 10)
+        }
+        XCTAssertEqual(actions.count, 2)
+        guard actions.count == 2 else { return }
+        XCTAssertEqual(actions[0].targetFrame?.isMainFrame, !isSubframe)
+        XCTAssertEqual(actions[1].targetFrame?.isMainFrame, true)
+        source.navigationDelegate = nil
+
+        var state = WebViewState.empty
+        let navigator = WebViewNavigator()
+        let suspended = expectation(description: "Older policy is awaiting app callback")
+        var release: CheckedContinuation<WKNavigationActionPolicy?, Never>?
+        let model = WebView(
+            navigator: navigator,
+            state: Binding(get: { state }, set: { state = $0 }),
+            blockedHosts: ["blocked.example"],
+            onNavigationAction: { action in
+                if action.request.url == first {
+                    suspended.fulfill()
+                    return await withCheckedContinuation { release = $0 }
+                }
+                return .allow
+            }
+        )
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        let stale = Task { @MainActor in
+            await coordinator.webView(source, decidePolicyFor: actions[0],
+                                      preferences: WKWebpagePreferences())
+        }
+        await fulfillment(of: [suspended], timeout: 10)
+        let successor = await coordinator.webView(source, decidePolicyFor: actions[1],
+                                                 preferences: WKWebpagePreferences())
+        XCTAssertEqual(successor.0, .allow)
+        state.pageURL = try XCTUnwrap(canonicalContentURLForReaderLoader(second))
+        state.isLoading = true
+        release?.resume(returning: .allow)
+        let retired = await stale.value
+        XCTAssertEqual(retired.0, .cancel)
+        XCTAssertTrue(state.isLoading, "An older blocked source must not stop its successor")
+        XCTAssertEqual(state.pageURL.host, "allowed.example")
+    }
+
     func testReaderLoaderSameDocumentFragmentUsesOriginalArticleURL() throws {
         let original = try XCTUnwrap(URL(string: "https://example.com/a%2Fb?q=x%26y#old"))
         let encoded = try XCTUnwrap(original.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
@@ -174,4 +258,28 @@ private final class WithdrawalCallbackCount: @unchecked Sendable {
     private var count = 0
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     func increment() { lock.lock(); count += 1; lock.unlock() }
+}
+
+@MainActor
+private final class LoaderPolicyActionCapture: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
+    var receive: ((WKNavigationAction) -> Void)?
+    var allowsMainDocument = false
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        if allowsMainDocument, navigationAction.targetFrame?.isMainFrame == true {
+            decisionHandler(.allow)
+            return
+        }
+        let callback = receive
+        receive = nil
+        decisionHandler(.cancel)
+        callback?(navigationAction)
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        urlSchemeTask.didFailWithError(URLError(.cancelled))
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
