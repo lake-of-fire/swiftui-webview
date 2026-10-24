@@ -4,6 +4,56 @@ import XCTest
 
 @MainActor
 final class WebViewURLTransitionIntentTests: XCTestCase {
+    func testReaderLoaderSameDocumentFragmentUsesOriginalArticleURL() throws {
+        let original = try XCTUnwrap(URL(string: "https://example.com/a%2Fb?q=x%26y#old"))
+        let encoded = try XCTUnwrap(original.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let loader = try XCTUnwrap(URL(string: "internal://local/load/reader?reader-url=\(encoded)#section"))
+        XCTAssertEqual(
+            canonicalContentURLForReaderLoader(loader)?.absoluteString,
+            "https://example.com/a%2Fb?q=x%26y#section"
+        )
+        XCTAssertEqual(canonicalContentURLForReaderLoader(original), nil)
+    }
+
+    func testReaderLoaderCanonicalizationRejectsUntrustedOrAmbiguousTargets() throws {
+        for rawURL in [
+            "internal://local/load/reader?reader-url=javascript%3Aalert%281%29",
+            "internal://local/load/reader?reader-url=data%3Atext%2Fhtml%2Ctest",
+            "internal://local/load/reader?reader-url=internal%3A%2F%2Flocal%2Fload%2Freader",
+            "internal://local/load/reader?reader-url=https%3A%2F%2Fexample.com&reader-url=https%3A%2F%2Fother.com",
+            "internal://local/load/reader?other=reader-url%3Dhttps%3A%2F%2Fexample.com",
+        ] {
+            XCTAssertNil(canonicalContentURLForReaderLoader(URL(string: rawURL)), rawURL)
+        }
+    }
+
+    func testReaderLoaderRejectsInvalidAuthoritiesAndExtraItems() throws {
+        for value in [
+            "internal://user@local/load/reader?reader-url=https://example.org",
+            "internal://local:8080/load/reader?reader-url=https://example.org",
+            "internal://local/load/reader?reader-url=https://example.org&other=1",
+        ] {
+            XCTAssertNil(canonicalContentURLForReaderLoader(try XCTUnwrap(URL(string: value))), value)
+        }
+    }
+
+    func testReaderLoaderRetainsLegacyNestedAndAboutSnippetSources() throws {
+        for value in [
+            "https://example.org/a%2Fb?q=x%26y",
+            "about:snippet?key=legacy%252Fnote",
+            "ebook://book/chapter%2Fpart.xhtml?literal=%2523#selection",
+        ] {
+            let source = try XCTUnwrap(URL(string: value))
+            var loader = source
+            for _ in 0 ..< 3 {
+                var parts = try XCTUnwrap(URLComponents(string: "internal://local/load/reader"))
+                parts.queryItems = [URLQueryItem(name: "reader-url", value: loader.absoluteString)]
+                loader = try XCTUnwrap(parts.url)
+            }
+            XCTAssertEqual(canonicalContentURLForReaderLoader(loader), source)
+        }
+    }
+
     private func caller() throws -> WebViewScriptCaller {
         let caller = WebViewScriptCaller()
         caller.installBinding(ownedBy: UUID(), asyncCaller: { _, _, _, _ in .init(nil) },

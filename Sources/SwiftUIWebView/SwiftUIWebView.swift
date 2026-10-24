@@ -203,29 +203,57 @@ private func readerLoadSceneStateString(for webView: WKWebView?) -> String {
 
 @inline(__always)
 func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
-    guard let url,
-          url.scheme?.lowercased() == "internal",
-          url.host?.lowercased() == "local",
-          url.path == "/load/reader",
-          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let readerURLValue = components.queryItems?.first(where: { $0.name == "reader-url" })?.value
-    else {
-        return nil
+    guard let url, isInternalReaderLoaderURL(url) else { return nil }
+    func supportedTarget(_ candidate: URL) -> Bool {
+        guard let scheme = candidate.scheme?.lowercased() else { return false }
+        switch scheme {
+        case "http", "https":
+            return candidate.host?.isEmpty == false
+        case "reader-file":
+            guard let parts = URLComponents(url: candidate, resolvingAgainstBaseURL: false) else { return false }
+            return parts.host?.lowercased() == "file"
+                && parts.user == nil && parts.password == nil && parts.port == nil
+                && (parts.percentEncodedPath.hasPrefix("/load/local/")
+                    || parts.percentEncodedPath.hasPrefix("/load/icloud/"))
+        case "ebook", "ebook-url", "epub", "pdf", "pdf-url":
+            return true
+        case "internal", "about":
+            if isInternalReaderLoaderURL(candidate) { return true }
+            guard let parts = URLComponents(url: candidate, resolvingAgainstBaseURL: false),
+                  parts.user == nil, parts.password == nil, parts.port == nil,
+                  let items = parts.queryItems, items.count == 1,
+                  items[0].name == "key", items[0].value?.isEmpty == false else { return false }
+            return scheme == "about" ? parts.path == "snippet"
+                : parts.host?.lowercased() == "local" && parts.path == "/snippet"
+        default:
+            return false
+        }
     }
-
-    // URLComponents has already decoded the query-item value once. Parse that
-    // value first so escaped reserved characters such as %2F remain part of
-    // the content URL. Decode only as a compatibility fallback for legacy
-    // reader-loader URLs whose value itself was percent-encoded twice.
-    if let resolved = URL(string: readerURLValue), resolved.scheme != nil {
-        return resolved
+    var source = url
+    var visited = Set<URL>()
+    while isInternalReaderLoaderURL(source) {
+        guard visited.insert(source).inserted,
+              let parts = URLComponents(url: source, resolvingAgainstBaseURL: false),
+              parts.user == nil, parts.password == nil, parts.port == nil,
+              let items = parts.queryItems, items.count == 1,
+              items[0].name == "reader-url", let value = items[0].value, !value.isEmpty else { return nil }
+        let candidate: URL?
+        if let parsed = URL(string: value), parsed.scheme != nil {
+            candidate = parsed
+        } else {
+            candidate = value.removingPercentEncoding.flatMap { URL(string: $0) }
+        }
+        guard let candidate, supportedTarget(candidate) else { return nil }
+        if let fragment = parts.percentEncodedFragment {
+            var content = URLComponents(url: candidate, resolvingAgainstBaseURL: false)
+            content?.percentEncodedFragment = fragment
+            guard let resolved = content?.url else { return nil }
+            source = resolved
+        } else {
+            source = candidate
+        }
     }
-    guard let decoded = readerURLValue.removingPercentEncoding,
-          let resolved = URL(string: decoded),
-          resolved.scheme != nil else {
-        return nil
-    }
-    return resolved
+    return supportedTarget(source) ? source : nil
 }
 
 @inline(__always)
@@ -5574,6 +5602,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
             : nil
         let isInternalReaderLoaderNavigation = isMainDocumentNavigation
             && canonicalContentURLForReaderLoader(navigationAction.request.url) != nil
+        // A malformed loader request has no trustworthy article identity.
+        // Reject it before app callbacks can explicitly allow navigation.
+        if isMainDocumentNavigation,
+           isInternalReaderLoaderURL(navigationAction.request.url),
+           !isInternalReaderLoaderNavigation {
+            navigator.clearActiveInternalReaderLoadSignal()
+            rejectContentRulesPolicy(
+                ownedBy: contentRulesBypassOwner,
+                on: webView
+            )
+            return (.cancel, preferences)
+        }
         if isMainDocumentNavigation,
            let requestedURL = navigationAction.request.url,
            let loaderRequestedURL = navigator.readerLoadRequestedURL,
@@ -5609,10 +5649,20 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 if isInternalReaderLoaderNavigation, decision != .allow {
                     navigator.clearActiveInternalReaderLoadSignal()
                 }
-                return (decision, preferences)
+                // App callbacks may authorize navigation, but an allowed
+                // reader-loader still needs its source-host block policy and
+                // per-site scripts installed before WebKit commits it.
+                if decision != .allow || !isInternalReaderLoaderNavigation {
+                    return (decision, preferences)
+                }
             }
         }
-        if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
+        // The readable document keeps its internal origin. Apply host policy
+        // to the actual article so the loader's generic "local" host cannot
+        // bypass a blocked site or suppress its configured scripts.
+        let canonicalRequestedURL = canonicalContentURLForReaderLoader(navigationAction.request.url)
+            ?? navigationAction.request.url
+        if let host = canonicalRequestedURL?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 if isInternalReaderLoaderNavigation {
                     navigator.clearActiveInternalReaderLoadSignal()
@@ -5632,7 +5682,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         
         if isMainDocumentNavigation {
-            let effectiveMainDocumentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
+            let documentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
+            let effectiveMainDocumentURL = canonicalContentURLForReaderLoader(documentURL) ?? documentURL
             self.webView.updateUserScripts(
                 webView: webView,
                 coordinator: self,
@@ -10828,28 +10879,15 @@ public struct WebView {
 
     @MainActor
     private func resolvedUserScriptDomain(currentURL: URL?) -> URL? {
-        if let currentURL {
-            return currentURL
-        }
-        if let pendingRequestURL = navigator.pendingRequest?.url {
-            return pendingRequestURL
-        }
-        if let lastLoadedRequestURL = navigator.lastLoadedRequest?.url {
-            return lastLoadedRequestURL
-        }
-        if let pendingHTMLBaseURL = navigator.pendingHTML?.baseURL {
-            return pendingHTMLBaseURL
-        }
-        if let lastLoadedHTMLBaseURL = navigator.lastLoadedHTML?.baseURL {
-            return lastLoadedHTMLBaseURL
-        }
-        if let pendingDataLoadBaseURL = navigator.pendingDataLoad?.baseURL {
-            return pendingDataLoadBaseURL
-        }
-        if let lastLoadedDataLoadBaseURL = navigator.lastLoadedDataLoad?.baseURL {
-            return lastLoadedDataLoadBaseURL
-        }
-        return state.pageURL.absoluteString == "about:blank" ? nil : state.pageURL
+        let rawURL = currentURL
+            ?? navigator.pendingRequest?.url
+            ?? navigator.lastLoadedRequest?.url
+            ?? navigator.pendingHTML?.baseURL
+            ?? navigator.lastLoadedHTML?.baseURL
+            ?? navigator.pendingDataLoad?.baseURL
+            ?? navigator.lastLoadedDataLoad?.baseURL
+            ?? (state.pageURL.absoluteString == "about:blank" ? nil : state.pageURL)
+        return canonicalContentURLForReaderLoader(rawURL) ?? rawURL
     }
 }
 
