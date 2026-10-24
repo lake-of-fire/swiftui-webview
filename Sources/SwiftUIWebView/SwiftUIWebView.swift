@@ -3068,6 +3068,7 @@ public class WebViewCoordinator: NSObject {
     private let scriptCallerBindingOwnerID = UUID()
     private weak var scriptCallerBoundWebView: WKWebView?
     private var documentCallbackGeneration: UInt64 = 0
+    private var navigationPolicyGeneration: UInt64 = 0
     private var documentCallbackContextIsActive = false
     private let trustedUserActionAdmissions =
         WebViewTrustedUserActionAdmissionStore()
@@ -5597,6 +5598,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
 #endif
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
+        if isMainDocumentNavigation {
+            navigationPolicyGeneration &+= 1
+        }
+        let policyGeneration = navigationPolicyGeneration
         let contentRulesBypassOwner = isMainDocumentNavigation
             ? beginContentRulesPolicy(for: navigationAction, on: webView)
             : nil
@@ -5638,7 +5643,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         if let onNavigationAction {
             let decision = await onNavigationAction(navigationAction)
-            guard ownsWebView(webView) else { return (.cancel, preferences) }
+            // An app callback can suspend while a newer main-document policy
+            // starts on this same WebView. Its older decision no longer owns
+            // loading state, reader-load signals, or per-site scripts.
+            guard ownsWebView(webView),
+                  !isMainDocumentNavigation || navigationPolicyGeneration == policyGeneration else {
+                return (.cancel, preferences)
+            }
             if let decision {
                 if isMainDocumentNavigation, decision != .allow {
                     rejectContentRulesPolicy(
