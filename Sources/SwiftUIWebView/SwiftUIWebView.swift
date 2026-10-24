@@ -208,21 +208,45 @@ func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
           url.host?.lowercased() == "local",
           url.path == "/load/reader",
           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-          let readerURLValue = components.queryItems?.first(where: { $0.name == "reader-url" })?.value
+          let readerURLValues = components.queryItems?.filter({ $0.name == "reader-url" }),
+          readerURLValues.count == 1,
+          let readerURLValue = readerURLValues.first?.value
     else {
         return nil
+    }
+
+    func supportedContentURL(from value: String) -> URL? {
+        guard let resolved = URL(string: value),
+              let scheme = resolved.scheme?.lowercased() else { return nil }
+        switch scheme {
+        case "http", "https":
+            guard resolved.host != nil else { return nil }
+        case "reader-file":
+            break
+        case "internal":
+            guard resolved.absoluteString.hasPrefix("internal://local/snippet?key=") else {
+                return nil
+            }
+        default:
+            return nil
+        }
+        guard let fragment = components.fragment,
+              var resolvedComponents = URLComponents(url: resolved, resolvingAgainstBaseURL: false) else {
+            return resolved
+        }
+        resolvedComponents.fragment = fragment
+        return resolvedComponents.url
     }
 
     // URLComponents has already decoded the query-item value once. Parse that
     // value first so escaped reserved characters such as %2F remain part of
     // the content URL. Decode only as a compatibility fallback for legacy
     // reader-loader URLs whose value itself was percent-encoded twice.
-    if let resolved = URL(string: readerURLValue), resolved.scheme != nil {
+    if let resolved = supportedContentURL(from: readerURLValue) {
         return resolved
     }
     guard let decoded = readerURLValue.removingPercentEncoding,
-          let resolved = URL(string: decoded),
-          resolved.scheme != nil else {
+          let resolved = supportedContentURL(from: decoded) else {
         return nil
     }
     return resolved
@@ -5612,7 +5636,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 return (decision, preferences)
             }
         }
-        if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
+        // The readable document keeps its internal origin. Apply host policy
+        // to the actual article so the loader's generic "local" host cannot
+        // bypass a blocked site or suppress its configured scripts.
+        let canonicalRequestedURL = canonicalContentURLForReaderLoader(navigationAction.request.url)
+            ?? navigationAction.request.url
+        if let host = canonicalRequestedURL?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 if isInternalReaderLoaderNavigation {
                     navigator.clearActiveInternalReaderLoadSignal()
@@ -5632,7 +5661,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         
         if isMainDocumentNavigation {
-            let effectiveMainDocumentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
+            let documentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
+            let effectiveMainDocumentURL = canonicalContentURLForReaderLoader(documentURL) ?? documentURL
             self.webView.updateUserScripts(
                 webView: webView,
                 coordinator: self,
@@ -10828,28 +10858,15 @@ public struct WebView {
 
     @MainActor
     private func resolvedUserScriptDomain(currentURL: URL?) -> URL? {
-        if let currentURL {
-            return currentURL
-        }
-        if let pendingRequestURL = navigator.pendingRequest?.url {
-            return pendingRequestURL
-        }
-        if let lastLoadedRequestURL = navigator.lastLoadedRequest?.url {
-            return lastLoadedRequestURL
-        }
-        if let pendingHTMLBaseURL = navigator.pendingHTML?.baseURL {
-            return pendingHTMLBaseURL
-        }
-        if let lastLoadedHTMLBaseURL = navigator.lastLoadedHTML?.baseURL {
-            return lastLoadedHTMLBaseURL
-        }
-        if let pendingDataLoadBaseURL = navigator.pendingDataLoad?.baseURL {
-            return pendingDataLoadBaseURL
-        }
-        if let lastLoadedDataLoadBaseURL = navigator.lastLoadedDataLoad?.baseURL {
-            return lastLoadedDataLoadBaseURL
-        }
-        return state.pageURL.absoluteString == "about:blank" ? nil : state.pageURL
+        let rawURL = currentURL
+            ?? navigator.pendingRequest?.url
+            ?? navigator.lastLoadedRequest?.url
+            ?? navigator.pendingHTML?.baseURL
+            ?? navigator.lastLoadedHTML?.baseURL
+            ?? navigator.pendingDataLoad?.baseURL
+            ?? navigator.lastLoadedDataLoad?.baseURL
+            ?? (state.pageURL.absoluteString == "about:blank" ? nil : state.pageURL)
+        return canonicalContentURLForReaderLoader(rawURL) ?? rawURL
     }
 }
 
@@ -12366,3 +12383,4 @@ extension WebView {
  }
  }
  */
+
