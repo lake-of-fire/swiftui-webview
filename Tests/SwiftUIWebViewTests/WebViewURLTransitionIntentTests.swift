@@ -38,7 +38,11 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
     }
 
     func testReaderLoaderRetainsLegacyNestedAndAboutSnippetSources() throws {
-        for value in ["https://example.org/a%2Fb?q=x%26y", "about:snippet?key=legacy%252Fnote"] {
+        for value in [
+            "https://example.org/a%2Fb?q=x%26y",
+            "about:snippet?key=legacy%252Fnote",
+            "ebook://book/chapter%2Fpart.xhtml?literal=%2523#selection",
+        ] {
             let source = try XCTUnwrap(URL(string: value))
             var loader = source
             for _ in 0 ..< 3 {

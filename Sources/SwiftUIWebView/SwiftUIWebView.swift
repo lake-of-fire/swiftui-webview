@@ -209,7 +209,7 @@ func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
         switch scheme {
         case "http", "https":
             return candidate.host?.isEmpty == false
-        case "reader-file":
+        case "reader-file", "ebook", "ebook-url", "epub", "pdf", "pdf-url":
             return true
         case "internal", "about":
             if isInternalReaderLoaderURL(candidate) { return true }
