@@ -158,16 +158,19 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         XCTAssertEqual(actions[1].targetFrame?.isMainFrame, true)
         source.navigationDelegate = nil
 
+        let successorURL = try XCTUnwrap(canonicalContentURLForReaderLoader(second))
         var state = WebViewState.empty
         let navigator = WebViewNavigator()
         let suspended = expectation(description: "Older policy is awaiting app callback")
         var release: CheckedContinuation<WKNavigationActionPolicy?, Never>?
+        var callbackAdmissionClosed = false
         let model = WebView(
             navigator: navigator,
             state: Binding(get: { state }, set: { state = $0 }),
             blockedHosts: ["blocked.example"],
             onNavigationAction: { action in
                 if action.request.url == first {
+                    guard !callbackAdmissionClosed else { return .cancel }
                     suspended.fulfill()
                     return await withCheckedContinuation { release = $0 }
                 }
@@ -176,17 +179,32 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         )
         let coordinator = model.makeCoordinatorForTesting()
         coordinator.setWebView(source)
+        defer { coordinator.tearDownBindingsForDetachedWebView(source) }
         let stale = Task { @MainActor in
             await coordinator.webView(source, decidePolicyFor: actions[0],
                                       preferences: WKWebpagePreferences())
         }
-        await fulfillment(of: [suspended], timeout: 10)
+        let arrival = await XCTWaiter.fulfillment(of: [suspended], timeout: 10)
+        guard arrival == .completed, let continuation = release else {
+            // Late policy callbacks must not create a held continuation after
+            // cleanup's final release opportunity.
+            callbackAdmissionClosed = true
+            stale.cancel()
+            let pendingRelease = release
+            release = nil
+            pendingRelease?.resume(returning: .cancel)
+            _ = await stale.value
+            XCTFail("Older policy did not register its controlled continuation before the bounded arrival wait ended")
+            return
+        }
         let successor = await coordinator.webView(source, decidePolicyFor: actions[1],
                                                  preferences: WKWebpagePreferences())
         XCTAssertEqual(successor.0, .allow)
-        state.pageURL = try XCTUnwrap(canonicalContentURLForReaderLoader(second))
+        state.pageURL = successorURL
         state.isLoading = true
-        release?.resume(returning: .allow)
+        callbackAdmissionClosed = true
+        release = nil
+        continuation.resume(returning: .allow)
         let retired = await stale.value
         XCTAssertEqual(retired.0, .cancel)
         XCTAssertTrue(state.isLoading, "An older blocked source must not stop its successor")
