@@ -5,6 +5,134 @@ import WebKit
 
 @MainActor
 final class WebViewReaderDocumentSummaryTests: XCTestCase {
+    private final class HeldSummaryWebView: EnhancedWKWebView {
+        var evaluationsToHold = 0
+        var evaluationFinished: XCTestExpectation?
+        var heldDeliveries: [() -> Void] = []
+        var heldErrors: [Error] = []
+
+        override func evaluateJavaScript(
+            _ javaScriptString: String,
+            completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)? = nil
+        ) {
+            guard evaluationsToHold > 0 else {
+                super.evaluateJavaScript(javaScriptString, completionHandler: completionHandler)
+                return
+            }
+            evaluationsToHold -= 1
+            super.evaluateJavaScript(javaScriptString) { [weak self] value, error in
+                guard let self else { return }
+                if let error { self.heldErrors.append(error) }
+                self.heldDeliveries.append { completionHandler?(value, error) }
+                self.evaluationFinished?.fulfill()
+            }
+        }
+
+        func deliver() {
+            let deliveries = heldDeliveries
+            heldDeliveries.removeAll()
+            for delivery in deliveries { delivery() }
+        }
+    }
+
+    func testDelayedSummaryCannotRollBackPublishedSameDocumentURL() async throws {
+        try await assertHeldSummary(moveBeforeDelivery: true)
+    }
+
+    func testDelayedSummaryCannotOverwriteReturnedSameDocumentURL() async throws {
+        try await assertHeldSummary(moveBeforeDelivery: true, returnsToInitialURL: true)
+    }
+
+    func testDelayedSummaryCannotOverwriteSameURLHistoryEntry() async throws {
+        try await assertHeldSummary(moveBeforeDelivery: true, pushesSameURL: true)
+    }
+
+    func testLiveSummaryStillPublishesDocumentMetadata() async throws {
+        try await assertHeldSummary(moveBeforeDelivery: false)
+    }
+
+    func testLiveSummaryRetainsInternalLoaderDocumentIdentity() async throws {
+        try await assertHeldSummary(moveBeforeDelivery: false,
+            initialURLString: "internal://local/load/reader?reader-url=https://example.com/article")
+    }
+
+    private func assertHeldSummary(moveBeforeDelivery: Bool,
+                                   returnsToInitialURL: Bool = false,
+                                   pushesSameURL: Bool = false,
+                                   initialURLString: String = "https://example.com/summary/start") async throws {
+        let initialURL = try XCTUnwrap(URL(string: initialURLString))
+        let nextURL = try XCTUnwrap(URL(string: "https://example.com/summary/next"))
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = HeldSummaryWebView(frame: CGRect(x: 0, y: 0, width: 430, height: 932),
+                                        configuration: configuration)
+        let loaded = expectation(description: "Summary fixture loaded")
+        let delegate = NavigationDelegate(completion: loaded)
+        webView.navigationDelegate = delegate
+        webView.loadHTMLString(
+            "<!doctype html><html data-mnb-reader-render-ready='1'><head><title>Summary metadata</title></head><body><main id='reader-content'>article</main></body></html>",
+            baseURL: initialURL)
+        await fulfillment(of: [loaded], timeout: 10)
+        webView.navigationDelegate = nil
+        var state = WebViewState.empty
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = SwiftUIWebView.WebView(navigator: navigator,
+            state: Binding(get: { state }, set: { state = $0 }), htmlInState: true)
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(webView)
+        coordinator.webView(webView, didCommit: nil)
+        defer { coordinator.tearDownBindingsForDetachedWebView(webView) }
+        let summaryFinished = expectation(description: "Actual summary evaluated before callback delivery")
+        summaryFinished.expectedFulfillmentCount = 2
+        webView.evaluationFinished = summaryFinished
+        webView.evaluationsToHold = 2
+        coordinator.webView(webView, didFinish: nil)
+        await fulfillment(of: [summaryFinished], timeout: 10)
+        XCTAssertTrue(webView.heldErrors.isEmpty)
+        XCTAssertEqual(webView.heldDeliveries.count, 2)
+        var expectedURL = initialURL
+        if moveBeforeDelivery {
+            if pushesSameURL {
+                _ = try await webView.evaluateJavaScript("history.pushState({}, '', window.location.href)")
+            } else {
+                _ = try await webView.evaluateJavaScript("history.pushState({}, '', '/summary/next')")
+                expectedURL = nextURL
+            }
+            XCTAssertEqual(webView.url, expectedURL)
+            coordinator.handleObservedURLChange(expectedURL, from: webView,
+                receiptSequence: UInt64.max - 1, forceHistoryStatePublication: true)
+            XCTAssertEqual(state.pageURL, expectedURL)
+            if returnsToInitialURL {
+                _ = try await webView.evaluateJavaScript("history.pushState({}, '', '/summary/start')")
+                expectedURL = initialURL
+                XCTAssertEqual(webView.url, expectedURL)
+                coordinator.handleObservedURLChange(expectedURL, from: webView,
+                    receiptSequence: UInt64.max, forceHistoryStatePublication: true)
+                XCTAssertEqual(state.pageURL, expectedURL)
+            }
+            _ = try await webView.evaluateJavaScript("""
+                document.title = 'Successor metadata';
+                document.getElementById('reader-content').textContent = 'Successor content';
+                delete document.documentElement.dataset.mnbReaderRenderReady;
+                """)
+            state.pageTitle = "Successor metadata"
+            state.hasReaderRenderReady = false
+            state.pageHTML = "Successor HTML"
+        }
+        webView.deliver()
+        XCTAssertEqual(state.pageURL, expectedURL)
+        XCTAssertEqual(state.pageTitle, moveBeforeDelivery ? "Successor metadata" : "Summary metadata")
+        XCTAssertEqual(state.hasReaderRenderReady, !moveBeforeDelivery)
+        if moveBeforeDelivery {
+            XCTAssertEqual(state.pageHTML, "Successor HTML")
+        } else {
+            XCTAssertTrue(try XCTUnwrap(state.pageHTML).contains("Summary metadata"))
+        }
+        XCTAssertEqual(webView.url, expectedURL)
+        withExtendedLifetime(delegate) {}
+    }
+
     private final class NavigationDelegate: NSObject, WKNavigationDelegate {
         let completion: XCTestExpectation
         private var didComplete = false
