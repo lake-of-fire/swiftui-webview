@@ -3065,6 +3065,7 @@ public class WebViewCoordinator: NSObject {
     
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
+    private var scriptCallerReplacementGeneration: UInt64 = 0
     private let scriptCallerBindingOwnerID = UUID()
     private weak var scriptCallerBoundWebView: WKWebView?
     private var documentCallbackGeneration: UInt64 = 0
@@ -3630,10 +3631,30 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     private func publishNavigationFailure(
         _ state: WebViewState,
-        disposition: WebViewNavigationFailureDisposition
+        disposition: WebViewNavigationFailureDisposition,
+        isCurrent: @MainActor () -> Bool
     ) {
+        guard isCurrent() else { return }
         onNavigationFailedWithDisposition?(state, disposition)
+        guard isCurrent() else { return }
         onNavigationFailed?(state)
+    }
+
+    /// State Bindings and application callbacks may synchronously replace the
+    /// source, document, or caller. Retain the native receipt's existing owner
+    /// through those publication boundaries, including inactive error contexts.
+    @MainActor
+    private func navigationCallbackFence(for sourceWebView: WKWebView) -> @MainActor () -> Bool {
+        let generation = documentCallbackGeneration
+        let binding = javaScriptBindingToken(for: sourceWebView)
+        let callerGeneration = scriptCallerReplacementGeneration
+        return { [weak self, weak sourceWebView] in
+            guard let self, let sourceWebView else { return false }
+            return self.ownsWebView(sourceWebView)
+                && self.documentCallbackGeneration == generation
+                && self.scriptCallerReplacementGeneration == callerGeneration
+                && self.javaScriptBindingToken(for: sourceWebView) == binding
+        }
     }
 
     @MainActor
@@ -3915,6 +3936,7 @@ public class WebViewCoordinator: NSObject {
     @MainActor
     func updateScriptCaller(_ newScriptCaller: WebViewScriptCaller?) {
         guard scriptCaller !== newScriptCaller else { return }
+        scriptCallerReplacementGeneration &+= 1
         clearScriptCallerBinding()
         scriptCaller = newScriptCaller
     }
@@ -4488,6 +4510,8 @@ public class WebViewCoordinator: NSObject {
     ) -> WebViewState {
         let publicationSource = navigator.webView
         let publicationBinding = publicationSource.flatMap { javaScriptBindingToken(for: $0) }
+        let publicationDocumentGeneration = documentCallbackGeneration
+        let publicationCallerGeneration = scriptCallerReplacementGeneration
         var newState = webView.state
         newState.isLoading = isLoading
         var pageURLChanged = false
@@ -4528,6 +4552,8 @@ public class WebViewCoordinator: NSObject {
         // A Binding setter can synchronously replace document ownership or state.
         guard navigator.webView === publicationSource,
               publicationSource.flatMap({ javaScriptBindingToken(for: $0) }) == publicationBinding,
+              documentCallbackGeneration == publicationDocumentGeneration,
+              scriptCallerReplacementGeneration == publicationCallerGeneration,
               webView.state == newState,
               urlTransitionIntent?.isCurrent != false else { return newState }
 
@@ -4537,6 +4563,8 @@ public class WebViewCoordinator: NSObject {
 
         guard navigator.webView === publicationSource,
               publicationSource.flatMap({ javaScriptBindingToken(for: $0) }) == publicationBinding,
+              documentCallbackGeneration == publicationDocumentGeneration,
+              scriptCallerReplacementGeneration == publicationCallerGeneration,
               webView.state == newState,
               urlTransitionIntent?.isCurrent != false else { return newState }
         updateLoadingProgress(isLoading: isLoading, estimatedProgress: navigator.webView?.estimatedProgress)
@@ -5082,6 +5110,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             ]
         )
         //                debugPrint("# didFinish nav", webView.url)
+        let isCurrentCallback = navigationCallbackFence(for: webView)
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -5090,6 +5119,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
+        guard isCurrentCallback() else { return }
         // TODO: Move to an init postMessage callback
         /*
          if let url = webView.url, let scheme = url.scheme, scheme == "pdf" || scheme == "pdf-url", url.absoluteString.hasPrefix("\(url.scheme ?? "")://"), url.pathExtension.lowercased() == "pdf", let loaderURL = URL(string: "\(scheme)://\(url.absoluteString.dropFirst("\(url.scheme ?? "")://".count))") {
@@ -5100,6 +5130,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
          */
         
         onNavigationFinished?(newState)
+        guard isCurrentCallback() else { return }
 
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
@@ -5216,6 +5247,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             invalidateDocumentCallbackContext()
             scriptCaller?.removeAllMultiTargetFrames()
         }
+        let isCurrentCallback = navigationCallbackFence(for: webView)
         let failedState = setLoading(
             false,
             pageURL: webView.url,
@@ -5228,8 +5260,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
         )
         publishNavigationFailure(
             failedState,
-            disposition: preservesCommittedDocument ? .preservedCommittedDocument : .terminal
+            disposition: preservesCommittedDocument ? .preservedCommittedDocument : .terminal,
+            isCurrent: isCurrentCallback
         )
+        guard isCurrentCallback() else { return }
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
             navigation: navigation
@@ -5260,8 +5294,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         (webView as? EnhancedWKWebView)?.resetPooledContentNavigation()
         navigator.clearActiveInternalReaderLoadSignal()
         scriptCaller?.removeAllMultiTargetFrames()
+        let isCurrentCallback = navigationCallbackFence(for: webView)
         let terminatedState = setLoading(false, isProvisionallyNavigating: false)
+        guard isCurrentCallback() else { return }
         onDocumentContextInvalidated?(terminatedState, .webContentProcessTerminated)
+        guard isCurrentCallback() else { return }
         if navigator.cancelContentRulesBypass(for: webView) {
             applyConfiguredContentRulesIfNeeded(on: webView)
         }
@@ -5285,7 +5322,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailNavigation")
         scriptCaller?.removeAllMultiTargetFrames()
+        let isCurrentCallback = navigationCallbackFence(for: webView)
         let newState = setLoading(false, isProvisionallyNavigating: false, error: error)
+        guard isCurrentCallback() else { return }
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
             navigation: navigation
@@ -5303,7 +5342,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         extractPageState(webView: webView)
         
-        publishNavigationFailure(newState, disposition: .terminal)
+        publishNavigationFailure(newState, disposition: .terminal, isCurrent: isCurrentCallback)
+        guard isCurrentCallback() else { return }
 #if os(iOS)
         if awaitingSnapshotReload {
             cancelSnapshotReload()
@@ -5420,11 +5460,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
             }
         }
 #endif
+        let isCurrentCallback = navigationCallbackFence(for: webView)
         var newState = setLoading(
             true,
             pageURL: webView.url,
             isProvisionallyNavigating: false
         )
+        guard isCurrentCallback() else { return }
         newState.pageImageURL = nil
         newState.pageIconURL = nil
         newState.pageTitle = nil
@@ -5432,7 +5474,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         newState.hasReaderRenderReady = false
         newState.error = nil
         onDocumentContextInvalidated?(newState, .navigationCommitted)
+        guard isCurrentCallback() else { return }
         onNavigationCommitted?(newState)
+        guard isCurrentCallback() else { return }
 #if os(iOS)
         webView.applyUnderPageFallbackBackgroundColor(config: config)
         webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.commit")
@@ -5482,9 +5526,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 "requestURL": navigator.readerLoadRequestedURL?.absoluteString ?? "nil"
             ]
         )
+        let isCurrentCallback = navigationCallbackFence(for: webView)
         var newState = self.webView.state
         newState.mainFrameHTTPStatusCode = nil
         self.webView.state = newState
+        guard isCurrentCallback() else { return }
 #if DEBUG
         debugPrint(
             "# 404 webView.nav.statusReset",
