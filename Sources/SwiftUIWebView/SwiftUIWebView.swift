@@ -4438,6 +4438,13 @@ public class WebViewCoordinator: NSObject {
             return
         }
 
+        if currentState.pageURL != newURL || transitionChanged || forceHistoryStatePublication {
+            // A same-document history entry can replace metadata even when it
+            // returns to the extraction's URL, or keeps that URL unchanged.
+            // Retire the earlier snapshot at the accepted native publication;
+            // URL equality alone cannot distinguish those successor states.
+            invalidatePageStateExtraction()
+        }
         _ = setLoading(
             resolvedIsLoading,
             pageURL: newURL,
@@ -5121,12 +5128,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
     private func extractPageState(webView: WKWebView) {
         let extractionGeneration = beginPageStateExtraction()
 
+        // Same-document history changes do not retire the physical document.
+        // Keep each evaluated snapshot tied to its native URL at delivery so
+        // delayed HTML or summary results cannot overwrite the newer page.
         if self.webView.htmlInState {
-            webView.evaluateJavaScript("document.documentElement.outerHTML.toString()") { [weak self, weak webView] response, _ in
+            webView.evaluateJavaScript("({ html: document.documentElement.outerHTML.toString(), documentURL: document.URL.toString() })") { [weak self, weak webView] response, _ in
                 guard let self,
                       let webView,
                       self.isCurrentPageStateExtraction(extractionGeneration, from: webView),
-                      let html = response as? String else {
+                      let snapshot = response as? [String: Any],
+                      let html = snapshot["html"] as? String,
+                      let documentURL = snapshot["documentURL"] as? String,
+                      URL(string: documentURL) == webView.url else {
                     return
                 }
                 var newState = self.webView.state
@@ -5140,7 +5153,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
                   let webView,
                   self.isCurrentPageStateExtraction(extractionGeneration, from: webView),
                   error == nil,
-                  let summary = response as? [String: Any] else {
+                  let summary = response as? [String: Any],
+                  let documentURL = summary["documentURL"] as? String,
+                  let summaryURL = URL(string: documentURL),
+                  summaryURL == webView.url else {
                 return
             }
             let mapped = summary.reduce(into: [String: String]()) { partialResult, entry in
@@ -5151,20 +5167,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
             if let title = summary["documentTitle"] as? String {
                 newState.pageTitle = title
             }
-            if let url = summary["documentURL"] as? String,
-               let newURL = URL(string: url),
-               newState.pageURL != newURL {
+            if newState.pageURL != summaryURL {
                 let now = Date()
                 readerLoadLog(
                     "webView.pageURLUpdatedFromDocument",
                     [
-                        "documentURL": newURL.absoluteString,
+                        "documentURL": summaryURL.absoluteString,
                         "elapsedSinceCommit": readerLoadElapsedString(since: self.navigator.readerLoadCommittedAt, now: now),
                         "elapsedSinceNavigatorLoad": readerLoadElapsedString(since: self.navigator.readerLoadRequestedAt, now: now),
                         "previousPageURL": newState.pageURL.absoluteString
                     ]
                 )
-                newState.pageURL = newURL
+                newState.pageURL = summaryURL
             }
             let hasExactReaderRenderOwner = (summary["readerRenderGeneration"] as? String)?.isEmpty == false
             if !hasExactReaderRenderOwner,
@@ -5602,6 +5616,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             navigationPolicyGeneration &+= 1
         }
         let policyGeneration = navigationPolicyGeneration
+        let policyDocumentGeneration = documentCallbackGeneration
         let contentRulesBypassOwner = isMainDocumentNavigation
             ? beginContentRulesPolicy(for: navigationAction, on: webView)
             : nil
@@ -5647,8 +5662,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             // starts on this same WebView. Neither an older document nor one of
             // its subframes still owns loading state, reader-load signals, or
             // per-site scripts. Subframes do not advance the generation.
+            // Document retirement also revokes suspended policy work, including
+            // termination or a detach/rebind of the very same WebView without
+            // another navigation-policy receipt.
             guard ownsWebView(webView),
-                  navigationPolicyGeneration == policyGeneration else {
+                  navigationPolicyGeneration == policyGeneration,
+                  documentCallbackGeneration == policyDocumentGeneration else {
                 return (.cancel, preferences)
             }
             if let decision {
