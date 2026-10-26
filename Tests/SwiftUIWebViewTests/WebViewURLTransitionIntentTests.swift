@@ -51,15 +51,18 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         let policyAction = try XCTUnwrap(action)
         XCTAssertEqual(policyAction.targetFrame?.isMainFrame, !isSubframe)
         source.navigationDelegate = nil
+        let successorURL = try XCTUnwrap(URL(string: "https://successor.example/article"))
 
         var state = WebViewState.empty
         let navigator = WebViewNavigator()
         let suspended = expectation(description: "Policy awaits application decision")
         var release: CheckedContinuation<WKNavigationActionPolicy?, Never>?
+        var callbackAdmissionClosed = false
         let model = WebView(navigator: navigator,
             state: Binding(get: { state }, set: { state = $0 }),
             blockedHosts: blocksHost ? ["blocked.example"] : [],
             onNavigationAction: { _ in
+                guard !callbackAdmissionClosed else { return .cancel }
                 suspended.fulfill()
                 return await withCheckedContinuation { release = $0 }
             })
@@ -71,7 +74,19 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
             await coordinator.webView(source, decidePolicyFor: policyAction,
                                       preferences: WKWebpagePreferences())
         }
-        await fulfillment(of: [suspended], timeout: 10)
+        let arrival = await XCTWaiter.fulfillment(of: [suspended], timeout: 10)
+        guard arrival == .completed, let continuation = release else {
+            // A callback entering after the timeout must not create a new held
+            // continuation while cleanup is joining the pending policy task.
+            callbackAdmissionClosed = true
+            pending.cancel()
+            let pendingRelease = release
+            release = nil
+            pendingRelease?.resume(returning: .cancel)
+            _ = await pending.value
+            XCTFail("Policy did not register its controlled continuation before the bounded arrival wait ended")
+            return
+        }
         switch retirement {
         case "commit": coordinator.webView(source, didCommit: nil)
         case "provisional": coordinator.webView(source, didStartProvisionalNavigation: nil)
@@ -82,11 +97,12 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
             coordinator.webView(source, didCommit: nil)
         default: break
         }
-        let successorURL = try XCTUnwrap(URL(string: "https://successor.example/article"))
         state.pageURL = successorURL
         state.isLoading = true
         state.isProvisionallyNavigating = true
-        release?.resume(returning: .allow)
+        callbackAdmissionClosed = true
+        release = nil
+        continuation.resume(returning: .allow)
         let result = await pending.value
         XCTAssertEqual(result.0, retirement == nil && !blocksHost ? .allow : .cancel)
         XCTAssertEqual(state.pageURL, successorURL)
