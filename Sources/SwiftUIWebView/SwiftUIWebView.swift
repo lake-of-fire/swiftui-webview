@@ -3998,6 +3998,22 @@ public class WebViewCoordinator: NSObject {
             documentGenerationProvider: { @MainActor [weak self] in
                 self?.documentCallbackGeneration
             },
+            httpCookieCapture: { @MainActor [weak self, weak webView] in
+                try Task.checkCancellation()
+                guard let self, let webView,
+                      let context = self.captureDocumentCallbackContext(for: webView) else {
+                    throw CancellationError()
+                }
+                let cookies = await withCheckedContinuation { continuation in
+                    webView.configuration.websiteDataStore.httpCookieStore
+                        .getAllCookies { continuation.resume(returning: $0) }
+                }
+                try Task.checkCancellation()
+                guard self.ownsDocumentCallbackContext(context) else {
+                    throw CancellationError()
+                }
+                return cookies
+            },
             trustedUserActionAdmissionIssuer: {
                 [weak self, weak webView] action, count, frameInfo in
                 guard let self, let webView, let frameInfo,
@@ -7587,6 +7603,15 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         fileprivate let documentGeneration: UInt64?
     }
 
+    /// Native cookie objects (including HTTPOnly cookies) and the User-Agent
+    /// captured from one installed WebView/document binding. Consumers must
+    /// apply their own destination cookie policy and retain the binding commit
+    /// fence through the final request dispatch. This is not navigation authority.
+    public struct HTTPClientContext {
+        public let cookies: [HTTPCookie]
+        public let userAgent: String
+    }
+
     struct JavaScriptEvaluationResult: @unchecked Sendable {
         let value: Any?
 
@@ -7614,6 +7639,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     }
     typealias SnapshotCapture = @MainActor @Sendable (SnapshotRequest) async throws -> WebViewSnapshotImage
     typealias CoordinateOriginInWindow = @MainActor @Sendable () -> CGPoint?
+    typealias HTTPCookieCapture = @MainActor @Sendable () async throws -> [HTTPCookie]
     typealias TrustedUserActionAdmissionIssuer = @MainActor @Sendable (
         String,
         Int,
@@ -7673,6 +7699,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     }
     var unsafeCaller: UnsafeCaller? = nil
     private var coordinateOriginInWindowProvider: CoordinateOriginInWindow?
+    private var httpCookieCapture: HTTPCookieCapture?
     private var trustedUserActionAdmissionIssuer:
         TrustedUserActionAdmissionIssuer?
     private var trustedUserActionAdmissionRevoker:
@@ -7765,6 +7792,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         snapshotCapture: SnapshotCapture?,
         coordinateOriginInWindow: @escaping CoordinateOriginInWindow,
         documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)? = nil,
+        httpCookieCapture: HTTPCookieCapture? = nil,
         trustedUserActionAdmissionIssuer:
             @escaping TrustedUserActionAdmissionIssuer = { _, _, _ in [] },
         trustedUserActionAdmissionRevoker:
@@ -7776,6 +7804,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         removeAllMultiTargetFrames()
         bindingOwnerID = ownerID
         self.documentGenerationProvider = documentGenerationProvider
+        self.httpCookieCapture = httpCookieCapture
         self.asyncCaller = asyncCaller
         self.unsafeCaller = unsafeCaller
         self.snapshotCapture = snapshotCapture
@@ -7797,6 +7826,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         unsafeCaller = nil
         snapshotCapture = nil
         coordinateOriginInWindowProvider = nil
+        httpCookieCapture = nil
         trustedUserActionAdmissionIssuer = nil
         trustedUserActionAdmissionRevoker = nil
         return true
@@ -8039,6 +8069,33 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         guard isCurrentJavaScriptBinding(token) else {
             throw CancellationError()
         }
+    }
+
+    /// Captures transport inputs only from the exact WebView that owns the
+    /// installed evaluator. Rebinding, document retirement and cancellation
+    /// reject the entire result, including when either native read is suspended.
+    public func captureHTTPClientContext(
+        requiring bindingToken: JavaScriptBindingToken
+    ) async throws -> HTTPClientContext {
+        try validateJavaScriptOperation(bindingToken)
+        guard let httpCookieCapture else { throw CancellationError() }
+        let cookies: [HTTPCookie]
+        do {
+            cookies = try await httpCookieCapture()
+        } catch {
+            try validateJavaScriptOperation(bindingToken)
+            throw error
+        }
+        try validateJavaScriptOperation(bindingToken)
+        let value = try await evaluateJavaScript(
+            "return navigator.userAgent;",
+            requiring: bindingToken
+        )
+        try validateJavaScriptOperation(bindingToken)
+        guard let userAgent = value as? String, !userAgent.isEmpty else {
+            throw URLError(.cannotParseResponse)
+        }
+        return HTTPClientContext(cookies: cookies, userAgent: userAgent)
     }
 
     //    @MainActor
