@@ -5675,6 +5675,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
 #endif
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
         if isMainDocumentNavigation {
+            // Observe native main-frame navigation before an app policy callback
+            // can suspend. This also acknowledges our own issued request; a
+            // dispatch receipt is checked synchronously before that later policy.
+            navigator.beginNavigationIntent()
             navigationPolicyGeneration &+= 1
         }
         let policyGeneration = navigationPolicyGeneration
@@ -5836,6 +5840,62 @@ extension WebViewCoordinator: WKNavigationDelegate {
 }
 
 public class WebViewNavigator: NSObject, ObservableObject {
+    /// Authority for one navigator intent, independent of URL equality. A newer
+    /// intent invalidates an older asynchronous resolver before it can dispatch.
+    public struct NavigationIntent: Equatable, Sendable {
+        fileprivate let owner: UUID
+        fileprivate let id: UUID
+    }
+
+    /// Evidence that this navigator accepted a request, including queueing it
+    /// until its native view attaches. This does not prove a WebKit load began
+    /// or completed. Acceptance remains evidence after later supersession.
+    public struct NavigationDispatchReceipt: Equatable, Sendable {
+        public let intent: NavigationIntent
+    }
+
+    public enum NavigationDispatchResult: Equatable, Sendable {
+        case refused
+        case issued(NavigationDispatchReceipt)
+    }
+
+    private let navigationIntentOwner = UUID()
+    @MainActor private var navigationIntentID = UUID()
+
+    @MainActor
+    public var navigationIntent: NavigationIntent {
+        NavigationIntent(owner: navigationIntentOwner, id: navigationIntentID)
+    }
+
+    @MainActor
+    @discardableResult
+    public func beginNavigationIntent() -> NavigationIntent {
+        navigationIntentID = UUID()
+        return navigationIntent
+    }
+
+    @MainActor
+    public func isCurrent(_ intent: NavigationIntent) -> Bool {
+        intent == navigationIntent
+    }
+
+    @MainActor
+    public func isCurrent(_ receipt: NavigationDispatchReceipt) -> Bool {
+        isCurrent(receipt.intent)
+    }
+
+    /// No suspension or publication separates admission from request acceptance.
+    /// The receipt must be checked again before a caller reveals presentation.
+    @MainActor
+    public func dispatch(_ request: URLRequest, for intent: NavigationIntent) -> NavigationDispatchResult {
+        guard isCurrent(intent) else { return .refused }
+        // Consuming a reservation is itself a new producer event. Replaying the
+        // reservation cannot issue another indistinguishable same-URL request.
+        let receipt = NavigationDispatchReceipt(intent: beginNavigationIntent())
+        loadRequest(request)
+        return .issued(receipt)
+    }
+
     public struct DebugLoadSnapshot: Sendable {
         public let currentWebViewURL: String
         public let lastRequestURL: String
@@ -6401,8 +6461,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
         reason: String,
         _ start: () -> WKNavigation?
     ) -> WKNavigation? {
-        guard ownsBoundWebView(sourceWebView),
-              let navigation = start() else {
+        guard ownsBoundWebView(sourceWebView) else { return nil }
+        beginNavigationIntent()
+        guard let navigation = start() else {
             return nil
         }
         beginPooledContentUnkeyedNavigation(
@@ -6854,6 +6915,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
+            // Initial attachment must preserve requests queued before a native
+            // view exists. Detachment and replacement retire their old owner.
+            if oldValue != nil, oldValue !== webView {
+                beginNavigationIntent()
+            }
             let shouldLogDiagnostics = swiftUIWebViewPageTurnDiagnosticsEnabled
             let nextHasAttachedWebView = webView != nil
             if hasAttachedWebView != nextHasAttachedWebView {
@@ -6991,6 +7057,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func load(_ request: URLRequest) {
+        beginNavigationIntent()
+        loadRequest(request)
+    }
+
+    @MainActor
+    private func loadRequest(_ request: URLRequest) {
         lastLoadedRequest = request
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
@@ -7053,6 +7125,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
+        beginNavigationIntent()
         lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedHTML = nil
@@ -7133,6 +7206,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         baseURL: URL? = nil,
         contentID: WebViewPoolContentID? = nil
     ) {
+        beginNavigationIntent()
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
@@ -7219,6 +7293,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     
     @MainActor
     public func reload() {
+        beginNavigationIntent()
         logCompetingOperationIfNeeded("reload", metadata: [:])
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "reload") {
@@ -7263,6 +7338,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     public func reloadWithoutContentRules() {
+        beginNavigationIntent()
         logCompetingOperationIfNeeded("reloadWithoutContentRules", metadata: [:])
         guard let webView else { return }
         let navigation = performUnkeyedNavigation(
@@ -7324,6 +7400,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     public func go(_ item: WKBackForwardListItem) {
+        beginNavigationIntent()
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "goToHistoryItem") {
             webView.go(to: item)
@@ -7332,6 +7409,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     public func goBack() {
+        beginNavigationIntent()
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "goBack") {
             webView.goBack()
@@ -7340,6 +7418,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     public func goForward() {
+        beginNavigationIntent()
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "goForward") {
             webView.goForward()
