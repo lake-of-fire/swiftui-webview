@@ -5,6 +5,205 @@ import XCTest
 
 @MainActor
 final class WebViewPoolTests: XCTestCase {
+#if os(iOS)
+    @available(iOS 15.5, *)
+    func testZeroInsetsAreConfiguredOnceForEachMountedWebView() {
+        let webView = InsetWriteCountingWebView(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 844),
+            configuration: WKWebViewConfiguration()
+        )
+        let controller = WebViewController(webView: webView)
+        controller.loadViewIfNeeded()
+        controller.viewDidLayoutSubviews()
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(webView.obscuredInsetWriteCount, 1,
+                       "Explicit zero insets establish the viewport policy on first attachment")
+        XCTAssertEqual(webView.unobscuredSafeAreaInsetWriteCount, 1)
+
+        controller.detachWebView()
+        controller.replaceWebView(webView)
+        XCTAssertEqual(webView.obscuredInsetWriteCount, 2,
+                       "Reattaching a pooled view must establish its inset policy again")
+        XCTAssertEqual(webView.unobscuredSafeAreaInsetWriteCount, 2)
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(webView.obscuredInsetWriteCount, 2)
+        XCTAssertEqual(webView.unobscuredSafeAreaInsetWriteCount, 2)
+    }
+
+    @available(iOS 15.5, *)
+    func testUnchangedLayoutDoesNotRewriteWebKitInsets() {
+        let webView = InsetWriteCountingWebView(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 844),
+            configuration: WKWebViewConfiguration()
+        )
+        let controller = WebViewController(webView: webView)
+        controller.loadViewIfNeeded()
+        controller.view.frame = webView.frame
+        controller.obscuredInsets = UIEdgeInsets(top: 59, left: 0, bottom: 150, right: 0)
+        controller.viewDidLayoutSubviews()
+        webView.resetInsetWriteCounts()
+
+        for _ in 0..<10 {
+            controller.viewDidLayoutSubviews()
+        }
+        let sameInsets = controller.obscuredInsets
+        controller.obscuredInsets = sameInsets
+
+        XCTAssertEqual(webView.obscuredInsetWriteCount, 0)
+        XCTAssertEqual(webView.unobscuredSafeAreaInsetWriteCount, 0)
+        XCTAssertEqual(webView.viewportInsetWriteCount, 0)
+
+        controller.obscuredInsets.bottom = 73
+        XCTAssertEqual(webView.obscuredInsetWriteCount, 1)
+        XCTAssertEqual(webView.unobscuredSafeAreaInsetWriteCount, 0,
+                       "An unchanged safe-area value must stay untouched during a sheet transition")
+        XCTAssertEqual(webView.viewportInsetWriteCount, 1)
+        XCTAssertEqual(webView.minimumViewportInset.bottom, 73)
+        XCTAssertEqual(webView.maximumViewportInset.bottom, 73)
+    }
+
+    @available(iOS 15.5, *)
+    func testViewportInsetsRetryAfterInitiallyUnusableBounds() {
+        let webView = InsetWriteCountingWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let controller = WebViewController(webView: webView)
+        controller.loadViewIfNeeded()
+        controller.obscuredInsets = UIEdgeInsets(top: 59, left: 0, bottom: 150, right: 0)
+        XCTAssertEqual(webView.viewportInsetWriteCount, 0)
+
+        controller.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        webView.frame = controller.view.bounds
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(webView.viewportInsetWriteCount, 1,
+                       "Skipping unusable geometry must not suppress the first valid viewport update")
+        XCTAssertEqual(webView.minimumViewportInset.top, 59)
+        XCTAssertEqual(webView.maximumViewportInset.bottom, 150)
+    }
+
+    func testWebNavigationDirectionIgnoresBottomBounceAndShrinkingInset() {
+        let coordinator = WebView(
+            config: WebViewConfig(reservesDocumentBottomInset: true),
+            navigator: WebViewNavigator(),
+            state: .constant(.empty)
+        ).makeCoordinatorForTesting()
+        let scrollView = UIScrollView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.contentSize = CGSize(width: 390, height: 2000)
+        scrollView.contentInset.bottom = 150
+        let compactBottom = CGPoint(x: 0, y: 1306)
+        let overscrolled = CGPoint(x: 0, y: 1370)
+        XCTAssertEqual(coordinator.navigationScrollOffset(overscrolled, in: scrollView), compactBottom)
+
+        scrollView.contentInset.bottom = 73
+        let minimizedBottom = CGPoint(x: 0, y: 1229)
+        XCTAssertEqual(coordinator.navigationScrollOffset(compactBottom, in: scrollView), minimizedBottom)
+        XCTAssertEqual(coordinator.navigationScrollOffset(overscrolled, in: scrollView), minimizedBottom)
+        let reverseScroll = CGPoint(x: 0, y: minimizedBottom.y - 30)
+        XCTAssertEqual(coordinator.navigationScrollOffset(reverseScroll, in: scrollView), reverseScroll,
+                       "Scrolling back inside the document must still reveal navigation")
+
+        coordinator.config = WebViewConfig(reservesDocumentBottomInset: false)
+        XCTAssertEqual(coordinator.navigationScrollOffset(overscrolled, in: scrollView), overscrolled,
+                       "Ebook and generic WebView scroll policies are unchanged")
+    }
+
+    func testDocumentBottomInsetTracksSheetClearanceAndRestoresForEBookStage() throws {
+        let webView = EnhancedWKWebView(
+            frame: CGRect(x: 0, y: 0, width: 390, height: 844),
+            configuration: WKWebViewConfiguration()
+        )
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.contentInset = UIEdgeInsets(top: 7, left: 3, bottom: 12, right: 5)
+        let controller = WebViewController(webView: webView)
+        controller.loadViewIfNeeded()
+        controller.view.frame = webView.frame
+        controller.reservesDocumentBottomInset = true
+
+        for bottom: CGFloat in [150, 73, 191, 73, 0] {
+            controller.obscuredInsets = UIEdgeInsets(top: 59, left: 0, bottom: bottom, right: 0)
+            let chrome = try XCTUnwrap(webView.value(forKey: "obscuredInsets") as? NSValue)
+            XCTAssertEqual(chrome.uiEdgeInsetsValue.bottom, bottom)
+            XCTAssertEqual(webView.scrollView.contentInset.bottom, max(12, bottom))
+            XCTAssertEqual(webView.scrollView.contentInset.top, 7)
+            XCTAssertEqual(webView.scrollView.contentInset.left, 3)
+            XCTAssertEqual(webView.scrollView.contentInset.right, 5)
+        }
+
+        controller.obscuredInsets = UIEdgeInsets(top: 59, left: 0, bottom: 150, right: 0)
+        controller.reservesDocumentBottomInset = false
+        XCTAssertEqual(webView.scrollView.contentInset.bottom, 12,
+                       "Ebook stages retain their existing scrollable inset")
+        controller.obscuredInsets = UIEdgeInsets(top: 59, left: 0, bottom: 191, right: 0)
+        XCTAssertEqual(webView.scrollView.contentInset.bottom, 12)
+    }
+
+    func testDocumentBottomInsetIsReleasedBeforeWebViewReuse() {
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        webView.scrollView.contentInset.bottom = 9
+        let controller = WebViewController(webView: webView)
+        controller.loadViewIfNeeded()
+        controller.reservesDocumentBottomInset = true
+        controller.obscuredInsets = UIEdgeInsets(top: 0, left: 0, bottom: 150, right: 0)
+        XCTAssertEqual(webView.scrollView.contentInset.bottom, 150)
+
+        controller.detachWebView()
+        XCTAssertEqual(webView.scrollView.contentInset.bottom, 9)
+    }
+
+    func testDocumentBottomInsetPolicySurvivesConfigCopies() {
+        let config = WebViewConfig(reservesDocumentBottomInset: true)
+        XCTAssertTrue(config.withHidesTopScrollEdgeEffect(true).reservesDocumentBottomInset)
+        XCTAssertTrue(config.withUserScripts([]).reservesDocumentBottomInset)
+        XCTAssertFalse(WebViewConfig().reservesDocumentBottomInset)
+    }
+
+    func testWindowSafeAreaProtectsDocumentWhenSampledObscuredInsetIsZero() throws {
+        let window = StatusBarInsetTestWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let webView = EnhancedWKWebView(frame: window.bounds, configuration: WKWebViewConfiguration())
+        let controller = WebViewController(webView: webView)
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        controller.reservesWindowTopSafeAreaInObscuredInsets = true
+        controller.reservesDocumentTopInset = true
+        window.rootViewController = controller
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        controller.loadViewIfNeeded()
+        controller.view.frame = window.bounds
+        controller.obscuredInsets = .zero
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        controller.viewDidLayoutSubviews()
+        let value = try XCTUnwrap(webView.value(forKey: "obscuredInsets") as? NSValue)
+        XCTAssertGreaterThanOrEqual(value.uiEdgeInsetsValue.top, 59)
+        XCTAssertEqual(webView.scrollView.contentInset.top, 59)
+        XCTAssertEqual(webView.scrollView.contentOffset.y, -59, accuracy: 0.5)
+        webView.scrollView.contentSize = CGSize(width: 390, height: 2000)
+        controller.reservesDocumentTopInset = false
+        XCTAssertEqual(webView.scrollView.contentInset.top, 0,
+                       "Custom ebook stages own their document origin")
+        controller.reservesDocumentTopInset = true
+        webView.scrollView.contentOffset.y = 200
+        controller.obscuredInsets = UIEdgeInsets(top: 96, left: 0, bottom: 34, right: 0)
+        let chrome = try XCTUnwrap(webView.value(forKey: "obscuredInsets") as? NSValue)
+        XCTAssertEqual(chrome.uiEdgeInsetsValue.top, 96, "Keep larger native chrome clearance")
+        XCTAssertEqual(webView.scrollView.contentOffset.y, 200, accuracy: 0.5,
+                       "Changing viewport clearance must preserve a restored reading position")
+        controller.obscuredInsets = .zero
+        controller.view.frame.origin.y = 59
+        controller.viewDidLayoutSubviews()
+        let belowStatusBar = try XCTUnwrap(webView.value(forKey: "obscuredInsets") as? NSValue)
+        XCTAssertEqual(belowStatusBar.uiEdgeInsetsValue.top, 0, "Do not count safe area twice")
+        controller.view.frame.origin.y = 0
+        controller.viewDidLayoutSubviews()
+        let returned = try XCTUnwrap(webView.value(forKey: "obscuredInsets") as? NSValue)
+        XCTAssertEqual(returned.uiEdgeInsetsValue.top, 59, "Recompute after the mounted view moves")
+        controller.reservesWindowTopSafeAreaInObscuredInsets = false
+        let generic = try XCTUnwrap(webView.value(forKey: "obscuredInsets") as? NSValue)
+        XCTAssertEqual(generic.uiEdgeInsetsValue.top, 0, "Generic web and overlay views retain their inset policy")
+        XCTAssertEqual(webView.scrollView.contentInset.top, 0, "Release reader inset ownership before reuse")
+    }
+#endif
+
     func testWarmsReusesCapsAndRemovesWebViews() {
         let pool = WebViewPool(warmUpCount: 1, keepAliveCount: 0)
         var createdCount = 0
@@ -238,10 +437,38 @@ final class WebViewPoolTests: XCTestCase {
         )
     }
 
+    func testDetachedFactoryReportsCompletedConstructionStepsSynchronously() {
+        var timings = [WebViewConstructionTiming]()
+        let config = WebViewConfig(javaScriptEnabled: false)
+        let sourceView = WebView(
+            config: config,
+            navigator: WebViewNavigator(),
+            state: .constant(.empty),
+            onConstructionTiming: { timings.append($0) }
+        )
+
+        let factory = sourceView.makeDetachedWebViewFactory(config: config)
+        XCTAssertEqual(timings.map(\.step), [.websiteDataStore],
+                       "Data-store resolution completes before the factory is returned")
+
+        let first = factory()
+        XCTAssertEqual(timings.map(\.step), [.websiteDataStore, .configuration, .webView])
+        XCTAssertFalse(first.configuration.defaultWebpagePreferences.allowsContentJavaScript)
+        XCTAssertTrue(first.configuration.websiteDataStore.isPersistent)
+
+        let second = factory()
+        XCTAssertFalse(first === second)
+        XCTAssertEqual(timings.map(\.step), [
+            .websiteDataStore, .configuration, .webView, .configuration, .webView
+        ], "Each factory invocation reports its own completed creation spans")
+        XCTAssertTrue(timings.allSatisfy { $0.elapsedMilliseconds.isFinite && $0.elapsedMilliseconds >= 0 })
+    }
+
     func testDetachedProductionFactoryDoesNotRetainSourceNavigatorOrPrewarmer() {
         weak var weakNavigator: WebViewNavigator?
         weak var weakPrewarmer: WebViewPrewarmer?
         var retainedPool: WebViewPool?
+        var timings = [WebViewConstructionTiming]()
 
         autoreleasepool {
             var navigator: WebViewNavigator? = WebViewNavigator()
@@ -253,7 +480,8 @@ final class WebViewPoolTests: XCTestCase {
             var sourceView: SwiftUIWebView.WebView? = SwiftUIWebView.WebView(
                 navigator: navigator!,
                 state: .constant(.empty),
-                webViewPrewarmer: prewarmer
+                webViewPrewarmer: prewarmer,
+                onConstructionTiming: { timings.append($0) }
             )
             let factory = sourceView!.makeDetachedWebViewFactory(config: .default)
             retainedPool?.setCreationClosureIfNeeded(factory)
@@ -265,11 +493,14 @@ final class WebViewPoolTests: XCTestCase {
 
         XCTAssertNil(weakNavigator)
         XCTAssertNil(weakPrewarmer)
+        XCTAssertEqual(timings.map(\.step), [.websiteDataStore])
 
         // The detached factory remains usable after the source SwiftUI value and
         // its owners are gone.
         retainedPool?.totalCountTarget = 1
         XCTAssertEqual(retainedPool?.retainedCount, 1)
+        XCTAssertEqual(timings.map(\.step), [.websiteDataStore, .configuration, .webView],
+                       "The detached timing callback remains usable without retaining the source owners")
         retainedPool?.invalidate()
     }
 
@@ -855,3 +1086,37 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertEqual(createdCount, 3)
     }
 }
+
+#if os(iOS)
+@available(iOS 15.5, *)
+@MainActor
+private final class InsetWriteCountingWebView: EnhancedWKWebView {
+    private(set) var obscuredInsetWriteCount = 0
+    private(set) var unobscuredSafeAreaInsetWriteCount = 0
+    private(set) var viewportInsetWriteCount = 0
+
+    override func setValue(_ value: Any?, forKey key: String) {
+        if key == "obscuredInsets" { obscuredInsetWriteCount += 1 }
+        if key == "unobscuredSafeAreaInsets" { unobscuredSafeAreaInsetWriteCount += 1 }
+        super.setValue(value, forKey: key)
+    }
+
+    override func setMinimumViewportInset(_ minimumViewportInset: UIEdgeInsets, maximumViewportInset: UIEdgeInsets) {
+        viewportInsetWriteCount += 1
+        super.setMinimumViewportInset(minimumViewportInset, maximumViewportInset: maximumViewportInset)
+    }
+
+    func resetInsetWriteCounts() {
+        obscuredInsetWriteCount = 0
+        unobscuredSafeAreaInsetWriteCount = 0
+        viewportInsetWriteCount = 0
+    }
+}
+
+@MainActor
+private final class StatusBarInsetTestWindow: UIWindow {
+    override var safeAreaInsets: UIEdgeInsets {
+        UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
+    }
+}
+#endif

@@ -205,11 +205,18 @@ func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     guard let url,
           url.scheme?.lowercased() == "internal",
           url.host?.lowercased() == "local",
-          url.path == "/load/reader",
+          (url.path == "/load/reader" || url.path == "/reader"),
           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
           let readerURLValue = components.queryItems?.first(where: { $0.name == "reader-url" })?.value
     else {
         return nil
+    }
+
+    func preservingDocumentFragment(_ sourceURL: URL) -> URL {
+        guard let fragment = components.percentEncodedFragment,
+              var source = URLComponents(url: sourceURL, resolvingAgainstBaseURL: false) else { return sourceURL }
+        source.percentEncodedFragment = fragment
+        return source.url ?? sourceURL
     }
 
     // URLComponents has already decoded the query-item value once. Parse that
@@ -217,14 +224,14 @@ func canonicalContentURLForReaderLoader(_ url: URL?) -> URL? {
     // the content URL. Decode only as a compatibility fallback for legacy
     // reader-loader URLs whose value itself was percent-encoded twice.
     if let resolved = URL(string: readerURLValue), resolved.scheme != nil {
-        return resolved
+        return preservingDocumentFragment(resolved)
     }
     guard let decoded = readerURLValue.removingPercentEncoding,
           let resolved = URL(string: decoded),
           resolved.scheme != nil else {
         return nil
     }
-    return resolved
+    return preservingDocumentFragment(resolved)
 }
 
 @inline(__always)
@@ -235,8 +242,47 @@ private func isInternalReaderLoaderURL(_ url: URL?) -> Bool {
         && url.path == "/load/reader"
 }
 
+func isReaderOwnedArticleDocument(_ url: URL?) -> Bool {
+    guard let url else { return false }
+    return url.scheme?.lowercased() == "internal" && url.host?.lowercased() == "local"
+        && url.path == "/reader" && canonicalContentURLForReaderLoader(url) != nil
+}
+
+func readerArticleURLsShareDocument(_ first: URL?, _ second: URL?) -> Bool {
+    guard isReaderOwnedArticleDocument(first), isReaderOwnedArticleDocument(second),
+          var lhs = first.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }),
+          var rhs = second.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else { return false }
+    lhs.fragment = nil; rhs.fragment = nil
+    return lhs == rhs
+}
+
+func readerArticleNavigationKeepsDocument(from current: URL?, to target: URL?, type: WKNavigationType) -> Bool {
+    guard readerArticleURLsShareDocument(current, target),
+          [.linkActivated, .backForward, .other].contains(type) else { return false }
+    return current?.fragment != target?.fragment || (type == .linkActivated && target?.fragment != nil)
+}
+
+/// EPUB owns a different multi-frame trust boundary. This policy applies only
+/// to generated Readability documents, whose remote children are unprivileged.
+func readerArticleAdmitsFrameMessage(documentURL: URL?, isMainFrame: Bool) -> Bool {
+    !isReaderOwnedArticleDocument(documentURL) || isMainFrame
+}
+
+func readerImageMetadataURL(_ candidate: URL, documentURL: URL?) -> URL? {
+    guard isReaderOwnedArticleDocument(documentURL) else { return candidate }
+    // Rendering capabilities must never become thumbnails, shares or storage.
+    guard ["http", "https"].contains(candidate.scheme?.lowercased() ?? ""),
+          candidate.user == nil, candidate.password == nil else { return nil }
+    return candidate
+}
+
+func readerArticleNavigationProgress(estimated: Double, previous: Double?) -> Double {
+    let incoming = estimated.isFinite ? max(0, min(estimated, 0.9)) : 0
+    return max(previous ?? 0, incoming)
+}
+
 @inline(__always)
-private func shouldResetThroughAboutBlankBeforeInternalReaderLoad(
+func shouldResetThroughAboutBlankBeforeInternalReaderLoad(
     currentURL: URL?,
     requestURL: URL?
 ) -> Bool {
@@ -244,7 +290,8 @@ private func shouldResetThroughAboutBlankBeforeInternalReaderLoad(
           let currentURL else {
         return false
     }
-    if currentURL.absoluteString == "about:blank" || isInternalReaderLoaderURL(currentURL) {
+    if currentURL.absoluteString == "about:blank" || isInternalReaderLoaderURL(currentURL)
+        || (currentURL.path == "/reader" && canonicalContentURLForReaderLoader(currentURL) != nil) {
         return false
     }
     guard let scheme = currentURL.scheme?.lowercased() else {
@@ -1322,6 +1369,11 @@ public struct WebViewState: Equatable, Sendable {
 
     public mutating func markReaderRenderReady() {
         hasReaderRenderReady = true
+        if isReaderOwnedArticleDocument(pageURL) {
+            isLoading = false
+            loadingProgress = nil
+            isProvisionallyNavigating = false
+        }
     }
     
     public static let empty = WebViewState(
@@ -2428,6 +2480,7 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
     public let world: WKContentWorld?
     public let allowedDomains: Set<String>
     public let configurationSignatureComponent: String
+    private let sourceHash: Int
     
     @MainActor
     public lazy var webKitUserScript: WKUserScript = {
@@ -2454,18 +2507,42 @@ public struct WebViewUserScript: Equatable, Hashable, Sendable {
         in world: WKContentWorld? = nil,
         allowedDomains: Set<String> = Set()
     ) {
+        self.init(source: source, sourceHash: source.hashValue,
+            injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly,
+            in: world, allowedDomains: allowedDomains)
+    }
+
+    private init(
+        source: String,
+        sourceHash: Int,
+        injectionTime: WKUserScriptInjectionTime,
+        forMainFrameOnly: Bool,
+        in world: WKContentWorld?,
+        allowedDomains: Set<String>
+    ) {
         self.source = source
+        self.sourceHash = sourceHash
         self.injectionTime = injectionTime
         self.isForMainFrameOnly = forMainFrameOnly
         self.world = world
         self.allowedDomains = allowedDomains
         self.configurationSignatureComponent = [
-            "\(source.hashValue)",
+            "\(sourceHash)",
             "\(injectionTime.rawValue)",
             "\(forMainFrameOnly)",
             "\(world.map { String(describing: $0) } ?? "nil")",
             allowedDomains.sorted().joined(separator: ",")
         ].joined(separator: "|")
+    }
+
+    /// Restrict an immutable script without hashing its source again on every
+    /// SwiftUI update. Construct a fresh lazy WKUserScript when its scope changes;
+    /// copying a materialized script would retain the original frame permission.
+    public func restrictingToMainFrame() -> Self {
+        guard !isForMainFrameOnly else { return self }
+        return Self(source: source, sourceHash: sourceHash,
+            injectionTime: injectionTime, forMainFrameOnly: true,
+            in: world, allowedDomains: allowedDomains)
     }
     
     public func hash(into hasher: inout Hasher) {
@@ -2525,58 +2602,21 @@ public final class WebViewPaginationController {
         _ configuration: WebViewPaginationConfiguration,
         reason: String
     ) throws -> WebViewPaginationState {
-        desiredConfiguration = configuration
+        // Native WebKit pagination is unused. Keep sidecar/runtime spread state only.
+        desiredConfiguration = .disabled
+        lastAppliedConfiguration = nil
+        lastAppliedIdentity = nil
+        lastAppliedHostIdentifier = nil
+        lastPageCount = nil
         lastApplyReason = reason
         lastUpdatedAt = Date()
-
-        guard let webView else {
-            return currentState(reason: reason)
-        }
-
-        let hostIdentifier = Self.hostIdentifier(for: webView)
-        let resolved = configuration.resolvingEffectivePageLength(using: webView.bounds.size)
-        let identity = resolved.structuralIdentity(using: webView.bounds.size)
-        let shouldApply = identity != lastAppliedIdentity || hostIdentifier != lastAppliedHostIdentifier
-        if shouldApply {
-            try applySelectors(resolved, to: webView)
-            lastAppliedConfiguration = resolved
-            lastAppliedIdentity = identity
-            lastAppliedHostIdentifier = hostIdentifier
-            webViewPaginationDebugLog(
-                "apply",
-                [
-                    "host": hostIdentifier,
-                    "reason": reason,
-                    "mode": resolved.mode.rawValue,
-                    "storedPageLength": resolved.storedPageLength,
-                    "effectivePageLength": resolved.effectivePageLength,
-                    "gapBetweenPages": resolved.gapBetweenPages,
-                    "behavesLikeColumns": resolved.behavesLikeColumns,
-                    "layoutSize": "\(resolved.layoutSize.width)x\(resolved.layoutSize.height)"
-                ]
-            )
-        } else {
-            webViewPaginationDebugLog(
-                "apply.skipped",
-                [
-                    "host": hostIdentifier,
-                    "reason": reason,
-                    "mode": resolved.mode.rawValue
-                ]
-            )
-        }
-        lastPageCount = try queryPageCount(on: webView)
         return currentState(reason: reason)
     }
 
     public func refreshReadback(reason: String) throws -> WebViewPaginationState {
+        lastPageCount = nil
         lastApplyReason = reason
         lastUpdatedAt = Date()
-        if let webView {
-            lastPageCount = try queryPageCount(on: webView)
-        } else {
-            lastPageCount = nil
-        }
         return currentState(reason: reason)
     }
 
@@ -2705,95 +2745,97 @@ public final class WebViewPaginationController {
         String(describing: ObjectIdentifier(webView))
     }
 
-    private func applySelectors(_ configuration: WebViewPaginationConfiguration, to webView: WKWebView) throws {
-        try setInt(configuration.mode.rawValue, selectorName: PrivatePaginationSelector.setPaginationMode.name, on: webView)
-        try setBool(configuration.behavesLikeColumns, selectorName: PrivatePaginationSelector.setPaginationBehavesLikeColumns.name, on: webView)
-        try setDouble(configuration.storedPageLength, selectorName: PrivatePaginationSelector.setPageLength.name, on: webView)
-        try setDouble(configuration.gapBetweenPages, selectorName: PrivatePaginationSelector.setGapBetweenPages.name, on: webView)
-    }
+    // Unused private WebKit pagination implementation retained for reference.
+//     private func applySelectors(_ configuration: WebViewPaginationConfiguration, to webView: WKWebView) throws {
+//         try setInt(configuration.mode.rawValue, selectorName: PrivatePaginationSelector.setPaginationMode.name, on: webView)
+//         try setBool(configuration.behavesLikeColumns, selectorName: PrivatePaginationSelector.setPaginationBehavesLikeColumns.name, on: webView)
+//         try setDouble(configuration.storedPageLength, selectorName: PrivatePaginationSelector.setPageLength.name, on: webView)
+//         try setDouble(configuration.gapBetweenPages, selectorName: PrivatePaginationSelector.setGapBetweenPages.name, on: webView)
+//     }
+//
+//     private func queryPageCount(on webView: WKWebView) throws -> Int {
+//         let selectorName = PrivatePaginationSelector.pageCount.name
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector) -> Int
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         return function(webView, selector)
+//     }
+//
+//     private func setInt(_ value: Int, selectorName: String, on webView: WKWebView) throws {
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector, Int) -> Void
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         function(webView, selector, value)
+//     }
+//
+//     private func setBool(_ value: Bool, selectorName: String, on webView: WKWebView) throws {
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector, Bool) -> Void
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         function(webView, selector, value)
+//     }
+//
+//     private func setDouble(_ value: CGFloat, selectorName: String, on webView: WKWebView) throws {
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector, Double) -> Void
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         function(webView, selector, Double(value))
+//     }
+//
+//     private enum PrivatePaginationSelector {
+//         case setPaginationMode
+//         case setPaginationBehavesLikeColumns
+//         case setPageLength
+//         case setGapBetweenPages
+//         case pageCount
+//
+//         var name: String {
+//             switch self {
+//             case .setPaginationMode:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 77, 111, 100, 101, 58
+//                 ])
+//             case .setPaginationBehavesLikeColumns:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 66, 101, 104, 97, 118, 101,
+//                     115, 76, 105, 107, 101, 67, 111, 108, 117, 109, 110, 115, 58
+//                 ])
+//             case .setPageLength:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 80, 97, 103, 101, 76, 101, 110, 103, 116, 104, 58
+//                 ])
+//             case .setGapBetweenPages:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 71, 97, 112, 66, 101, 116, 119, 101, 101, 110, 80, 97, 103, 101, 115, 58
+//                 ])
+//             case .pageCount:
+//                 return Self.decode([
+//                     95, 112, 97, 103, 101, 67, 111, 117, 110, 116
+//                 ])
+//             }
+//         }
+//
+//         private static func decode(_ codeUnits: [UInt8]) -> String {
+//             String(decoding: codeUnits, as: UTF8.self)
+//         }
+//     }
 
-    private func queryPageCount(on webView: WKWebView) throws -> Int {
-        let selectorName = PrivatePaginationSelector.pageCount.name
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector) -> Int
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        return function(webView, selector)
-    }
-
-    private func setInt(_ value: Int, selectorName: String, on webView: WKWebView) throws {
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector, Int) -> Void
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(webView, selector, value)
-    }
-
-    private func setBool(_ value: Bool, selectorName: String, on webView: WKWebView) throws {
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector, Bool) -> Void
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(webView, selector, value)
-    }
-
-    private func setDouble(_ value: CGFloat, selectorName: String, on webView: WKWebView) throws {
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector, Double) -> Void
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(webView, selector, Double(value))
-    }
-
-    private enum PrivatePaginationSelector {
-        case setPaginationMode
-        case setPaginationBehavesLikeColumns
-        case setPageLength
-        case setGapBetweenPages
-        case pageCount
-
-        var name: String {
-            switch self {
-            case .setPaginationMode:
-                return Self.decode([
-                    95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 77, 111, 100, 101, 58
-                ])
-            case .setPaginationBehavesLikeColumns:
-                return Self.decode([
-                    95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 66, 101, 104, 97, 118, 101,
-                    115, 76, 105, 107, 101, 67, 111, 108, 117, 109, 110, 115, 58
-                ])
-            case .setPageLength:
-                return Self.decode([
-                    95, 115, 101, 116, 80, 97, 103, 101, 76, 101, 110, 103, 116, 104, 58
-                ])
-            case .setGapBetweenPages:
-                return Self.decode([
-                    95, 115, 101, 116, 71, 97, 112, 66, 101, 116, 119, 101, 101, 110, 80, 97, 103, 101, 115, 58
-                ])
-            case .pageCount:
-                return Self.decode([
-                    95, 112, 97, 103, 101, 67, 111, 117, 110, 116
-                ])
-            }
-        }
-
-        private static func decode(_ codeUnits: [UInt8]) -> String {
-            String(decoding: codeUnits, as: UTF8.self)
-        }
-    }
 }
 
 internal struct WebViewMutationGenerationGate {
@@ -2968,6 +3010,7 @@ internal let webViewReaderDocumentSummaryScript = """
             (html?.dataset?.mnbReaderRenderReady === '1' || body?.dataset?.mnbReaderRenderReady === '1')
             && !!document.getElementById("reader-content")
             && (html?.dataset?.mnbFontPending ?? null) !== '1'
+            && html?.dataset?.mnbArticlePresentation !== 'pending'
             && bodyStyle?.visibility !== 'hidden'
             && bodyStyle?.display !== 'none'
             && Number.parseFloat(bodyStyle?.opacity || "1") > 0.01,
@@ -3013,7 +3056,7 @@ public class WebViewCoordinator: NSObject {
     private var estimatedProgressObservation: NSKeyValueObservation?
     private var isLoadingObservation: NSKeyValueObservation?
 #if os(iOS)
-    private var sampledPageTopColorObservation: WebViewStringKeyPathObserver<WKWebView, UIColor>?
+    private let pageTopColorSampler = WebViewPageTopColorSampler()
 #endif
     private var loadingProgressPublicationState = LoadingProgressPublicationState()
     private var lastProgressUpdateTime: CFTimeInterval = 0
@@ -3047,8 +3090,11 @@ public class WebViewCoordinator: NSObject {
     weak var lastVisualConfigurationWebView: WKWebView?
     var lastVisualConfigurationColor: UIColor?
     var lastVisualConfigurationIsOpaque: Bool?
+    var lastVisualConfigurationPageZoom: CGFloat?
     var lastVisualConfigurationUsesSampledTopColor: Bool?
+    var lastVisualConfigurationSampleMaxDifference: Double?
     var lastVisualConfigurationUsesReaderBackground: Bool?
+    var lastVisualConfigurationReaderRenderReady: Bool?
     var lastVisualConfigurationDarkModeSetting: DarkModeSetting?
 #endif
     
@@ -3491,6 +3537,9 @@ public class WebViewCoordinator: NSObject {
             ownedBy: scriptCallerBindingOwnerID
         )
         documentCallbackGeneration &+= 1
+#if os(iOS)
+        pageTopColorSampler.cancel()
+#endif
         documentCallbackContextIsActive = false
         trustedUserActionAdmissions.invalidateAll()
         cancelPendingWebViewDocumentCallbackTasks(&pendingDocumentCallbackTasks)
@@ -3791,8 +3840,7 @@ public class WebViewCoordinator: NSObject {
         isLoadingObservation?.invalidate()
         isLoadingObservation = nil
 #if os(iOS)
-        sampledPageTopColorObservation?.invalidate()
-        sampledPageTopColorObservation = nil
+        pageTopColorSampler.cancel()
         scrollBottomContentSizeObservation?.invalidate()
         scrollBottomContentSizeObservation = nil
         scrollBottomBoundsObservation?.invalidate()
@@ -3883,6 +3931,9 @@ public class WebViewCoordinator: NSObject {
             unsafeCaller: unsafeCaller,
             snapshotCapture: fencedSnapshotCapture,
             coordinateOriginInWindow: coordinateOriginInWindow,
+            domViewportCoordinateOriginInWindow: { @MainActor [weak webView] in
+                webView.flatMap(webViewDOMViewportCoordinateOriginInWindow)
+            },
             documentGenerationProvider: { @MainActor [weak self] in
                 self?.documentCallbackGeneration
             },
@@ -3958,6 +4009,10 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 self.navigator.handleWindowAttachmentChanged(webView: webView)
+#if os(iOS)
+                if webView.window != nil { self.schedulePageTopColorSampling(webView) }
+                else { self.pageTopColorSampler.cancel() }
+#endif
             }
         }
     }
@@ -4192,7 +4247,12 @@ public class WebViewCoordinator: NSObject {
                       self.ownsWebView(webView) else {
                     return
                 }
-                self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+                if isReaderOwnedArticleDocument(webView.url) {
+                    guard !self.webView.state.hasReaderRenderReady else { return }
+                    self.updateLoadingProgress(isLoading: nil, estimatedProgress: readerArticleNavigationProgress(estimated: progress, previous: self.webView.state.loadingProgress))
+                } else {
+                    self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+                }
             }
         }
 
@@ -4205,62 +4265,60 @@ public class WebViewCoordinator: NSObject {
                       self.ownsWebView(webView) else {
                     return
                 }
+                // Main-document navigation callbacks own article loading.
+                // WebKit's aggregate KVO includes provider frame activity.
+                if isReaderOwnedArticleDocument(webView.url) { return }
                 self.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
+#if os(iOS)
+                // A settled sampling request may have been rejected while a
+                // subframe or other WebKit activity kept the view loading.
+                if !isLoading { self.schedulePageTopColorSampling(webView) }
+#endif
             }
         }
 
 #if os(iOS)
-        if config.usesSampledPageTopColorForUnderPageBackground,
-           manabiCanUseSampledPageTopColorBackground() {
-            sampledPageTopColorObservation = WebViewStringKeyPathObserver(
-                object: webView,
-                keyPath: "_sampl\("edPageTopC")olor"
-            ) { [weak self, weak webView] observedColor in
-                Task { @MainActor [weak self, weak webView] in
-                    guard let self,
-                          let webView,
-                          self.ownsWebView(webView) else {
-                        return
-                    }
-                    if #available(iOS 15.0, *) {
-                        self.applySampledPageTopColorChange(
-                            webView: webView,
-                            observedColor: observedColor
-                        )
-                    }
-                }
-            }
-        }
         installScrollBottomStateObservations(for: webView.scrollView)
 #endif
     }
 
 #if os(iOS)
     @MainActor
+    func updatePageTopColorScenePhase(_ phase: ScenePhase) {
+        pageTopColorSampler.setSceneActive(phase == .active)
+    }
+
+    @MainActor
     private func beginSampledPageTopColorNavigation(_ webView: WKWebView) {
+        pageTopColorSampler.cancel()
+        (webView as? EnhancedWKWebView)?.sampledUnderPageColor = nil
         webView.applyUnderPageFallbackBackgroundColor(config: config)
     }
 
-    @available(iOS 15.0, *)
+    /// Coalesce scrolling/layout changes, and fence both document and mounted-view ownership.
     @MainActor
-    private func applySampledPageTopColorChange(webView: WKWebView, observedColor: UIColor?) {
-        guard observedColor != nil else {
-            webView.applyUnderPageFallbackBackgroundColor(config: config)
+    func schedulePageTopColorSampling(_ sourceWebView: WKWebView) {
+        guard ownsWebView(sourceWebView), documentCallbackContextIsActive else { return }
+        guard config.usesSampledPageTopColorForUnderPageBackground else {
+            pageTopColorSampler.cancel()
+            // Default WebViews also send scroll callbacks. Do not rewrite their
+            // backgrounds on every frame when there is no sampled color to clear.
+            if let enhancedWebView = sourceWebView as? EnhancedWKWebView,
+               enhancedWebView.sampledUnderPageColor != nil {
+                enhancedWebView.sampledUnderPageColor = nil
+                sourceWebView.applyUnderPageFallbackBackgroundColor(config: config)
+            }
             return
         }
-
-        webView.applyUnderPageBackgroundColor(config: config, allowSampledPageTopColor: true)
-        if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
-            config: config,
-            allowSampledPageTopColor: true
-        ) {
-            webView.scrollView.backgroundColor = resolvedUnderPageColor
+        let generation = documentCallbackGeneration
+        pageTopColorSampler.schedule(webView: sourceWebView, config: config) { [weak self, weak sourceWebView] in
+            guard let self, let sourceWebView else { return false }
+            return self.ownsWebView(sourceWebView)
+                && self.documentCallbackContextIsActive
+                && self.documentCallbackGeneration == generation
         }
-        webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(
-            config: config,
-            reason: "sampledPageTopColor.changed"
-        )
     }
+
 #endif
 
     @MainActor
@@ -4290,6 +4348,15 @@ public class WebViewCoordinator: NSObject {
         guard !isProvisionallyNavigating,
               let observedURL,
               observedURL == currentWebViewURL else {
+            return false
+        }
+        // URL KVO may arrive before didStartProvisionalNavigation. An owned
+        // article changing presentation (or entering/leaving Reader) is a new
+        // document, never pushState. Its didCommit must establish the binding
+        // before reader preparation evaluates scripts or changes content.
+        if (isReaderOwnedArticleDocument(observedURL)
+            || isReaderOwnedArticleDocument(publishedURL)),
+           !readerArticleURLsShareDocument(observedURL, publishedURL) {
             return false
         }
         return observedURL != publishedURL || hasHistoryStateChange
@@ -4322,7 +4389,10 @@ public class WebViewCoordinator: NSObject {
             return
         }
         latestURLPublicationReceiptSequence = receiptSequence
-        let resolvedIsLoading = currentState.isLoading || sourceWebView.isLoading
+        // URL/history observations include child-frame loading. Fragment moves
+        // within the exact presentation cannot reopen article progress.
+        let resolvedIsLoading = readerArticleURLsShareDocument(currentState.pageURL, newURL)
+            ? currentState.isLoading : currentState.isLoading || sourceWebView.isLoading
         guard currentState.pageURL != newURL
                 || currentState.isLoading != resolvedIsLoading
                 || currentState.canGoBack != sourceWebView.canGoBack
@@ -4473,6 +4543,12 @@ public class WebViewCoordinator: NSObject {
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
 
+        if isReaderOwnedArticleDocument(webView.state.pageURL), webView.state.hasReaderRenderReady {
+            loadingProgressPublicationState.clear()
+            lastEmittedProgress = nil
+            return
+        }
+
         guard webView.state.loadingProgress != progress else { return }
 
         lastProgressUpdateTime = now
@@ -4514,6 +4590,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 from: sourceWebView,
                 userContentController: userContentController
               ) else { return }
+        guard readerArticleAdmitsFrameMessage(documentURL: sourceWebView.url, isMainFrame: message.frameInfo.isMainFrame) else { return }
 
         if message.name == WebViewTrustedUserActionBroker.handlerName {
             guard let body = message.body as? [String: Any],
@@ -4557,7 +4634,8 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                   let imageURLRaw = body["imageURL"] as? String,
                   let urlRaw = body["url"] as? String,
                   let url = URL(string: urlRaw),
-                  let imageURL = URL(string: imageURLRaw),
+                  let candidate = URL(string: imageURLRaw),
+                  let imageURL = readerImageMetadataURL(candidate, documentURL: sourceWebView.url),
                   url == webView.state.pageURL else { return }
             var newState = webView.state
             newState.pageImageURL = imageURL
@@ -4766,6 +4844,8 @@ extension WebViewCoordinator: WKUIDelegate {
     /// See: https://nemecek.be/blog/1/how-to-open-target_blank-links-in-wkwebview-in-ios
     public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard ownsWebView(webView) else { return nil }
+        if isReaderOwnedArticleDocument(webView.url), !navigationAction.sourceFrame.isMainFrame,
+           navigationAction.navigationType != .linkActivated { return nil }
         if let frame = navigationAction.targetFrame,
            frame.isMainFrame {
             return nil
@@ -4926,7 +5006,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
         if #available(iOS 15.0, *) {
             webView.applyUnderPageFallbackBackgroundColor(config: config)
         }
-        webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.finish")
+        schedulePageTopColorSampling(webView)
 #endif
 
 #if os(iOS)
@@ -5021,6 +5101,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         let preservesCommittedDocument = hasCommittedDocument
         if preservesCommittedDocument {
             activateDocumentCallbackContext(for: webView)
+#if os(iOS)
+            schedulePageTopColorSampling(webView)
+#endif
         } else {
             invalidateDocumentCallbackContext()
             scriptCaller?.removeAllMultiTargetFrames()
@@ -5069,7 +5152,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         (webView as? EnhancedWKWebView)?.resetPooledContentNavigation()
         navigator.clearActiveInternalReaderLoadSignal()
         scriptCaller?.removeAllMultiTargetFrames()
-        let terminatedState = setLoading(false, isProvisionallyNavigating: false)
+        var terminatedState = setLoading(false, isProvisionallyNavigating: false)
+        terminatedState.hasReaderRenderReady = false
+        self.webView.state = terminatedState
         onDocumentContextInvalidated?(terminatedState, .webContentProcessTerminated)
         if navigator.cancelContentRulesBypass(for: webView) {
             applyConfiguredContentRulesIfNeeded(on: webView)
@@ -5139,6 +5224,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
            enhancedWebView.admitNavigationCallback(navigation) == .stale {
             return
         }
+        (webView as? EnhancedWKWebView)?.applyReaderDocumentFullscreenPolicy(for: webView.url)
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = true
@@ -5239,7 +5325,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
         onNavigationCommitted?(newState)
 #if os(iOS)
         webView.applyUnderPageFallbackBackgroundColor(config: config)
-        webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "navigation.commit")
 #endif
 #if os(iOS)
         if awaitingSnapshotReload {
@@ -5257,6 +5342,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
            enhancedWebView.handleProvisionalNavigationStarted(navigation) == .stale {
             return
         }
+        navigator.provisionalNavigationGeneration &+= 1
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
@@ -5413,10 +5499,18 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
 #endif
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
+        if isMainDocumentNavigation, isReaderOwnedArticleDocument(webView.url),
+           !navigationAction.sourceFrame.isMainFrame,
+           navigationAction.navigationType != .linkActivated {
+            // A provider cannot replace the article through top.location,
+            // forms, timers, redirects or an unsolicited window.open.
+            return (.cancel, preferences)
+        }
         let contentRulesBypassOwner = isMainDocumentNavigation
             ? beginContentRulesPolicy(for: navigationAction, on: webView)
             : nil
         let isInternalReaderLoaderNavigation = isMainDocumentNavigation
+            && isInternalReaderLoaderURL(navigationAction.request.url)
             && canonicalContentURLForReaderLoader(navigationAction.request.url) != nil
         if isMainDocumentNavigation,
            let requestedURL = navigationAction.request.url,
@@ -5475,7 +5569,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         // ePub loader
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         
-        if isMainDocumentNavigation {
+        if isMainDocumentNavigation,
+           !readerArticleNavigationKeepsDocument(from: self.webView.state.pageURL,
+               to: navigationAction.request.url, type: navigationAction.navigationType) {
             let effectiveMainDocumentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
             self.webView.updateUserScripts(
                 webView: webView,
@@ -5560,6 +5656,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public let nativeLookupHitTesting = WebViewNativeLookupHitTestStore()
     @MainActor private var contentRulesBypassGate = WebViewContentRulesBypassGate()
     @MainActor private var pendingRequestLoadGeneration: Int = 0
+    @MainActor fileprivate var provisionalNavigationGeneration: UInt64 = 0
     @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
@@ -5584,7 +5681,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor fileprivate var readerLoadCommittedAt: Date?
     public var attachFallbackURL: URL?
     public var attachFallbackDelayNanoseconds: UInt64 = 250_000_000
-    public var shouldLoadFallbackOnAttach = true
+    @MainActor public var shouldLoadFallbackOnAttach = true {
+        didSet {
+            if !shouldLoadFallbackOnAttach {
+                cancelAttachFallbackLoadTask(reason: "fallbackDisabled")
+            }
+        }
+    }
     public var paginationStateEnrichment: WebViewPaginationStateEnrichment?
     @MainActor fileprivate var forceClearLoadingIndicatorsHandler: ((String, URL?) -> Void)?
 
@@ -5650,6 +5753,25 @@ public class WebViewNavigator: NSObject, ObservableObject {
     public var isReadyForDirectLoad: Bool {
         guard let webView else { return false }
         return webView.window != nil && webView.superview != nil
+    }
+
+    /// A queued or started request already belongs to this navigator's load
+    /// lifecycle. A lagging published page URL is not a reason to reissue it.
+    @MainActor
+    public func isHandlingRequest(for url: URL) -> Bool {
+        if pendingRequest?.url == url { return true }
+        guard let webView, ownsBoundWebView(webView) else { return false }
+        return lastLoadedRequest?.url == url
+            && webView.url == url
+            && webView.isLoading
+    }
+
+    /// A reader request may stage an intermediate blank document before WebKit
+    /// accepts the target. That blank is transport, not a content selection.
+    /// Inspect this synchronously when callbacks arrive, before queuing work.
+    @MainActor
+    public var hasPendingInternalReaderRequest: Bool {
+        isInternalReaderLoaderURL(pendingRequest?.url)
     }
 
     @MainActor
@@ -6132,6 +6254,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             guard !Task.isCancelled else { return }
             guard self.attachFallbackLoadGeneration == generation else { return }
             guard self.ownsBoundWebView(webView) else { return }
+            guard self.shouldLoadFallbackOnAttach else { return }
             if let requestedURL = self.readerLoadRequestedURL,
                requestedURL.absoluteString != fallbackURL.absoluteString,
                self.readerLoadProvisionalStartedAt == nil,
@@ -6896,6 +7019,45 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     @MainActor
+    @discardableResult
+    public func reloadCurrentDocument(at url: URL) -> Bool {
+        guard let webView, ownsBoundWebView(webView), let currentURL = webView.url,
+              var current = URLComponents(url: currentURL, resolvingAgainstBaseURL: false),
+              var requested = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        current.fragment = nil; requested.fragment = nil
+        guard current.url == requested.url else { return false }
+        let request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+        lastLoadedRequest = request
+        lastLoadedHTML = nil
+        lastLoadedDataLoad = nil
+        beginReaderLoadTrace(for: request)
+        return performUnkeyedNavigation(on: webView, reason: "reloadPreparedDocument") {
+            webView.reload()
+        } != nil
+    }
+
+    @MainActor
+    public var currentDocumentURL: URL? {
+        guard let webView, ownsBoundWebView(webView) else { return nil }
+        return webView.url
+    }
+
+    /// Fence deferred recovery against even a same-URL load requested before
+    /// WebKit commits it. A document/binding token alone cannot detect that.
+    @MainActor
+    public func captureNavigationIntent() -> @MainActor @Sendable () -> Bool {
+        let generation = pendingRequestLoadGeneration
+        let provisionalGeneration = provisionalNavigationGeneration
+        let sourceWebView = webView
+        return { [weak self, weak sourceWebView] in
+            guard let self, let sourceWebView else { return false }
+            return self.pendingRequestLoadGeneration == generation
+                && self.provisionalNavigationGeneration == provisionalGeneration
+                && self.ownsBoundWebView(sourceWebView)
+        }
+    }
+
+    @MainActor
     public func reload() {
         logCompetingOperationIfNeeded("reload", metadata: [:])
         guard let webView else { return }
@@ -7215,6 +7377,24 @@ private func webViewSnapshotNativeScale(for webView: WKWebView) -> CGFloat {
 #endif
 }
 
+/// DOM client coordinates use the content viewport after native content insets.
+/// Read the mounted scroll view's actual inset; SwiftUI safe-area metadata can
+/// refer to an ancestor and change independently as reader chrome hides.
+func webViewDOMViewportOrigin(windowOrigin: CGPoint, contentInset: CGPoint) -> CGPoint {
+    CGPoint(x: windowOrigin.x + contentInset.x, y: windowOrigin.y + contentInset.y)
+}
+
+@MainActor
+private func webViewDOMViewportCoordinateOriginInWindow(_ webView: WKWebView) -> CGPoint? {
+    guard let origin = webViewCoordinateOriginInWindow(webView) else { return nil }
+#if os(iOS)
+    let inset = webView.scrollView.adjustedContentInset
+    return webViewDOMViewportOrigin(windowOrigin: origin, contentInset: CGPoint(x: inset.left, y: inset.top))
+#else
+    return origin
+#endif
+}
+
 @MainActor
 func webViewCoordinateOriginInWindow(_ webView: WKWebView) -> CGPoint? {
 #if os(iOS)
@@ -7365,6 +7545,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     }
     var unsafeCaller: UnsafeCaller? = nil
     private var coordinateOriginInWindowProvider: CoordinateOriginInWindow?
+    private var domViewportCoordinateOriginInWindowProvider: CoordinateOriginInWindow?
     private var trustedUserActionAdmissionIssuer:
         TrustedUserActionAdmissionIssuer?
     private var trustedUserActionAdmissionRevoker:
@@ -7373,6 +7554,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     /// The mounted WKWebView's origin in its window coordinate space.
     public var coordinateOriginInWindow: CGPoint? {
         coordinateOriginInWindowProvider?()
+    }
+
+    /// Origin for DOM client rects, including native content-inset translation.
+    /// Native EPUB target rectangles continue to use coordinateOriginInWindow.
+    public var domViewportCoordinateOriginInWindow: CGPoint? {
+        domViewportCoordinateOriginInWindowProvider?() ?? coordinateOriginInWindow
     }
 
     /// Synchronously reflects whether JavaScript evaluation is currently possible.
@@ -7456,6 +7643,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         unsafeCaller: UnsafeCaller?,
         snapshotCapture: SnapshotCapture?,
         coordinateOriginInWindow: @escaping CoordinateOriginInWindow,
+        domViewportCoordinateOriginInWindow: CoordinateOriginInWindow? = nil,
         documentGenerationProvider: (@MainActor @Sendable () -> UInt64?)? = nil,
         trustedUserActionAdmissionIssuer:
             @escaping TrustedUserActionAdmissionIssuer = { _, _, _ in [] },
@@ -7472,6 +7660,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         self.unsafeCaller = unsafeCaller
         self.snapshotCapture = snapshotCapture
         coordinateOriginInWindowProvider = coordinateOriginInWindow
+        domViewportCoordinateOriginInWindowProvider = domViewportCoordinateOriginInWindow
         self.trustedUserActionAdmissionIssuer =
             trustedUserActionAdmissionIssuer
         self.trustedUserActionAdmissionRevoker =
@@ -7489,6 +7678,7 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
         unsafeCaller = nil
         snapshotCapture = nil
         coordinateOriginInWindowProvider = nil
+        domViewportCoordinateOriginInWindowProvider = nil
         trustedUserActionAdmissionIssuer = nil
         trustedUserActionAdmissionRevoker = nil
         return true
@@ -8506,7 +8696,7 @@ window.addEventListener('swiftUIWebViewLocationChanged', function () {
 }
 
 @MainActor
-fileprivate struct ImageChangeUserScript {
+struct ImageChangeUserScript {
     let userScript: WebViewUserScript
     
     init() {
@@ -8523,7 +8713,7 @@ new MutationObserver(function(mutations) {
     } else if (window.webkit) {
         let node = document.querySelector('#reader-header img')
         if (node && window.webkit) {
-            let url = node.getAttribute('src')
+            let url = node.getAttribute('data-mnb-source-url') || node.getAttribute('src')
             if (lastURL === url) { return }
             window.webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
                 imageURL: url, url: window.location.href})
@@ -8721,8 +8911,18 @@ public struct WebViewConfig: Sendable {
     public let isOpaque: Bool
     public let backgroundColor: Color
     public let usesSampledPageTopColorForUnderPageBackground: Bool
+    /// Maximum CIE76 color distance from the strip's mean (0 = perfectly uniform).
+    /// This is our own sampling policy, independent of WebKit's private implementation.
+    public let sampledPageTopColorMaxDifference: Double
     public let usesConfiguredBackgroundForReaderDocuments: Bool
     public let adjustsScrollViewContentInsetsForSafeArea: Bool
+    public let reservesWindowTopSafeAreaInObscuredInsets: Bool
+    /// Ordinary documents start below obscured chrome. Custom ebook stages
+    /// apply their own origin insets and leave this disabled.
+    public let reservesDocumentTopInset: Bool
+    /// Reserve scrollable clearance beneath ordinary documents. Ebook stages
+    /// manage their own viewport and leave this disabled.
+    public let reservesDocumentBottomInset: Bool
     public let hidesTopScrollEdgeEffect: Bool
     public let nativeLookupHitTestingEnabled: Bool
     public let userScripts: [WebViewUserScript]
@@ -8741,8 +8941,12 @@ public struct WebViewConfig: Sendable {
         isOpaque: Bool = true,
         backgroundColor: Color = .clear,
         usesSampledPageTopColorForUnderPageBackground: Bool = false,
+        sampledPageTopColorMaxDifference: Double = 5,
         usesConfiguredBackgroundForReaderDocuments: Bool = false,
         adjustsScrollViewContentInsetsForSafeArea: Bool = true,
+        reservesWindowTopSafeAreaInObscuredInsets: Bool = false,
+        reservesDocumentTopInset: Bool = false,
+        reservesDocumentBottomInset: Bool = false,
         hidesTopScrollEdgeEffect: Bool = false,
         nativeLookupHitTestingEnabled: Bool = true,
         userScripts: [WebViewUserScript] = [],
@@ -8760,8 +8964,13 @@ public struct WebViewConfig: Sendable {
         self.isOpaque = isOpaque
         self.backgroundColor = backgroundColor
         self.usesSampledPageTopColorForUnderPageBackground = usesSampledPageTopColorForUnderPageBackground
+        self.sampledPageTopColorMaxDifference = sampledPageTopColorMaxDifference.isFinite
+            ? max(0, sampledPageTopColorMaxDifference) : 5
         self.usesConfiguredBackgroundForReaderDocuments = usesConfiguredBackgroundForReaderDocuments
         self.adjustsScrollViewContentInsetsForSafeArea = adjustsScrollViewContentInsetsForSafeArea
+        self.reservesWindowTopSafeAreaInObscuredInsets = reservesWindowTopSafeAreaInObscuredInsets
+        self.reservesDocumentTopInset = reservesDocumentTopInset
+        self.reservesDocumentBottomInset = reservesDocumentBottomInset
         self.hidesTopScrollEdgeEffect = hidesTopScrollEdgeEffect
         self.nativeLookupHitTestingEnabled = nativeLookupHitTestingEnabled
         self.userScripts = userScripts
@@ -8782,8 +8991,12 @@ public struct WebViewConfig: Sendable {
             isOpaque: isOpaque,
             backgroundColor: backgroundColor,
             usesSampledPageTopColorForUnderPageBackground: usesSampledPageTopColorForUnderPageBackground,
+            sampledPageTopColorMaxDifference: sampledPageTopColorMaxDifference,
             usesConfiguredBackgroundForReaderDocuments: usesConfiguredBackgroundForReaderDocuments,
             adjustsScrollViewContentInsetsForSafeArea: adjustsScrollViewContentInsetsForSafeArea,
+            reservesWindowTopSafeAreaInObscuredInsets: reservesWindowTopSafeAreaInObscuredInsets,
+            reservesDocumentTopInset: reservesDocumentTopInset,
+            reservesDocumentBottomInset: reservesDocumentBottomInset,
             hidesTopScrollEdgeEffect: hidesTopScrollEdgeEffect,
             nativeLookupHitTestingEnabled: nativeLookupHitTestingEnabled,
             userScripts: userScripts,
@@ -8808,8 +9021,12 @@ public struct WebViewConfig: Sendable {
             isOpaque: isOpaque,
             backgroundColor: backgroundColor,
             usesSampledPageTopColorForUnderPageBackground: usesSampledPageTopColorForUnderPageBackground,
+            sampledPageTopColorMaxDifference: sampledPageTopColorMaxDifference,
             usesConfiguredBackgroundForReaderDocuments: usesConfiguredBackgroundForReaderDocuments,
             adjustsScrollViewContentInsetsForSafeArea: adjustsScrollViewContentInsetsForSafeArea,
+            reservesWindowTopSafeAreaInObscuredInsets: reservesWindowTopSafeAreaInObscuredInsets,
+            reservesDocumentTopInset: reservesDocumentTopInset,
+            reservesDocumentBottomInset: reservesDocumentBottomInset,
             hidesTopScrollEdgeEffect: hidesTopScrollEdgeEffect,
             nativeLookupHitTestingEnabled: nativeLookupHitTestingEnabled,
             userScripts: userScripts,
@@ -8969,6 +9186,9 @@ enum PendingRequestLoadDisposition: Equatable {
 }
 
 public class EnhancedWKWebView: WKWebView {
+#if os(iOS)
+    var sampledUnderPageColor: UIColor?
+#endif
     var persistedUserScriptsSignature: String?
     var persistedAppliedContentRules: String?
     var persistedContentRulesApplicationGeneration: UInt64 = 0
@@ -9054,6 +9274,24 @@ public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
     var hidesTopScrollEdgeEffect = false
 #endif
+    private var originalReaderFullscreenPreference: Bool?
+
+    /// WebKit reparents the same view during fullscreen. Its document and
+    /// navigation ownership remain intact throughout that presentation.
+    func applyReaderDocumentFullscreenPolicy(for documentURL: URL?) {
+        guard #available(macOS 12.3, iOS 15.4, *) else { return }
+        let preferences = configuration.preferences
+        if isReaderOwnedArticleDocument(documentURL) {
+            if originalReaderFullscreenPreference == nil {
+                originalReaderFullscreenPreference = preferences.isElementFullscreenEnabled
+            }
+            preferences.isElementFullscreenEnabled = true
+        } else if let originalReaderFullscreenPreference {
+            preferences.isElementFullscreenEnabled = originalReaderFullscreenPreference
+            self.originalReaderFullscreenPreference = nil
+        }
+    }
+
     public var onDidMoveToWindow: ((Bool) -> Void)?
 
     public override init(frame: CGRect, configuration: WKWebViewConfiguration) {
@@ -9092,8 +9330,23 @@ public class EnhancedWKWebView: WKWebView {
     public override func layoutSubviews() {
         super.layoutSubviews()
         applyTopScrollEdgeEffectHidden(hidesTopScrollEdgeEffect, to: self)
+        if lastPageColorSampleSize != bounds.size
+            || lastPageColorSampleTopInset != scrollView.adjustedContentInset.top {
+            lastPageColorSampleSize = bounds.size
+            lastPageColorSampleTopInset = scrollView.adjustedContentInset.top
+            persistedWindowAttachmentCallbackOwner?.schedulePageTopColorSampling(self)
+        }
     }
 
+    public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if previousTraitCollection?.userInterfaceStyle != traitCollection.userInterfaceStyle {
+            persistedWindowAttachmentCallbackOwner?.schedulePageTopColorSampling(self)
+        }
+    }
+
+    private var lastPageColorSampleSize: CGSize = .zero
+    private var lastPageColorSampleTopInset: CGFloat?
     var buildMenu: BuildMenuType?
 #endif
     
@@ -9763,6 +10016,30 @@ public class WebViewController: UIViewController {
     var onViewDidDisappear: (() -> Void)?
     var onWillAttachToParent: (() -> Void)?
     var onDidDetachFromParent: (() -> Void)?
+    var reservesDocumentTopInset = false {
+        didSet {
+            if oldValue != reservesDocumentTopInset { updateObscuredInsets() }
+        }
+    }
+    private weak var readerInsetScrollView: UIScrollView?
+    private var originalReaderTopInset: CGFloat?
+
+    var reservesDocumentBottomInset = false {
+        didSet {
+            if oldValue != reservesDocumentBottomInset { updateObscuredInsets() }
+        }
+    }
+    private weak var readerBottomInsetScrollView: UIScrollView?
+    private var originalReaderBottomInset: CGFloat?
+    private weak var insetConfiguredWebView: WKWebView?
+
+    var reservesWindowTopSafeAreaInObscuredInsets = false {
+        didSet {
+            if oldValue != reservesWindowTopSafeAreaInObscuredInsets {
+                updateObscuredInsets()
+            }
+        }
+    }
     var obscuredInsets = UIEdgeInsets.zero {
         didSet {
             updateObscuredInsets()
@@ -9833,17 +10110,62 @@ public class WebViewController: UIViewController {
     
     private func updateObscuredInsets() {
         guard let webView = view.subviews.compactMap({ $0 as? WKWebView }).first else { return }
+        // Even zero insets must be explicitly configured once for a newly
+        // mounted WebView; its default getters do not establish that policy.
+        let needsInitialInsetConfiguration = insetConfiguredWebView !== webView
+        insetConfiguredWebView = webView
+        // SwiftUI can report zero after the reader expands through the safe area.
+        // Resolve overlap in this mounted view's window so other scenes and views
+        // already positioned below the status bar do not contribute clearance.
+        let windowTopOverlap: CGFloat
+        if reservesWindowTopSafeAreaInObscuredInsets, let window = webView.window {
+            let frameInWindow = webView.convert(webView.bounds, to: window)
+            windowTopOverlap = max(0, window.bounds.minY + window.safeAreaInsets.top - frameInWindow.minY)
+        } else {
+            windowTopOverlap = 0
+        }
         let insets = UIEdgeInsets(
-            top: obscuredInsets.top,
+            top: max(obscuredInsets.top, windowTopOverlap),
             left: obscuredInsets.left,
             bottom: obscuredInsets.bottom,
             right: obscuredInsets.right
         )
+        // Obscured viewport geometry alone does not reserve scrollable space
+        // at document origin when automatic adjustment is disabled.
+        let scrollView = webView.scrollView
+        if reservesDocumentTopInset,
+           scrollView.contentInsetAdjustmentBehavior == .never {
+            if readerInsetScrollView !== scrollView {
+                restoreReaderTopInset()
+                readerInsetScrollView = scrollView
+                originalReaderTopInset = scrollView.contentInset.top
+            }
+            applyReaderTopInset(max(originalReaderTopInset ?? 0, insets.top), to: scrollView)
+        } else {
+            restoreReaderTopInset()
+        }
+        if reservesDocumentBottomInset,
+           scrollView.contentInsetAdjustmentBehavior == .never {
+            if readerBottomInsetScrollView !== scrollView {
+                restoreReaderBottomInset()
+                readerBottomInsetScrollView = scrollView
+                originalReaderBottomInset = scrollView.contentInset.bottom
+            }
+            applyReaderBottomInset(max(originalReaderBottomInset ?? 0, insets.bottom), to: scrollView)
+        } else {
+            restoreReaderBottomInset()
+        }
         //        let insets = UIEdgeInsets(top: obscuredInsets.top, left: obscuredInsets.left, bottom: 200, right: obscuredInsets.right)
         //        let argument: [Any] = ["_o", "bscu", "red", "Ins", "ets"]
         let argument: [Any] = ["o", "bscu", "red", "Ins", "ets"]
         let key = argument.compactMap({ $0 as? String }).joined()
-        webView.setValue(insets, forKey: key)
+        // Layout runs during scrolling and sheet animations. Read the mounted
+        // WebView's values so repeated layouts do not invalidate its viewport,
+        // while pooled/replaced views and real geometry changes still update.
+        if needsInitialInsetConfiguration
+            || (webView.value(forKey: key) as? NSValue)?.uiEdgeInsetsValue != insets {
+            webView.setValue(insets, forKey: key)
+        }
         
         let windowSafeAreaInsets = view.window?.safeAreaInsets ?? .zero
         let unobscuredInsets = UIEdgeInsets(
@@ -9853,10 +10175,11 @@ public class WebViewController: UIViewController {
             right: 0
         )
         let unobscuredArgument: [Any] = ["un", "obsc", "uredSa", "feAre", "aInsets"]
-        webView.setValue(
-            unobscuredInsets,
-            forKey: unobscuredArgument.compactMap({ $0 as? String }).joined()
-        )
+        let unobscuredKey = unobscuredArgument.compactMap({ $0 as? String }).joined()
+        if needsInitialInsetConfiguration
+            || (webView.value(forKey: unobscuredKey) as? NSValue)?.uiEdgeInsetsValue != unobscuredInsets {
+            webView.setValue(unobscuredInsets, forKey: unobscuredKey)
+        }
         if #available(iOS 15.5, *) {
             let viewportBounds = webView.bounds
             let hasUsableViewportBounds =
@@ -9868,7 +10191,8 @@ public class WebViewController: UIViewController {
                 hasUsableViewportBounds
                 && insets.left + insets.right < viewportBounds.width
                 && insets.top + insets.bottom < viewportBounds.height
-            if insetsFitViewport {
+            if insetsFitViewport,
+               webView.minimumViewportInset != insets || webView.maximumViewportInset != insets {
                 webView.setMinimumViewportInset(insets, maximumViewportInset: insets)
             }
         }
@@ -9882,6 +10206,45 @@ public class WebViewController: UIViewController {
         //            webView.setValue(true, forKey: "_haveSetUnobscuredSafeAreaInsets")
         //        }
         // TODO: investigate _isChangingObscuredInsetsInteractively
+    }
+
+    private func applyReaderTopInset(_ top: CGFloat, to scrollView: UIScrollView) {
+        guard scrollView.contentInset.top != top else { return }
+        let wasAtTop = abs(scrollView.contentOffset.y + scrollView.adjustedContentInset.top) < 1
+        var contentInset = scrollView.contentInset
+        contentInset.top = top
+        scrollView.contentInset = contentInset
+        // Keep the document's origin visible while preserving restored positions
+        // and an ongoing drag. Setting contentInset may itself invoke didScroll.
+        if wasAtTop, !scrollView.isDragging, !scrollView.isDecelerating {
+            scrollView.setContentOffset(
+                CGPoint(x: scrollView.contentOffset.x, y: -scrollView.adjustedContentInset.top),
+                animated: false
+            )
+        }
+    }
+
+    private func restoreReaderTopInset() {
+        let scrollView = readerInsetScrollView
+        let original = originalReaderTopInset
+        readerInsetScrollView = nil
+        originalReaderTopInset = nil
+        if let scrollView, let original { applyReaderTopInset(original, to: scrollView) }
+    }
+
+    private func applyReaderBottomInset(_ bottom: CGFloat, to scrollView: UIScrollView) {
+        guard scrollView.contentInset.bottom != bottom else { return }
+        var contentInset = scrollView.contentInset
+        contentInset.bottom = bottom
+        scrollView.contentInset = contentInset
+    }
+
+    private func restoreReaderBottomInset() {
+        let scrollView = readerBottomInsetScrollView
+        let original = originalReaderBottomInset
+        readerBottomInsetScrollView = nil
+        originalReaderBottomInset = nil
+        if let scrollView, let original { applyReaderBottomInset(original, to: scrollView) }
     }
 
     @MainActor
@@ -9922,6 +10285,9 @@ public class WebViewController: UIViewController {
 
     @MainActor
     func detachWebView() {
+        insetConfiguredWebView = nil
+        restoreReaderTopInset()
+        restoreReaderBottomInset()
         cancelPendingSnapshotBoundsAdjustment()
         NSLayoutConstraint.deactivate(webViewConstraints)
         webViewConstraints.removeAll()
@@ -10196,62 +10562,7 @@ public class WebViewController: UIViewController {
 #endif
 
 #if os(iOS)
-private func manabiCanUseSampledPageTopColorBackground() -> Bool {
-    let version = ProcessInfo.processInfo.operatingSystemVersion
-    if version.majorVersion > 26 {
-        return true
-    }
-    return version.majorVersion == 26 && version.minorVersion >= 1
-}
-
-private final class WebViewStringKeyPathObserver<Object: NSObject, Value>: NSObject {
-    private weak var object: Object?
-    private let keyPath: String
-    private let changeHandler: (Value?) -> Void
-    private var isInvalidated = false
-
-    init(object: Object, keyPath: String, changeHandler: @escaping (Value?) -> Void) {
-        self.object = object
-        self.keyPath = keyPath
-        self.changeHandler = changeHandler
-        super.init()
-        object.addObserver(self, forKeyPath: keyPath, options: [.new], context: nil)
-    }
-
-    func invalidate() {
-        guard !isInvalidated else { return }
-        isInvalidated = true
-        object?.removeObserver(self, forKeyPath: keyPath)
-    }
-
-    deinit {
-        invalidate()
-    }
-
-    override func observeValue(
-        forKeyPath keyPath: String?,
-        of object: Any?,
-        change: [NSKeyValueChangeKey: Any]?,
-        context: UnsafeMutableRawPointer?
-    ) {
-        guard self.keyPath == keyPath else { return }
-        changeHandler(change?[.newKey] as? Value)
-    }
-}
-
 extension WKWebView {
-    var sampledPageTopColor: UIColor? {
-        let selector = Selector("_sampl\("edPageTopC")olor")
-        guard responds(to: selector), let result = perform(selector) else {
-            return nil
-        }
-        return result.takeUnretainedValue() as? UIColor
-    }
-
-    var supportsSampledPageTopColor: Bool {
-        responds(to: Selector("_sampl\("edPageTopC")olor"))
-    }
-
     func underPageFallbackBackgroundColor(config: WebViewConfig) -> UIColor {
         UIColor(config.backgroundColor)
     }
@@ -10267,60 +10578,57 @@ extension WKWebView {
 
     @available(iOS 15.0, *)
     func applyUnderPageBackgroundColor(config: WebViewConfig, allowSampledPageTopColor: Bool = true) {
-        let canUseSampledColor = manabiCanUseSampledPageTopColorBackground()
-        let fallbackColor = UIColor(config.backgroundColor)
-        if config.usesSampledPageTopColorForUnderPageBackground, allowSampledPageTopColor {
-            if canUseSampledColor {
-                if let sampledPageTopColor {
-                    underPageBackgroundColor = sampledPageTopColor
-                }
-            } else {
-                underPageBackgroundColor = config.isOpaque ? .systemBackground : .clear
-            }
-        } else {
-            underPageBackgroundColor = fallbackColor
-        }
+        let color = resolvedUnderPageBackgroundColor(config: config, allowSampledPageTopColor: allowSampledPageTopColor)
+        underPageBackgroundColor = color ?? UIColor(config.backgroundColor)
     }
 
     func resolvedUnderPageBackgroundColor(config: WebViewConfig, allowSampledPageTopColor: Bool = true) -> UIColor? {
-        let fallbackColor = UIColor(config.backgroundColor)
-        guard config.usesSampledPageTopColorForUnderPageBackground else {
-            return fallbackColor
+        if config.usesSampledPageTopColorForUnderPageBackground, allowSampledPageTopColor,
+           let color = (self as? EnhancedWKWebView)?.sampledUnderPageColor {
+            return color
         }
-        guard allowSampledPageTopColor else {
-            return fallbackColor
-        }
-        guard manabiCanUseSampledPageTopColorBackground() else {
-            return config.isOpaque ? .systemBackground : .clear
-        }
-        return sampledPageTopColor
+        return UIColor(config.backgroundColor)
     }
 
-    func applyConfiguredBackgroundForReaderDocumentIfNeeded(config: WebViewConfig, reason: String) {
-        guard config.usesConfiguredBackgroundForReaderDocuments else { return }
-        let js = """
-        (function() {
-          const body = document.body;
-          return !!(body && (body.classList.contains('readability-mode') || body.dataset.isEbook === 'true'));
-        })()
-        """
-        evaluateJavaScript(js) { [weak self] result, _ in
-            guard let self, result as? Bool == true else { return }
-            let resolvedColor = UIColor(config.backgroundColor)
-            self.underPageBackgroundColor = resolvedColor
-            self.scrollView.backgroundColor = resolvedColor
-        }
-    }
+
 }
 
-extension WKWebViewConfiguration {
-    func enableManabiPageTopColorSampling() {
-        let selector = Selector("_setSa\("mpledPageTopColorMaxDiff")erence:")
-        guard responds(to: selector) else { return }
-        perform(selector, with: 5.0 as Double)
-    }
-}
 #endif
+
+/// Synchronous construction work, reported on the main actor after completion.
+/// `host` includes nested steps and callback delivery; durations are not additive.
+/// The observer does not participate in readiness.
+public struct WebViewConstructionTiming: Sendable {
+    public enum Step: String, Sendable {
+        case websiteDataStore
+        case configuration
+        case webView
+        case host
+        case initialConfiguration
+    }
+
+    public let step: Step
+    public let elapsedMilliseconds: Double
+
+    public init(step: Step, elapsedMilliseconds: Double) {
+        self.step = step
+        self.elapsedMilliseconds = elapsedMilliseconds
+    }
+}
+
+@MainActor
+private func measureWebViewConstruction<Result>(
+    _ step: WebViewConstructionTiming.Step,
+    onTiming: (@MainActor (WebViewConstructionTiming) -> Void)?,
+    operation: () -> Result
+) -> Result {
+    guard let onTiming else { return operation() }
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    let result = operation()
+    let elapsedMilliseconds = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
+    onTiming(WebViewConstructionTiming(step: step, elapsedMilliseconds: elapsedMilliseconds))
+    return result
+}
 
 public struct WebView {
     private let config: WebViewConfig
@@ -10348,9 +10656,12 @@ public struct WebView {
     let webViewPool: WebViewPool?
     let webViewPrewarmer: WebViewPrewarmer?
     let poolContentID: WebViewPoolContentID?
+    // A pool may retain this callback with its detached creation factory.
+    let onConstructionTiming: (@MainActor (WebViewConstructionTiming) -> Void)?
     //    let onWarm: (() async -> Void)?
     
     @Environment(\.webViewMessageHandlers) internal var webViewMessageHandlers
+    @Environment(\.scenePhase) private var scenePhase
     
     //    @State fileprivate var isWarm = false
     @State fileprivate var drawsBackground = false
@@ -10381,7 +10692,8 @@ public struct WebView {
                 webViewPool: WebViewPool? = nil,
                 webViewPrewarmer: WebViewPrewarmer? = nil,
                 poolContentID: WebViewPoolContentID? = nil,
-                lifecycleConfig: WebViewLifecycleConfig? = nil
+                lifecycleConfig: WebViewLifecycleConfig? = nil,
+                onConstructionTiming: (@MainActor (WebViewConstructionTiming) -> Void)? = nil
     ) {
         self.config = config
         _state = state
@@ -10409,6 +10721,7 @@ public struct WebView {
         self.webViewPrewarmer = webViewPrewarmer
         self.poolContentID = poolContentID
         self.lifecycleConfig = lifecycleConfig ?? .default
+        self.onConstructionTiming = onConstructionTiming
     }
     
     @MainActor
@@ -10520,6 +10833,7 @@ extension WebView: UIViewControllerRepresentable {
         controller: WebViewController,
         context: Context
     ) {
+        context.coordinator.updatePageTopColorScenePhase(scenePhase)
         context.coordinator.scheduleWebViewBinding(webView, paginationReason: "configure-webview")
         let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
         if context.coordinator.lastUserScriptsContentController !== webView.configuration.userContentController {
@@ -10545,10 +10859,7 @@ extension WebView: UIViewControllerRepresentable {
 #endif
         webView.isOpaque = config.isOpaque
         if #available(iOS 14.0, *) {
-            let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
-                ? (config.isOpaque ? .systemBackground : .clear)
-                : UIColor(config.backgroundColor)
+            let resolvedBackgroundColor: UIColor = UIColor(config.backgroundColor)
             webView.backgroundColor = resolvedBackgroundColor
         } else {
             webView.backgroundColor = .clear
@@ -10685,22 +10996,30 @@ extension WebView: UIViewControllerRepresentable {
 
     @MainActor
     public func makeUIViewController(context: Context) -> WebViewController {
-        // See: https://stackoverflow.com/questions/25200116/how-to-show-the-inspector-within-your-wkwebview-based-desktop-app
-        //        preferences.setValue(true, forKey: "developerExtrasEnabled")
-
-        let webView = makeWebView(config: config, coordinator: context.coordinator)
-        let controller = WebViewController(webView: webView)
-        configureWebView(webView, controller: controller, context: context)
-        context.coordinator.markSnapshotRestoreIfNeeded()
-        context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
-        installLifecycleCallbacks(on: controller, context: context)
-        return controller
+        measureWebViewConstruction(.host, onTiming: onConstructionTiming) {
+            let webView = makeWebView(config: config, coordinator: context.coordinator)
+            let controller = WebViewController(webView: webView)
+            measureWebViewConstruction(.initialConfiguration, onTiming: onConstructionTiming) {
+                controller.reservesWindowTopSafeAreaInObscuredInsets = config.reservesWindowTopSafeAreaInObscuredInsets
+                controller.reservesDocumentTopInset = config.reservesDocumentTopInset
+                controller.reservesDocumentBottomInset = config.reservesDocumentBottomInset
+                configureWebView(webView, controller: controller, context: context)
+                context.coordinator.markSnapshotRestoreIfNeeded()
+                context.coordinator.applyCachedSnapshotIfAvailable(controller: controller)
+                installLifecycleCallbacks(on: controller, context: context)
+            }
+            return controller
+        }
     }
     
     @MainActor
     public func updateUIViewController(_ controller: WebViewController, context: Context) {
         updateCoordinatorBindings(context: context)
+        context.coordinator.updatePageTopColorScenePhase(scenePhase)
         installLifecycleCallbacks(on: controller, context: context)
+        controller.reservesWindowTopSafeAreaInObscuredInsets = config.reservesWindowTopSafeAreaInObscuredInsets
+        controller.reservesDocumentTopInset = config.reservesDocumentTopInset
+        controller.reservesDocumentBottomInset = config.reservesDocumentBottomInset
 
         let nativeLookupHitTestingEnabled = config.nativeLookupHitTestingEnabled
         navigator.nativeLookupHitTesting.isEnabled = nativeLookupHitTestingEnabled
@@ -11212,52 +11531,56 @@ public final class WebViewHostNSView: NSView {
 extension WebView: NSViewRepresentable {
     @MainActor
     public func makeNSView(context: Context) -> WebViewHostNSView {
-        let createWebView = makeDetachedWebViewFactory(
-            config: config,
-            drawsBackground: drawsBackground
-        )
-        if let resolvedWebViewPool {
-            resolvedWebViewPool.setCreationClosureIfNeeded(createWebView)
-        }
-
-        let webView: EnhancedWKWebView
-        if let resolvedWebViewPool {
-            webView = resolvedWebViewPool.dequeue(
-                preferredContentID: poolContentID,
-                createIfNeeded: createWebView
+        measureWebViewConstruction(.host, onTiming: onConstructionTiming) {
+            let createWebView = makeDetachedWebViewFactory(
+                config: config,
+                drawsBackground: drawsBackground
             )
-        } else {
-            webView = createWebView()
-        }
-        context.coordinator.registerReturnOwner(for: webView, pool: resolvedWebViewPool)
+            if let resolvedWebViewPool {
+                resolvedWebViewPool.setCreationClosureIfNeeded(createWebView)
+            }
 
-        let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
-        applyCommonConfiguration(
-            webView: webView,
-            context: context,
-            resolvedContentRules: resolvedContentRules
-        )
-        // Binding a fresh navigator can synchronously flush a queued HTML/data
-        // navigation. Install scripts and their caller before that first load.
-        bindScriptCallerIfNeeded(to: webView, context: context)
-        installInitialMacUserScriptsAndBind(on: webView, coordinator: context.coordinator)
-        let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
-        webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
-        if #available(macOS 11.0, *) {
-            webView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
-        } else {
-            webView.layer?.backgroundColor = NSColor.clear.cgColor
-        }
-        if #available(macOS 13.3, *) {
-            webView.isInspectable = true
-        }
-        
-        refreshDarkModeSetting(webView: webView)
+            let webView: EnhancedWKWebView
+            if let resolvedWebViewPool {
+                webView = resolvedWebViewPool.dequeue(
+                    preferredContentID: poolContentID,
+                    createIfNeeded: createWebView
+                )
+            } else {
+                webView = createWebView()
+            }
+            context.coordinator.registerReturnOwner(for: webView, pool: resolvedWebViewPool)
 
-        let hostView = WebViewHostNSView(webView: webView)
-        navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
-        hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
-        return hostView
+            return measureWebViewConstruction(.initialConfiguration, onTiming: onConstructionTiming) {
+                let resolvedContentRules = navigator.peekContentRulesBypass(for: webView) ? nil : config.contentRules
+                applyCommonConfiguration(
+                    webView: webView,
+                    context: context,
+                    resolvedContentRules: resolvedContentRules
+                )
+                // Binding a fresh navigator can synchronously flush a queued HTML/data
+                // navigation. Install scripts and their caller before that first load.
+                bindScriptCallerIfNeeded(to: webView, context: context)
+                installInitialMacUserScriptsAndBind(on: webView, coordinator: context.coordinator)
+                let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
+                webView.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+                if #available(macOS 11.0, *) {
+                    webView.layer?.backgroundColor = NSColor(config.backgroundColor).cgColor
+                } else {
+                    webView.layer?.backgroundColor = NSColor.clear.cgColor
+                }
+                if #available(macOS 13.3, *) {
+                    webView.isInspectable = true
+                }
+
+                refreshDarkModeSetting(webView: webView)
+
+                let hostView = WebViewHostNSView(webView: webView)
+                navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
+                hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
+                return hostView
+            }
+        }
     }
 
     @MainActor
@@ -11450,10 +11773,11 @@ extension WebView: NSViewRepresentable {
 #endif
 
 extension WebView {
-    /// Returns a pool-safe factory that captures only WebKit creation inputs.
+    /// Returns a pool-safe factory that captures only WebKit creation inputs
+    /// and the optional construction timing callback.
     ///
     /// The pool can outlive the SwiftUI `WebView` value that installed it. Capturing
-    /// that value here would also capture its navigator, bindings, callbacks, and
+    /// that value here would also capture its navigator, bindings, other callbacks, and
     /// `WebViewPrewarmer`, creating a retain cycle through the prewarmer's pool.
     @MainActor
     internal func makeDetachedWebViewFactory(
@@ -11461,47 +11785,48 @@ extension WebView {
         drawsBackground: Bool = false
     ) -> () -> EnhancedWKWebView {
         let applicationNameForUserAgent = userAgent
-        let resolvedWebsiteDataStore = websiteDataStore ?? WKWebsiteDataStore.default()
+        let constructionTiming = onConstructionTiming
+        let resolvedWebsiteDataStore = measureWebViewConstruction(.websiteDataStore, onTiming: constructionTiming) {
+            websiteDataStore ?? WKWebsiteDataStore.default()
+        }
         let resolvedSchemeHandlers = schemeHandlers
 #if os(macOS)
         let resolvedDrawsBackground = config.isOpaque ? drawsBackground : false
 #endif
 
         return {
-            let preferences = WKWebpagePreferences()
-            preferences.allowsContentJavaScript = config.javaScriptEnabled
+            let configuration = measureWebViewConstruction(.configuration, onTiming: constructionTiming) {
+                let preferences = WKWebpagePreferences()
+                preferences.allowsContentJavaScript = config.javaScriptEnabled
 
-            let configuration = WKWebViewConfiguration()
-            configuration.applicationNameForUserAgent = applicationNameForUserAgent
-            configuration.defaultWebpagePreferences = preferences
-            configuration.websiteDataStore = resolvedWebsiteDataStore
-            configuration.processPool = webViewProcessPool
-            configuration.mediaTypesRequiringUserActionForPlayback =
-                config.mediaTypesRequiringUserActionForPlayback
+                let configuration = WKWebViewConfiguration()
+                configuration.applicationNameForUserAgent = applicationNameForUserAgent
+                configuration.defaultWebpagePreferences = preferences
+                configuration.websiteDataStore = resolvedWebsiteDataStore
+                configuration.processPool = webViewProcessPool
+                configuration.mediaTypesRequiringUserActionForPlayback =
+                    config.mediaTypesRequiringUserActionForPlayback
 
 #if os(iOS)
-            if config.usesSampledPageTopColorForUnderPageBackground,
-               manabiCanUseSampledPageTopColorBackground() {
-                configuration.enableManabiPageTopColorSampling()
-            }
-            configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
-            configuration.dataDetectorTypes = config.dataDetectorsEnabled ? [.all] : []
+                configuration.allowsInlineMediaPlayback = config.allowsInlineMediaPlayback
+                configuration.dataDetectorTypes = config.dataDetectorsEnabled ? [.all] : []
 #elseif os(macOS)
-            configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
+                configuration.setValue(resolvedDrawsBackground, forKey: "drawsBackground")
 #endif
 
-            for (urlSchemeHandler, urlScheme) in resolvedSchemeHandlers {
-                configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+                for (urlSchemeHandler, urlScheme) in resolvedSchemeHandlers {
+                    configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
+                }
+                return configuration
             }
 
-            let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
+            let webView = measureWebViewConstruction(.webView, onTiming: constructionTiming) {
+                EnhancedWKWebView(frame: .zero, configuration: configuration)
+            }
 #if os(iOS)
             webView.isOpaque = config.isOpaque
             if #available(iOS 14.0, *) {
-                let resolvedBackgroundColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                    && !manabiCanUseSampledPageTopColorBackground()
-                    ? (config.isOpaque ? .systemBackground : .clear)
-                    : UIColor(config.backgroundColor)
+                let resolvedBackgroundColor: UIColor = UIColor(config.backgroundColor)
                 webView.backgroundColor = resolvedBackgroundColor
                 if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
                     config: config,
@@ -11646,13 +11971,17 @@ extension WebView {
         coordinator: WebViewCoordinator
     ) {
         let configuredColor = UIColor(config.backgroundColor)
+        let readerRenderReady = config.usesConfiguredBackgroundForReaderDocuments && state.hasReaderRenderReady
         guard coordinator.lastVisualConfigurationWebView !== webView
                 || coordinator.lastVisualConfigurationColor?.isEqual(configuredColor) != true
                 || coordinator.lastVisualConfigurationIsOpaque != config.isOpaque
+                || coordinator.lastVisualConfigurationPageZoom != config.pageZoom
                 || coordinator.lastVisualConfigurationUsesSampledTopColor
                     != config.usesSampledPageTopColorForUnderPageBackground
+                || coordinator.lastVisualConfigurationSampleMaxDifference != config.sampledPageTopColorMaxDifference
                 || coordinator.lastVisualConfigurationUsesReaderBackground
                     != config.usesConfiguredBackgroundForReaderDocuments
+                || coordinator.lastVisualConfigurationReaderRenderReady != readerRenderReady
                 || coordinator.lastVisualConfigurationDarkModeSetting
                     != config.darkModeSetting else {
             return
@@ -11660,19 +11989,22 @@ extension WebView {
         coordinator.lastVisualConfigurationWebView = webView
         coordinator.lastVisualConfigurationColor = configuredColor
         coordinator.lastVisualConfigurationIsOpaque = config.isOpaque
+        coordinator.lastVisualConfigurationPageZoom = config.pageZoom
+        coordinator.lastVisualConfigurationSampleMaxDifference = config.sampledPageTopColorMaxDifference
         coordinator.lastVisualConfigurationUsesSampledTopColor =
             config.usesSampledPageTopColorForUnderPageBackground
         coordinator.lastVisualConfigurationUsesReaderBackground =
             config.usesConfiguredBackgroundForReaderDocuments
+        coordinator.lastVisualConfigurationReaderRenderReady = readerRenderReady
         coordinator.lastVisualConfigurationDarkModeSetting = config.darkModeSetting
+        // A page can enter Reader mode without a navigation or geometry change.
+        // Samples belong to the previous presentation until the new one is checked.
+        (webView as? EnhancedWKWebView)?.sampledUnderPageColor = nil
         webView.isOpaque = config.isOpaque
         webView.scrollView.isOpaque = config.isOpaque
 
         if #available(iOS 14.0, *) {
-            let resolvedColor: UIColor = config.usesSampledPageTopColorForUnderPageBackground
-                && !manabiCanUseSampledPageTopColorBackground()
-                ? (config.isOpaque ? .systemBackground : .clear)
-                : configuredColor
+            let resolvedColor: UIColor = configuredColor
             webView.backgroundColor = resolvedColor
             if let resolvedUnderPageColor = webView.resolvedUnderPageBackgroundColor(
                 config: config,
@@ -11681,7 +12013,7 @@ extension WebView {
                 webView.scrollView.backgroundColor = resolvedUnderPageColor
             }
             containerView?.backgroundColor = config.isOpaque ? nil : resolvedColor
-            webView.applyConfiguredBackgroundForReaderDocumentIfNeeded(config: config, reason: "visual.apply")
+            coordinator.schedulePageTopColorSampling(webView)
         } else {
             let resolvedColor: UIColor = config.isOpaque ? .systemBackground : .clear
             webView.backgroundColor = resolvedColor
@@ -11813,7 +12145,10 @@ extension WebView {
         } else {
             scripts = scripts.filter { $0.allowedDomains.isEmpty }
         }
-        let allScripts = Self.systemScripts + scripts
+        let originalScripts = Self.systemScripts + scripts
+        let allScripts = isReaderOwnedArticleDocument(domain)
+            ? originalScripts.map { $0.restrictingToMainFrame() }
+            : originalScripts
         let installedScriptsSignature = allScripts
             .map(\.configurationSignatureComponent)
             .joined(separator: "||")

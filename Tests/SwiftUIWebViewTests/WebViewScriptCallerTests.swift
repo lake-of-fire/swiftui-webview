@@ -135,6 +135,7 @@ private final class RecordingLoadWebView: EnhancedWKWebView {
     }
 
     var simulatedURL: URL?
+    var simulatedIsLoading: Bool?
     private(set) var loadedRequests = [URLRequest]()
     private(set) var loadedHTML = [RecordedHTMLLoad]()
     private(set) var loadedData = [RecordedDataLoad]()
@@ -142,6 +143,8 @@ private final class RecordingLoadWebView: EnhancedWKWebView {
     override var url: URL? {
         simulatedURL ?? super.url
     }
+
+    override var isLoading: Bool { simulatedIsLoading ?? super.isLoading }
 
     override func load(_ request: URLRequest) -> WKNavigation? {
         loadedRequests.append(request)
@@ -183,6 +186,22 @@ private func drainMainDispatchQueue() async {
 
 @MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    @MainActor
+    func testUnusedNativePaginationRemainsDisabledAndHasNoPrivatePageCount() throws {
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 400, height: 600))
+        let controller = WebViewPaginationController()
+        _ = controller.attach(webView: webView)
+        let state = try controller.apply(
+            WebViewPaginationConfiguration(mode: .leftToRight, storedPageLength: 400),
+            reason: "test.disabled-native-pagination"
+        )
+        XCTAssertEqual(state.desiredConfiguration, .disabled)
+        XCTAssertNil(state.appliedConfiguration)
+        XCTAssertNil(state.pageCount)
+        XCTAssertFalse(state.isAppliedToMountedHost)
+        XCTAssertNil(try controller.refreshReadback(reason: "test.no-private-readback").pageCount)
+    }
+
     private func waitForRecordedFallbackRequest(
         on webView: RecordingLoadWebView
     ) async throws {
@@ -1027,6 +1046,73 @@ final class WebViewScriptCallerTests: XCTestCase {
         ))
     }
 
+    func testReaderDocumentURLObservationWaitsForActualCommit() throws {
+        let publisher = try XCTUnwrap(URL(string: "https://example.com/article"))
+        let first = try XCTUnwrap(URL(string: "internal://local/reader?reader-url=https%3A%2F%2Fexample.com%2Farticle&reader-document=first"))
+        let second = try XCTUnwrap(URL(string: "internal://local/reader?reader-url=https%3A%2F%2Fexample.com%2Farticle&reader-document=second"))
+        for (previous, next) in [(publisher, first), (first, second), (second, publisher)] {
+            var state = WebViewState.empty
+            state.pageURL = previous
+            state.hasReaderRenderReady = true
+            var observedURLs = [URL]()
+            var committedURLs = [URL]()
+            let navigator = WebViewNavigator()
+            navigator.shouldLoadFallbackOnAttach = false
+            let model = WebView(
+                navigator: navigator,
+                state: Binding(get: { state }, set: { state = $0 }),
+                onNavigationCommitted: { committedURLs.append($0.pageURL) },
+                onURLChanged: { observedURLs.append($0.pageURL) }
+            )
+            let coordinator = model.makeCoordinatorForTesting()
+            let webView = RecordingLoadWebView(frame: .zero, configuration: WKWebViewConfiguration())
+            webView.simulatedURL = next
+            webView.simulatedIsLoading = true
+            coordinator.setWebView(webView)
+
+            // WKWebView.url can change before didStartProvisionalNavigation.
+            // The outgoing document must not initialize the incoming article.
+            XCTAssertFalse(state.isProvisionallyNavigating)
+            coordinator.handleObservedURLChange(next, from: webView, receiptSequence: 1)
+            XCTAssertEqual(state.pageURL, previous)
+            XCTAssertTrue(observedURLs.isEmpty)
+            XCTAssertTrue(committedURLs.isEmpty)
+
+            coordinator.webView(webView, didCommit: nil)
+            XCTAssertEqual(state.pageURL, next)
+            XCTAssertEqual(committedURLs, [next])
+            coordinator.handleObservedURLChange(next, from: webView, receiptSequence: 2)
+            XCTAssertEqual(observedURLs, [next], "The commit publishes the URL once")
+        }
+    }
+
+    func testReaderFragmentPublicationDoesNotAdoptChildLoadingOrAnotherPresentation() throws {
+        let url = try XCTUnwrap(URL(string: "internal://local/reader?reader-url=https%3A%2F%2Fpublisher.example%2Farticle&reader-document=first#one"))
+        var components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        components.fragment = "two"
+        let target = try XCTUnwrap(components.url)
+        XCTAssertTrue(readerArticleNavigationKeepsDocument(from: url, to: target, type: .linkActivated))
+        XCTAssertFalse(readerArticleNavigationKeepsDocument(from: url, to: target, type: .reload))
+        XCTAssertFalse(readerArticleNavigationKeepsDocument(from: url, to: target, type: .formSubmitted))
+        let another = try XCTUnwrap(URL(string: target.absoluteString.replacingOccurrences(of: "reader-document=first", with: "reader-document=second")))
+        XCTAssertFalse(readerArticleURLsShareDocument(url, another))
+        var state = WebViewState.empty
+        state.pageURL = url; state.hasReaderRenderReady = true; state.pageTitle = "Article"
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: Binding(get: { state }, set: { state = $0 }))
+        let coordinator = model.makeCoordinatorForTesting()
+        let webView = RecordingLoadWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView.simulatedURL = target; webView.simulatedIsLoading = true
+        coordinator.setWebView(webView)
+        coordinator.handleObservedURLChange(target, from: webView, receiptSequence: 1)
+        XCTAssertEqual(state.pageURL, target)
+        XCTAssertTrue(state.hasReaderRenderReady)
+        XCTAssertFalse(state.isLoading)
+        XCTAssertNil(state.loadingProgress)
+        XCTAssertEqual(state.pageTitle, "Article")
+    }
+
     func testMountedDocumentContextRejectsReplacementAndNewNavigationGeneration() {
         let navigator = WebViewNavigator()
         let webViewModel = WebView(
@@ -1366,14 +1452,33 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertEqual(invalidationReason, .navigationCommitted)
     }
 
+    func testBrowserProvisionalNavigationRetiresDeferredRecoveryIntent() {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        let mountedWebView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        coordinator.scheduleWebViewBinding(mountedWebView, paginationReason: "test.recoveryIntent")
+        let mayRecover = navigator.captureNavigationIntent()
+        XCTAssertTrue(mayRecover())
+
+        // Browser-initiated navigation never calls navigator.load().
+        coordinator.webView(mountedWebView, didStartProvisionalNavigation: nil)
+
+        XCTAssertFalse(mayRecover())
+        XCTAssertEqual(navigator.debugLoadSnapshot.lastRequestURL, "nil")
+    }
+
     func testWebContentProcessTerminationInvalidatesFrameContextAndNotifiesOwner() {
         let caller = WebViewScriptCaller()
         let navigator = WebViewNavigator()
+        var publishedState = WebViewState.empty
+        publishedState.markReaderRenderReady()
         var terminatedState: WebViewState?
         var invalidationReason: WebViewDocumentContextInvalidationReason?
         let webViewModel = WebView(
             navigator: navigator,
-            state: .constant(.empty),
+            state: Binding(get: { publishedState }, set: { publishedState = $0 }),
             scriptCaller: caller,
             onDocumentContextInvalidated: { state, reason in
                 terminatedState = state
@@ -1396,6 +1501,8 @@ final class WebViewScriptCallerTests: XCTestCase {
         )
         XCTAssertNotNil(terminatedState)
         XCTAssertFalse(terminatedState?.isLoading ?? true)
+        XCTAssertFalse(terminatedState?.hasReaderRenderReady ?? true)
+        XCTAssertFalse(publishedState.hasReaderRenderReady)
         XCTAssertEqual(invalidationReason, .webContentProcessTerminated)
     }
 
@@ -3111,6 +3218,31 @@ final class WebViewScriptCallerTests: XCTestCase {
         XCTAssertTrue(
             outgoingReplacementWebView.persistedWindowAttachmentCallbackOwner === outgoingCoordinator
         )
+    }
+
+    func testDisablingFallbackCancelsAlreadyScheduledBlankNavigation() async throws {
+        let navigator = WebViewNavigator()
+        navigator.attachFallbackDelayNanoseconds = 5_000_000
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        let webView = RecordingLoadWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480),
+            configuration: WKWebViewConfiguration()
+        )
+#if os(macOS)
+        let host = NSView(frame: webView.frame)
+#else
+        let host = UIView(frame: webView.frame)
+#endif
+        host.addSubview(webView)
+        coordinator.setWebView(webView)
+        // Reader configures this after mounting. The older task must stay
+        // cancelled even if another host subsequently enables fallbacks.
+        navigator.shouldLoadFallbackOnAttach = false
+        navigator.shouldLoadFallbackOnAttach = true
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(webView.loadedRequests.isEmpty)
+        withExtendedLifetime(host) {}
     }
 
     func testAcceptedPooledHTMLLoadCancelsScheduledAttachFallback() async throws {

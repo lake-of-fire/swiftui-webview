@@ -16,26 +16,35 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         guard navigator.webView?.scrollView === scrollView else { return }
         publishScrollBottomState(for: scrollView)
         guard !decelerate else { return }
+        if let webView = navigator.webView { schedulePageTopColorSampling(webView) }
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
     }
 
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         guard navigator.webView?.scrollView === scrollView else { return }
+        if let webView = navigator.webView { schedulePageTopColorSampling(webView) }
         publishScrollBottomState(for: scrollView)
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
     }
 
+    public func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
+        schedulePageTopColorSampling(webView)
+    }
+
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard navigator.webView?.scrollView === scrollView else { return }
         publishScrollBottomState(for: scrollView)
+        if let webView = navigator.webView { schedulePageTopColorSampling(webView) }
         guard scrollView.isTracking || scrollView.isDragging else { return }
 
-        let currentOffset = scrollView.contentOffset
+        let currentOffset = navigationScrollOffset(scrollView.contentOffset, in: scrollView)
+        let previousOffset = navigationScrollOffset(lastContentOffset, in: scrollView)
         let threshold: CGFloat = accumulatedScrollOffset > 0 ? 50.0 : 10.0
-        let deltaX = currentOffset.x - lastContentOffset.x
-        let deltaY = currentOffset.y - lastContentOffset.y
+        let deltaX = currentOffset.x - previousOffset.x
+        let deltaY = currentOffset.y - previousOffset.y
         let scrollDifference = resolvedScrollDifference(deltaX: deltaX, deltaY: deltaY)
         accumulatedScrollOffset += scrollDifference
 
@@ -64,6 +73,19 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         }
 
         lastContentOffset = currentOffset
+    }
+
+    /// Rubber-banding and shrinking sheet clearance are not reverse gestures.
+    /// Clamp both samples to the current range so a changed inset cannot reveal
+    /// navigation by moving an old bottom offset back into the document.
+    internal func navigationScrollOffset(_ offset: CGPoint, in scrollView: UIScrollView) -> CGPoint {
+        guard config.reservesDocumentBottomInset, navigationScrollAxis == .vertical else { return offset }
+        let minimumY = -scrollView.adjustedContentInset.top
+        let maximumY = max(
+            minimumY,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+        )
+        return CGPoint(x: offset.x, y: min(maximumY, max(minimumY, offset.y)))
     }
 
     @MainActor
