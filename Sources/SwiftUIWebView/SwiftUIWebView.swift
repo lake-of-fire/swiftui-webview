@@ -2619,58 +2619,21 @@ public final class WebViewPaginationController {
         _ configuration: WebViewPaginationConfiguration,
         reason: String
     ) throws -> WebViewPaginationState {
-        desiredConfiguration = configuration
+        // Native WebKit pagination is unused. Keep sidecar/runtime spread state only.
+        desiredConfiguration = .disabled
+        lastAppliedConfiguration = nil
+        lastAppliedIdentity = nil
+        lastAppliedHostIdentifier = nil
+        lastPageCount = nil
         lastApplyReason = reason
         lastUpdatedAt = Date()
-
-        guard let webView else {
-            return currentState(reason: reason)
-        }
-
-        let hostIdentifier = Self.hostIdentifier(for: webView)
-        let resolved = configuration.resolvingEffectivePageLength(using: webView.bounds.size)
-        let identity = resolved.structuralIdentity(using: webView.bounds.size)
-        let shouldApply = identity != lastAppliedIdentity || hostIdentifier != lastAppliedHostIdentifier
-        if shouldApply {
-            try applySelectors(resolved, to: webView)
-            lastAppliedConfiguration = resolved
-            lastAppliedIdentity = identity
-            lastAppliedHostIdentifier = hostIdentifier
-            webViewPaginationDebugLog(
-                "apply",
-                [
-                    "host": hostIdentifier,
-                    "reason": reason,
-                    "mode": resolved.mode.rawValue,
-                    "storedPageLength": resolved.storedPageLength,
-                    "effectivePageLength": resolved.effectivePageLength,
-                    "gapBetweenPages": resolved.gapBetweenPages,
-                    "behavesLikeColumns": resolved.behavesLikeColumns,
-                    "layoutSize": "\(resolved.layoutSize.width)x\(resolved.layoutSize.height)"
-                ]
-            )
-        } else {
-            webViewPaginationDebugLog(
-                "apply.skipped",
-                [
-                    "host": hostIdentifier,
-                    "reason": reason,
-                    "mode": resolved.mode.rawValue
-                ]
-            )
-        }
-        lastPageCount = try queryPageCount(on: webView)
         return currentState(reason: reason)
     }
 
     public func refreshReadback(reason: String) throws -> WebViewPaginationState {
+        lastPageCount = nil
         lastApplyReason = reason
         lastUpdatedAt = Date()
-        if let webView {
-            lastPageCount = try queryPageCount(on: webView)
-        } else {
-            lastPageCount = nil
-        }
         return currentState(reason: reason)
     }
 
@@ -2799,95 +2762,97 @@ public final class WebViewPaginationController {
         String(describing: ObjectIdentifier(webView))
     }
 
-    private func applySelectors(_ configuration: WebViewPaginationConfiguration, to webView: WKWebView) throws {
-        try setInt(configuration.mode.rawValue, selectorName: PrivatePaginationSelector.setPaginationMode.name, on: webView)
-        try setBool(configuration.behavesLikeColumns, selectorName: PrivatePaginationSelector.setPaginationBehavesLikeColumns.name, on: webView)
-        try setDouble(configuration.storedPageLength, selectorName: PrivatePaginationSelector.setPageLength.name, on: webView)
-        try setDouble(configuration.gapBetweenPages, selectorName: PrivatePaginationSelector.setGapBetweenPages.name, on: webView)
-    }
+    // Unused private WebKit pagination implementation retained for reference.
+//     private func applySelectors(_ configuration: WebViewPaginationConfiguration, to webView: WKWebView) throws {
+//         try setInt(configuration.mode.rawValue, selectorName: PrivatePaginationSelector.setPaginationMode.name, on: webView)
+//         try setBool(configuration.behavesLikeColumns, selectorName: PrivatePaginationSelector.setPaginationBehavesLikeColumns.name, on: webView)
+//         try setDouble(configuration.storedPageLength, selectorName: PrivatePaginationSelector.setPageLength.name, on: webView)
+//         try setDouble(configuration.gapBetweenPages, selectorName: PrivatePaginationSelector.setGapBetweenPages.name, on: webView)
+//     }
+//
+//     private func queryPageCount(on webView: WKWebView) throws -> Int {
+//         let selectorName = PrivatePaginationSelector.pageCount.name
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector) -> Int
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         return function(webView, selector)
+//     }
+//
+//     private func setInt(_ value: Int, selectorName: String, on webView: WKWebView) throws {
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector, Int) -> Void
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         function(webView, selector, value)
+//     }
+//
+//     private func setBool(_ value: Bool, selectorName: String, on webView: WKWebView) throws {
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector, Bool) -> Void
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         function(webView, selector, value)
+//     }
+//
+//     private func setDouble(_ value: CGFloat, selectorName: String, on webView: WKWebView) throws {
+//         let selector = Selector(selectorName)
+//         guard webView.responds(to: selector) else {
+//             throw WebViewPaginationError.missingSelector(selectorName)
+//         }
+//         typealias Function = @convention(c) (AnyObject, Selector, Double) -> Void
+//         let implementation = webView.method(for: selector)
+//         let function = unsafeBitCast(implementation, to: Function.self)
+//         function(webView, selector, Double(value))
+//     }
+//
+//     private enum PrivatePaginationSelector {
+//         case setPaginationMode
+//         case setPaginationBehavesLikeColumns
+//         case setPageLength
+//         case setGapBetweenPages
+//         case pageCount
+//
+//         var name: String {
+//             switch self {
+//             case .setPaginationMode:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 77, 111, 100, 101, 58
+//                 ])
+//             case .setPaginationBehavesLikeColumns:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 66, 101, 104, 97, 118, 101,
+//                     115, 76, 105, 107, 101, 67, 111, 108, 117, 109, 110, 115, 58
+//                 ])
+//             case .setPageLength:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 80, 97, 103, 101, 76, 101, 110, 103, 116, 104, 58
+//                 ])
+//             case .setGapBetweenPages:
+//                 return Self.decode([
+//                     95, 115, 101, 116, 71, 97, 112, 66, 101, 116, 119, 101, 101, 110, 80, 97, 103, 101, 115, 58
+//                 ])
+//             case .pageCount:
+//                 return Self.decode([
+//                     95, 112, 97, 103, 101, 67, 111, 117, 110, 116
+//                 ])
+//             }
+//         }
+//
+//         private static func decode(_ codeUnits: [UInt8]) -> String {
+//             String(decoding: codeUnits, as: UTF8.self)
+//         }
+//     }
 
-    private func queryPageCount(on webView: WKWebView) throws -> Int {
-        let selectorName = PrivatePaginationSelector.pageCount.name
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector) -> Int
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        return function(webView, selector)
-    }
-
-    private func setInt(_ value: Int, selectorName: String, on webView: WKWebView) throws {
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector, Int) -> Void
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(webView, selector, value)
-    }
-
-    private func setBool(_ value: Bool, selectorName: String, on webView: WKWebView) throws {
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector, Bool) -> Void
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(webView, selector, value)
-    }
-
-    private func setDouble(_ value: CGFloat, selectorName: String, on webView: WKWebView) throws {
-        let selector = Selector(selectorName)
-        guard webView.responds(to: selector) else {
-            throw WebViewPaginationError.missingSelector(selectorName)
-        }
-        typealias Function = @convention(c) (AnyObject, Selector, Double) -> Void
-        let implementation = webView.method(for: selector)
-        let function = unsafeBitCast(implementation, to: Function.self)
-        function(webView, selector, Double(value))
-    }
-
-    private enum PrivatePaginationSelector {
-        case setPaginationMode
-        case setPaginationBehavesLikeColumns
-        case setPageLength
-        case setGapBetweenPages
-        case pageCount
-
-        var name: String {
-            switch self {
-            case .setPaginationMode:
-                return Self.decode([
-                    95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 77, 111, 100, 101, 58
-                ])
-            case .setPaginationBehavesLikeColumns:
-                return Self.decode([
-                    95, 115, 101, 116, 80, 97, 103, 105, 110, 97, 116, 105, 111, 110, 66, 101, 104, 97, 118, 101,
-                    115, 76, 105, 107, 101, 67, 111, 108, 117, 109, 110, 115, 58
-                ])
-            case .setPageLength:
-                return Self.decode([
-                    95, 115, 101, 116, 80, 97, 103, 101, 76, 101, 110, 103, 116, 104, 58
-                ])
-            case .setGapBetweenPages:
-                return Self.decode([
-                    95, 115, 101, 116, 71, 97, 112, 66, 101, 116, 119, 101, 101, 110, 80, 97, 103, 101, 115, 58
-                ])
-            case .pageCount:
-                return Self.decode([
-                    95, 112, 97, 103, 101, 67, 111, 117, 110, 116
-                ])
-            }
-        }
-
-        private static func decode(_ codeUnits: [UInt8]) -> String {
-            String(decoding: codeUnits, as: UTF8.self)
-        }
-    }
 }
 
 internal struct WebViewMutationGenerationGate {
@@ -7952,10 +7917,12 @@ public class WebViewScriptCaller: /*Equatable,*/ Identifiable, ObservableObject 
     private var lastKnownMainFrame: WKFrameInfo?
     private var frameContextGeneration: UInt64 = 0
 
+#if DEBUG
     @MainActor
     var frameContextGenerationForTesting: UInt64 {
         frameContextGeneration
     }
+#endif
     
     //    public static func == (lhs: WebViewScriptCaller, rhs: WebViewScriptCaller) -> Bool {
     //        return lhs.id == rhs.id
@@ -11046,12 +11013,14 @@ public struct WebView {
         makeCoordinator(messageHandlers: webViewMessageHandlers)
     }
 
+#if DEBUG
     @MainActor
     func makeCoordinatorForTesting(
         messageHandlers: WebViewMessageHandlers = .init()
     ) -> WebViewCoordinator {
         makeCoordinator(messageHandlers: messageHandlers)
     }
+#endif
 
     @MainActor
     private func makeCoordinator(
