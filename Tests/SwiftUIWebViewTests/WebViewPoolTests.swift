@@ -671,6 +671,64 @@ final class WebViewPoolTests: XCTestCase {
         XCTAssertNil(gate.readyContentID)
     }
 
+    func testNativeReceiptIsConsumedByOnlyItsFirstPolicy() {
+        let navigation = NSObject()
+        var gate = WebViewPoolContentNavigationGate<NSObject>()
+        gate.beginUnkeyedNavigation(navigation: navigation)
+        XCTAssertTrue(gate.takeNativeNavigationPolicyReceipt())
+        XCTAssertFalse(gate.takeNativeNavigationPolicyReceipt())
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: navigation), .current)
+    }
+
+    func testReceiptlessPolicyRetiresPredecessorBeforeProvisionalStart() {
+        let predecessor = NSObject()
+        let replacement = NSObject()
+        var gate = WebViewPoolContentNavigationGate<NSObject>()
+        gate.beginUnkeyedNavigation(navigation: predecessor)
+        gate.handleProvisionalNavigationStarted(predecessor)
+        XCTAssertFalse(gate.takeNativeNavigationPolicyReceipt())
+        gate.beginReceiptlessNavigationPolicy()
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: predecessor), .stale)
+        XCTAssertEqual(gate.handleProvisionalNavigationStarted(replacement), .current)
+        gate.handleServerRedirect(predecessor)
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: predecessor), .stale)
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: replacement), .current)
+    }
+
+    func testExactServerRedirectRestoresDisplacedKeyedReceipt() {
+        let navigation = NSObject()
+        let contentID = WebViewPoolContentID("redirected")
+        var gate = WebViewPoolContentNavigationGate<NSObject>()
+        gate.beginKeyedNavigation(contentID: contentID, navigation: navigation)
+        XCTAssertTrue(gate.takeNativeNavigationPolicyReceipt())
+        gate.handleProvisionalNavigationStarted(navigation)
+        gate.beginReceiptlessNavigationPolicy()
+        gate.handleServerRedirect(navigation)
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: navigation), .current)
+        XCTAssertEqual(gate.pendingContentID, contentID)
+        XCTAssertTrue(gate.handleNavigationFinished(navigation))
+        XCTAssertEqual(gate.readyContentID, contentID)
+    }
+
+    func testCancellationAndNewNativeRequestPreventRedirectResurrection() {
+        for cancels in [true, false] {
+            let predecessor = NSObject()
+            let replacement = NSObject()
+            var gate = WebViewPoolContentNavigationGate<NSObject>()
+            gate.beginUnkeyedNavigation(navigation: predecessor)
+            gate.handleProvisionalNavigationStarted(predecessor)
+            gate.beginReceiptlessNavigationPolicy()
+            if cancels { gate.cancelPendingNavigation() }
+            else { gate.beginUnkeyedNavigation(navigation: replacement) }
+            gate.handleServerRedirect(predecessor)
+            XCTAssertEqual(gate.navigationCallbackDisposition(for: predecessor), .stale)
+            if !cancels {
+                XCTAssertEqual(gate.navigationCallbackDisposition(for: replacement), .current)
+                XCTAssertTrue(gate.takeNativeNavigationPolicyReceipt())
+            }
+        }
+    }
+
     func testKeyedProvisionalNavigationKeepsItsPendingIdentity() {
         let contentID = WebViewPoolContentID("page-2")
         let navigation = NSObject()

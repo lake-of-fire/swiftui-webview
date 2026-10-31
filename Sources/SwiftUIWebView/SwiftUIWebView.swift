@@ -262,6 +262,27 @@ func readerArticleNavigationKeepsDocument(from current: URL?, to target: URL?, t
     return current?.fragment != target?.fragment || (type == .linkActivated && target?.fragment != nil)
 }
 
+/// A fragment traversal keeps the current document even when WebKit initiates
+/// it through location or its built-in history gesture rather than a link.
+func pageInitiatedNavigationReplacesDocument(from current: URL?, to target: URL?, type: WKNavigationType) -> Bool {
+    switch type {
+    case .linkActivated, .backForward, .other:
+        if let current, let target,
+           var source = URLComponents(url: current, resolvingAgainstBaseURL: false),
+           var destination = URLComponents(url: target, resolvingAgainstBaseURL: false) {
+            source.fragment = nil
+            destination.fragment = nil
+            if source == destination,
+               current.fragment != target.fragment || (type == .linkActivated && target.fragment != nil) {
+                return false
+            }
+        }
+        return true
+    default:
+        return true
+    }
+}
+
 /// EPUB owns a different multi-frame trust boundary. This policy applies only
 /// to generated Readability documents, whose remote children are unprivileged.
 func readerArticleAdmitsFrameMessage(documentURL: URL?, isMainFrame: Bool) -> Bool {
@@ -5095,6 +5116,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
             return
         }
+        restoreCommittedUserScriptDomain(on: webView)
         invalidatePageStateExtraction()
         navigator.clearActiveInternalReaderLoadSignal()
         navigator.cancelReaderLoadHeartbeat(reason: "didFailProvisionalNavigation")
@@ -5173,6 +5195,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
             return
         }
+        restoreCommittedUserScriptDomain(on: webView)
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = false
@@ -5224,6 +5247,13 @@ extension WebViewCoordinator: WKNavigationDelegate {
            enhancedWebView.admitNavigationCallback(navigation) == .stale {
             return
         }
+        if let enhancedWebView = webView as? EnhancedWKWebView {
+            enhancedWebView.userScriptDomain = WebViewUserScriptDomain(
+                selected: webView.url,
+                committed: webView.url
+            )
+        }
+        self.webView.refreshUserScripts(webView: webView, coordinator: self, config: config)
         (webView as? EnhancedWKWebView)?.applyReaderDocumentFullscreenPolicy(for: webView.url)
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
@@ -5534,10 +5564,29 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
             return (.cancel, preferences)
         }
+        // Rejected provider redirects must not retire the legitimate policy
+        // already awaiting a client decision for this view.
+        if isMainDocumentNavigation {
+            (webView as? EnhancedWKWebView)?.currentMainDocumentPolicyAction = navigationAction
+        }
+        let hasNativePolicyReceipt = isMainDocumentNavigation
+            && ((webView as? EnhancedWKWebView)?.takeNativeNavigationPolicyReceipt() ?? false)
         if let onNavigationAction {
             let decision = await onNavigationAction(navigationAction)
             guard ownsWebView(webView) else { return (.cancel, preferences) }
+            // A newer main-frame policy (or a pooled-view reset) can replace
+            // this action while the client decides. Its late reply must not
+            // reinstall the outgoing document's scripts over the newer scope.
+            if isMainDocumentNavigation,
+               let enhancedWebView = webView as? EnhancedWKWebView,
+               enhancedWebView.currentMainDocumentPolicyAction !== navigationAction {
+                rejectContentRulesPolicy(ownedBy: contentRulesBypassOwner, on: webView)
+                return (.cancel, preferences)
+            }
             if let decision {
+                if decision == .allow {
+                    prepareUserScripts(for: navigationAction, on: webView, hasNativePolicyReceipt: hasNativePolicyReceipt, publishesPageState: false)
+                }
                 if isMainDocumentNavigation, decision != .allow {
                     rejectContentRulesPolicy(
                         ownedBy: contentRulesBypassOwner,
@@ -5569,10 +5618,37 @@ extension WebViewCoordinator: WKNavigationDelegate {
         // ePub loader
         // TODO: Instead, issue a redirect from file:// to epub:// likewise for pdf to reuse code here.
         
-        if isMainDocumentNavigation,
+        prepareUserScripts(for: navigationAction, on: webView, hasNativePolicyReceipt: hasNativePolicyReceipt)
+
+        return (.allow, preferences)
+    }
+
+    @MainActor
+    private func prepareUserScripts(for navigationAction: WKNavigationAction, on webView: WKWebView, hasNativePolicyReceipt: Bool, publishesPageState: Bool = true) {
+        if navigationAction.targetFrame?.isMainFrame == true,
            !readerArticleNavigationKeepsDocument(from: self.webView.state.pageURL,
                to: navigationAction.request.url, type: navigationAction.navigationType) {
             let effectiveMainDocumentURL = navigationAction.request.mainDocumentURL ?? navigationAction.request.url
+            if let enhancedWebView = webView as? EnhancedWKWebView {
+                if !hasNativePolicyReceipt, pageInitiatedNavigationReplacesDocument(
+                    from: webView.url,
+                    to: navigationAction.request.url,
+                    type: navigationAction.navigationType
+                ) {
+                    // Page policies have no native-issued receipt. Retire
+                    // older receipts as soon as their replacement is allowed;
+                    // waiting for didStart leaves an older cancellation able
+                    // to restore the outgoing document's script scope.
+                    enhancedWebView.beginReceiptlessNavigationPolicy()
+                }
+                if enhancedWebView.userScriptDomain == nil {
+                    enhancedWebView.userScriptDomain = WebViewUserScriptDomain(
+                        selected: webView.url,
+                        committed: webView.url
+                    )
+                }
+                enhancedWebView.userScriptDomain?.selected = effectiveMainDocumentURL
+            }
             self.webView.updateUserScripts(
                 webView: webView,
                 coordinator: self,
@@ -5583,7 +5659,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
             // Keep the currently committed document's frame registry until a
             // replacement actually commits. A provisional navigation can fail
             // while the old document remains mounted and authoritative.
-            if !isInternalReaderLoaderNavigation {
+            let isInternalReaderLoaderNavigation = isInternalReaderLoaderURL(navigationAction.request.url)
+                && canonicalContentURLForReaderLoader(navigationAction.request.url) != nil
+            if publishesPageState, !isInternalReaderLoaderNavigation {
                 var newState = self.webView.state
                 newState.pageURL = effectiveMainDocumentURL ?? newState.pageURL
                 newState.pageTitle = nil
@@ -5596,8 +5674,24 @@ extension WebViewCoordinator: WKNavigationDelegate {
                 self.webView.state = newState
             }
         }
-        
-        return (.allow, preferences)
+    }
+
+    @MainActor
+    private func restoreCommittedUserScriptDomain(on webView: WKWebView) {
+        if let enhancedWebView = webView as? EnhancedWKWebView {
+            if let domain = enhancedWebView.userScriptDomain {
+                enhancedWebView.userScriptDomain?.selected = domain.committed
+            }
+        }
+        self.webView.refreshUserScripts(webView: webView, coordinator: self, config: config)
+    }
+
+    @MainActor
+    public func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        guard ownsWebView(webView) else { return }
+        // Unlike WKNavigationAction, this callback supplies the exact receipt.
+        // A redirect continues it; location/history replacements do not.
+        (webView as? EnhancedWKWebView)?.handleServerRedirect(navigation)
     }
     
     @MainActor
@@ -5725,6 +5819,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         if let enhancedWebView = sourceWebView as? EnhancedWKWebView,
            enhancedWebView.persistedNavigatorOwner === self {
             enhancedWebView.persistedNavigatorOwner = nil
+            enhancedWebView.currentMainDocumentPolicyAction = nil
         }
         _ = cancelContentRulesBypass(for: sourceWebView)
         nativeLookupHitTesting.removeAllTargets()
@@ -7041,6 +7136,86 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard let webView, ownsBoundWebView(webView) else { return nil }
         return webView.url
     }
+
+#if os(iOS)
+    /// Value-only diagnostics; never retain UIKit objects or document identity.
+    public struct NavigationInteractionSnapshot: Sendable {
+        public let canGoBack: Bool
+        public let canGoForward: Bool
+        public let allowsBackForwardNavigationGestures: Bool
+        public let isLoading: Bool
+        public let edgeHitIsInWebView: Bool
+        public let edgeHitPath: String
+        public let webViewPath: String
+    }
+
+    /// Call only from a gated navigation callback, never SwiftUI body or
+    /// accessibility evaluation. Samples the key window at normalized (0.02, 0.30).
+    /// A reader cover may still be present here; this is not a gesture-time probe.
+    @MainActor
+    public func captureNavigationInteractionSnapshot(
+        forDocumentURL expectedURL: URL
+    ) -> NavigationInteractionSnapshot? {
+        guard let webView, ownsBoundWebView(webView),
+              webView.url == expectedURL,
+              let coordinator = webView.navigationDelegate as? WebViewCoordinator,
+              coordinator.navigator === self,
+              let context = coordinator.captureDocumentCallbackContext(for: webView),
+              webView.superview != nil,
+              let window = webView.window, window.isKeyWindow,
+              !window.bounds.isEmpty else { return nil }
+
+        @MainActor
+        func className(_ object: NSObject) -> String {
+            String(String(describing: type(of: object)).prefix(80))
+        }
+
+        // Only two ancestor chains, with no descendant traversal or object
+        // descriptions. Each chain has at most 12 views and 16 recognizers.
+        @MainActor
+        func summarizePath(from start: UIView?) -> String {
+            var entries: [String] = []
+            var remainingRecognizers = 16
+            var ancestor = start
+            for depth in 0..<12 {
+                guard let view = ancestor else { break }
+                let recognizers = view.gestureRecognizers ?? []
+                let sampled = recognizers.prefix(remainingRecognizers)
+                let gestures = sampled.map {
+                    "\(className($0)):enabled=\($0.isEnabled):state=\($0.state.rawValue)"
+                }.joined(separator: "|")
+                remainingRecognizers -= sampled.count
+                entries.append("\(depth):\(className(view)):interaction=\(view.isUserInteractionEnabled):gestures=[\(gestures)]:gesturesTruncated=\(recognizers.count > sampled.count)")
+                ancestor = view.superview
+            }
+            if ancestor != nil { entries.append("ancestorsTruncated=true") }
+            return entries.isEmpty ? "none" : entries.joined(separator: ">")
+        }
+
+        let point = CGPoint(
+            x: window.bounds.minX + window.bounds.width * 0.02,
+            y: window.bounds.minY + window.bounds.height * 0.30
+        )
+        let hit = window.hitTest(point, with: nil)
+        // UIKit hit testing can call custom overrides. Recheck before reading
+        // native state if reentrant work replaced the mounted view or document.
+        guard ownsBoundWebView(webView), webView.url == expectedURL,
+              webView.navigationDelegate === coordinator,
+              coordinator.ownsDocumentCallbackContext(context),
+              webView.window === window, window.isKeyWindow else { return nil }
+        return NavigationInteractionSnapshot(
+            canGoBack: webView.canGoBack,
+            canGoForward: webView.canGoForward,
+            allowsBackForwardNavigationGestures: webView.allowsBackForwardNavigationGestures,
+            isLoading: webView.isLoading,
+            edgeHitIsInWebView: hit?.isDescendant(of: webView) == true,
+            edgeHitPath: summarizePath(from: hit),
+            // Include native WebKit/scroll/host recognizers even when a cover
+            // wins the key-window hit test and hides the WebView's hit path.
+            webViewPath: summarizePath(from: webView.scrollView)
+        )
+    }
+#endif
 
     /// Fence deferred recovery against even a same-URL load requested before
     /// WebKit commits it. A document/binding token alone cannot detect that.
@@ -9185,11 +9360,21 @@ enum PendingRequestLoadDisposition: Equatable {
     }
 }
 
+/// Navigation policy owns the next document's script scope before WebKit's URL
+/// catches up. Keep that selection on the exact pooled view, independently of
+/// published page state and request-history telemetry.
+struct WebViewUserScriptDomain {
+    var selected: URL?
+    var committed: URL?
+}
+
 public class EnhancedWKWebView: WKWebView {
 #if os(iOS)
     var sampledUnderPageColor: UIColor?
 #endif
     var persistedUserScriptsSignature: String?
+    var userScriptDomain: WebViewUserScriptDomain?
+    weak var currentMainDocumentPolicyAction: WKNavigationAction?
     var persistedAppliedContentRules: String?
     var persistedContentRulesApplicationGeneration: UInt64 = 0
     weak var persistedContentRulesApplicationOwner: WebViewCoordinator?
@@ -9214,6 +9399,7 @@ public class EnhancedWKWebView: WKWebView {
         contentID: WebViewPoolContentID,
         navigation: WKNavigation
     ) {
+        currentMainDocumentPolicyAction = nil
         poolContentNavigationGate.beginKeyedNavigation(
             contentID: contentID,
             navigation: navigation
@@ -9221,6 +9407,7 @@ public class EnhancedWKWebView: WKWebView {
     }
 
     func beginUnkeyedNavigation(navigation: WKNavigation? = nil) {
+        currentMainDocumentPolicyAction = nil
         poolContentNavigationGate.beginUnkeyedNavigation(
             navigation: navigation
         )
@@ -9228,6 +9415,20 @@ public class EnhancedWKWebView: WKWebView {
 
     func resetPooledContentNavigation() {
         poolContentNavigationGate.resetNavigationOwnership()
+        currentMainDocumentPolicyAction = nil
+        userScriptDomain = nil
+    }
+
+    func takeNativeNavigationPolicyReceipt() -> Bool {
+        poolContentNavigationGate.takeNativeNavigationPolicyReceipt()
+    }
+
+    func beginReceiptlessNavigationPolicy() {
+        poolContentNavigationGate.beginReceiptlessNavigationPolicy()
+    }
+
+    func handleServerRedirect(_ navigation: WKNavigation?) {
+        poolContentNavigationGate.handleServerRedirect(navigation)
     }
 
     func navigationCallbackDisposition(
@@ -9270,6 +9471,10 @@ public class EnhancedWKWebView: WKWebView {
 
     func cancelPendingPooledContentNavigation() {
         poolContentNavigationGate.cancelPendingNavigation()
+        currentMainDocumentPolicyAction = nil
+        if let domain = userScriptDomain {
+            userScriptDomain?.selected = domain.committed
+        }
     }
 #if os(iOS)
     var hidesTopScrollEdgeEffect = false
@@ -10882,10 +11087,9 @@ extension WebView: UIViewControllerRepresentable {
             webView.isInspectable = true
         }
 
-        updateUserScripts(
+        refreshUserScripts(
             webView: webView,
             coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
         )
         bindScriptCallerIfNeeded(to: webView, context: context)
@@ -11142,10 +11346,9 @@ extension WebView: UIViewControllerRepresentable {
 
         refreshDarkModeSetting(webView: mountedWebView)
 
-        updateUserScripts(
+        refreshUserScripts(
             webView: controller.webView,
             coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: mountedWebView.url),
             config: config
         )
         //        controller.webView.setValue(drawsBackground, forKey: "drawsBackground")
@@ -11601,10 +11804,9 @@ extension WebView: NSViewRepresentable {
             coordinator.lastUserScriptsContentController = webView.configuration.userContentController
             coordinator.lastInstalledScriptsSignature = webView.persistedUserScriptsSignature
         }
-        updateUserScripts(
+        refreshUserScripts(
             webView: webView,
             coordinator: coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
         )
     }
@@ -11726,10 +11928,9 @@ extension WebView: NSViewRepresentable {
             resolvedContentRules: resolvedContentRules
         )
 
-        updateUserScripts(
+        refreshUserScripts(
             webView: webView,
             coordinator: context.coordinator,
-            forDomain: resolvedUserScriptDomain(currentURL: webView.url),
             config: config
         )
         // Can't disable on macOS.
@@ -12134,6 +12335,23 @@ extension WebView {
             requiredHandlers: Set(Self.systemMessageHandlers).union(environmentHandlerNames),
             environmentHandlerNames: environmentHandlerNames
         )
+    }
+
+    @MainActor
+    func refreshUserScripts(webView sourceWebView: WKWebView, coordinator: WebViewCoordinator, config: WebViewConfig) {
+        let domain: URL?
+        if let enhancedWebView = sourceWebView as? EnhancedWKWebView {
+            if enhancedWebView.userScriptDomain == nil {
+                enhancedWebView.userScriptDomain = WebViewUserScriptDomain(
+                    selected: resolvedUserScriptDomain(currentURL: sourceWebView.url),
+                    committed: sourceWebView.url
+                )
+            }
+            domain = enhancedWebView.userScriptDomain?.selected
+        } else {
+            domain = resolvedUserScriptDomain(currentURL: sourceWebView.url)
+        }
+        updateUserScripts(webView: sourceWebView, coordinator: coordinator, forDomain: domain, config: config)
     }
 
     @MainActor

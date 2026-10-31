@@ -35,9 +35,16 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         let navigation: Navigation
     }
 
+    private struct DisplacedNavigation {
+        let navigation: WeakNavigation
+        let pendingNavigation: PendingNavigation?
+    }
+
     private var knownNavigations = [WeakNavigation]()
     private var latestNavigation: WeakNavigation?
     private var pendingNavigation: PendingNavigation?
+    private var nativeNavigationAwaitingPolicy: WeakNavigation?
+    private var policyDisplacedNavigation: DisplacedNavigation?
     private(set) var readyContentID: WebViewPoolContentID?
 
     var pendingContentID: WebViewPoolContentID? {
@@ -48,6 +55,8 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         knownNavigations.removeAll()
         latestNavigation = nil
         pendingNavigation = nil
+        nativeNavigationAwaitingPolicy = nil
+        policyDisplacedNavigation = nil
         readyContentID = contentID
     }
 
@@ -57,6 +66,8 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
     ) {
         remember(navigation)
         latestNavigation = WeakNavigation(navigation)
+        nativeNavigationAwaitingPolicy = latestNavigation
+        policyDisplacedNavigation = nil
         pendingNavigation = PendingNavigation(
             contentID: contentID,
             navigation: navigation
@@ -74,6 +85,38 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         }
         pendingNavigation = nil
         readyContentID = nil
+        nativeNavigationAwaitingPolicy = latestNavigation
+        policyDisplacedNavigation = nil
+    }
+
+    /// Native callers register a receipt before WebKit asks for its first
+    /// policy. Consume it even if the client subsequently rejects that policy.
+    mutating func takeNativeNavigationPolicyReceipt() -> Bool {
+        defer { nativeNavigationAwaitingPolicy = nil }
+        guard let navigation = nativeNavigationAwaitingPolicy?.value else { return false }
+        return latestNavigation?.value === navigation
+    }
+
+    /// A page policy has no WKNavigation receipt until didStart. Retire the
+    /// predecessor now, including for location changes and built-in history.
+    /// A server redirect can later prove it is continuing that exact receipt.
+    mutating func beginReceiptlessNavigationPolicy() {
+        policyDisplacedNavigation = latestNavigation.map {
+            DisplacedNavigation(navigation: $0, pendingNavigation: pendingNavigation)
+        }
+        latestNavigation = nil
+        pendingNavigation = nil
+        readyContentID = nil
+        nativeNavigationAwaitingPolicy = nil
+    }
+
+    mutating func handleServerRedirect(_ navigation: Navigation?) {
+        guard let navigation,
+              let displaced = policyDisplacedNavigation,
+              displaced.navigation.value === navigation else { return }
+        latestNavigation = displaced.navigation
+        pendingNavigation = displaced.pendingNavigation
+        policyDisplacedNavigation = nil
     }
 
     mutating func resetNavigationOwnership() {
@@ -81,6 +124,8 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         latestNavigation = nil
         pendingNavigation = nil
         readyContentID = nil
+        nativeNavigationAwaitingPolicy = nil
+        policyDisplacedNavigation = nil
     }
 
     mutating func navigationCallbackDisposition(
@@ -101,7 +146,12 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
     mutating func handleProvisionalNavigationStarted(
         _ navigation: Navigation?
     ) -> WebViewNavigationCallbackDisposition {
-        admitNavigationCallback(navigation)
+        let disposition = admitNavigationCallback(navigation)
+        if disposition != .stale {
+            nativeNavigationAwaitingPolicy = nil
+            policyDisplacedNavigation = nil
+        }
+        return disposition
     }
 
     @discardableResult
@@ -136,6 +186,8 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         // Pool reset preserves a completed content identity, but any navigation
         // that was current before reset no longer owns delegate publication.
         latestNavigation = nil
+        nativeNavigationAwaitingPolicy = nil
+        policyDisplacedNavigation = nil
     }
 
     mutating func admitNavigationCallback(
@@ -154,6 +206,8 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         // The delegate already treats an unknown main-frame callback as current.
         // Record the same ownership decision so a previously admitted receipt is
         // stale if it resumes after this callback.
+        nativeNavigationAwaitingPolicy = nil
+        policyDisplacedNavigation = nil
         pendingNavigation = nil
         readyContentID = nil
         remember(navigation)
@@ -176,6 +230,12 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
     }
 
     private mutating func removeKnownNavigation(_ navigation: Navigation) {
+        if nativeNavigationAwaitingPolicy?.value === navigation {
+            nativeNavigationAwaitingPolicy = nil
+        }
+        if policyDisplacedNavigation?.navigation.value === navigation {
+            policyDisplacedNavigation = nil
+        }
         knownNavigations.removeAll {
             guard let value = $0.value else { return true }
             return value === navigation
