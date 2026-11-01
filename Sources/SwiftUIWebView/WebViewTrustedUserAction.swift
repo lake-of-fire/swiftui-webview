@@ -439,6 +439,8 @@ enum WebViewTrustedUserActionBroker {
                 }
                 if (control.matches('.reader-view-original')) {
                     register(control, ['showOriginal']);
+                } else if (control.matches('#reader-reading-time')) {
+                    register(control, ['readerReadingEstimateTapped']);
                 } else if (control.matches('#mnb-finished-reading-button')) {
                     register(control, ['finishedReading']);
                 } else if (control.matches(
@@ -500,6 +502,7 @@ enum WebViewTrustedUserActionBroker {
                 registerControl(root);
                 root.querySelectorAll?.(
                     '.reader-view-original, #mnb-finished-reading-button,'
+                    + ' #reader-reading-time,'
                     + ' .mnb-start-over-button, .mnb-start-over-book-button,'
                     + ' #mnb-reader-listen-button,'
                     + ' .reader-video-menu-item,'
