@@ -3648,9 +3648,12 @@ public class WebViewCoordinator: NSObject {
         let generation = documentCallbackGeneration
         let binding = javaScriptBindingToken(for: sourceWebView)
         let callerGeneration = scriptCallerReplacementGeneration
-        return { [weak self, weak sourceWebView] in
-            guard let self, let sourceWebView else { return false }
-            return self.ownsWebView(sourceWebView)
+        // This fence lives only inside one synchronous delegate callback.
+        // Retain both participants until publication settles; ownership and
+        // generation checks still reject reentrant replacement. There is no
+        // stored closure/cycle, and no weak-storage load during native reentry.
+        return {
+            self.ownsWebView(sourceWebView)
                 && self.documentCallbackGeneration == generation
                 && self.scriptCallerReplacementGeneration == callerGeneration
                 && self.javaScriptBindingToken(for: sourceWebView) == binding
