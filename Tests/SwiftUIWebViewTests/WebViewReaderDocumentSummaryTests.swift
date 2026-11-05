@@ -64,14 +64,22 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         let nextURL = try XCTUnwrap(URL(string: "https://example.com/summary/next"))
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        let html = "<!doctype html><html data-mnb-reader-render-ready='1'><head><title>Summary metadata</title></head><body><main id='reader-content'>article</main></body></html>"
+        let loaded = expectation(description: "Summary fixture loaded")
+        let delegate = NavigationDelegate(completion: loaded, html: html)
+        // A custom loader URL must be loaded through a real scheme handler;
+        // loadHTMLString does not establish that document URL in WebKit.
+        if initialURL.scheme == "internal" {
+            configuration.setURLSchemeHandler(delegate, forURLScheme: "internal")
+        }
         let webView = HeldSummaryWebView(frame: CGRect(x: 0, y: 0, width: 430, height: 932),
                                         configuration: configuration)
-        let loaded = expectation(description: "Summary fixture loaded")
-        let delegate = NavigationDelegate(completion: loaded)
         webView.navigationDelegate = delegate
-        webView.loadHTMLString(
-            "<!doctype html><html data-mnb-reader-render-ready='1'><head><title>Summary metadata</title></head><body><main id='reader-content'>article</main></body></html>",
-            baseURL: initialURL)
+        if initialURL.scheme == "internal" {
+            webView.load(URLRequest(url: initialURL))
+        } else {
+            webView.loadHTMLString(html, baseURL: initialURL)
+        }
         await fulfillment(of: [loaded], timeout: 10)
         webView.navigationDelegate = nil
         var state = WebViewState.empty
@@ -133,13 +141,29 @@ final class WebViewReaderDocumentSummaryTests: XCTestCase {
         withExtendedLifetime(delegate) {}
     }
 
-    private final class NavigationDelegate: NSObject, WKNavigationDelegate {
+    private final class NavigationDelegate: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
         let completion: XCTestExpectation
+        let html: String
         private var didComplete = false
 
-        init(completion: XCTestExpectation) {
+        init(completion: XCTestExpectation, html: String = "") {
             self.completion = completion
+            self.html = html
         }
+
+        func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+            guard let url = urlSchemeTask.request.url else {
+                urlSchemeTask.didFailWithError(URLError(.badURL))
+                return
+            }
+            let data = Data(html.utf8)
+            urlSchemeTask.didReceive(URLResponse(url: url, mimeType: "text/html",
+                expectedContentLength: data.count, textEncodingName: "utf-8"))
+            urlSchemeTask.didReceive(data)
+            urlSchemeTask.didFinish()
+        }
+
+        func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             completeOnce()
