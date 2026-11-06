@@ -6772,10 +6772,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 )
             }
             let navigation: WKNavigation?
-            if webView.url == request.url {
-                markReaderLoadIssued(for: request, reason: "reload:\(diagnosticsReason)")
-                navigation = webView.reload()
-            } else if let url = request.url, url.isFileURL {
+            // Reissue the full pending request so its payload and headers are retained.
+            if let url = request.url, url.isFileURL {
                 markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
                 navigation = webView.loadFileURL(
                     url,
