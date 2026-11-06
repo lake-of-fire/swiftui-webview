@@ -6,15 +6,6 @@ import XCTest
 @testable import SwiftUIWebView
 
 @MainActor
-private final class UploadPanelParameters: WKOpenPanelParameters {
-    var supportsMultipleSelection = false
-    var supportsDirectories = false
-
-    override var allowsMultipleSelection: Bool { supportsMultipleSelection }
-    override var allowsDirectories: Bool { supportsDirectories }
-}
-
-@MainActor
 private final class UploadOpenPanel: NSOpenPanel {
     var selection: [URL] = []
     var response: NSApplication.ModalResponse = .OK
@@ -33,7 +24,7 @@ final class WebViewOpenPanelTests: XCTestCase {
         let panel = makePanel()
         panel.selection = [URL(fileURLWithPath: "/tmp/upload.txt")]
 
-        let result = runPanel(panel, parameters: UploadPanelParameters())
+        let result = runPanel(panel)
 
         XCTAssertFalse(panel.allowsMultipleSelection)
         XCTAssertFalse(panel.canChooseDirectories)
@@ -42,27 +33,23 @@ final class WebViewOpenPanelTests: XCTestCase {
     }
 
     func testMultipleFileInputReturnsEverySelectedURL() {
-        let parameters = UploadPanelParameters()
-        parameters.supportsMultipleSelection = true
         let panel = makePanel()
         panel.selection = [
             URL(fileURLWithPath: "/tmp/first.txt"),
             URL(fileURLWithPath: "/tmp/二番目.txt")
         ]
 
-        let result = runPanel(panel, parameters: parameters)
+        let result = runPanel(panel, allowsMultipleSelection: true)
 
         XCTAssertTrue(panel.allowsMultipleSelection)
         XCTAssertEqual(result, panel.selection)
     }
 
     func testDirectoryInputPermitsDirectorySelection() {
-        let parameters = UploadPanelParameters()
-        parameters.supportsDirectories = true
         let panel = makePanel()
         panel.selection = [URL(fileURLWithPath: "/tmp/upload-folder", isDirectory: true)]
 
-        let result = runPanel(panel, parameters: parameters)
+        let result = runPanel(panel, allowsDirectories: true)
 
         XCTAssertTrue(panel.canChooseDirectories)
         XCTAssertEqual(result, panel.selection)
@@ -73,14 +60,14 @@ final class WebViewOpenPanelTests: XCTestCase {
         panel.selection = [URL(fileURLWithPath: "/tmp/upload.txt")]
         panel.response = .cancel
 
-        XCTAssertNil(runPanel(panel, parameters: UploadPanelParameters()))
+        XCTAssertNil(runPanel(panel))
     }
 
     func testAbortedPanelCompletesWithNoSelection() {
         let panel = makePanel()
         panel.response = .abort
 
-        XCTAssertNil(runPanel(panel, parameters: UploadPanelParameters()))
+        XCTAssertNil(runPanel(panel))
     }
 
     private func makePanel() -> UploadOpenPanel {
@@ -90,7 +77,8 @@ final class WebViewOpenPanelTests: XCTestCase {
 
     private func runPanel(
         _ panel: UploadOpenPanel,
-        parameters: UploadPanelParameters,
+        allowsMultipleSelection: Bool = false,
+        allowsDirectories: Bool = false,
         file: StaticString = #filePath,
         line: UInt = #line
     ) -> [URL]? {
@@ -104,10 +92,12 @@ final class WebViewOpenPanelTests: XCTestCase {
         var result: [URL]?
         var completionCount = 0
 
-        coordinator.webView(
-            webView,
-            runOpenPanelWith: parameters,
-            initiatedByFrame: WKFrameInfo()
+        // WKFrameInfo and WKOpenPanelParameters are WebKit-owned objects;
+        // constructing them directly leaves invalid native backing storage.
+        coordinator.runOpenPanel(
+            webView: webView,
+            allowsMultipleSelection: allowsMultipleSelection,
+            allowsDirectories: allowsDirectories
         ) { urls in
             completionCount += 1
             result = urls

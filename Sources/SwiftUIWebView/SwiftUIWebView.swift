@@ -4979,13 +4979,19 @@ extension WebViewCoordinator: WKUIDelegate {
     }
     
     public func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor ([URL]?) -> Void) {
+        runOpenPanel(webView: webView, allowsMultipleSelection: parameters.allowsMultipleSelection,
+                     allowsDirectories: parameters.allowsDirectories, completionHandler: completionHandler)
+    }
+
+    func runOpenPanel(webView: WKWebView, allowsMultipleSelection: Bool, allowsDirectories: Bool,
+                      completionHandler: @escaping @MainActor ([URL]?) -> Void) {
         guard ownsWebView(webView) else {
             completionHandler(nil)
             return
         }
         let openPanel = makeOpenPanel()
-        openPanel.allowsMultipleSelection = parameters.allowsMultipleSelection
-        openPanel.canChooseDirectories = parameters.allowsDirectories
+        openPanel.allowsMultipleSelection = allowsMultipleSelection
+        openPanel.canChooseDirectories = allowsDirectories
         openPanel.canChooseFiles = true
         openPanel.resolvesAliases = true
         
