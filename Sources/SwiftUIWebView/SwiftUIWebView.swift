@@ -5389,6 +5389,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
            enhancedWebView.admitNavigationCallback(navigation) == .stale {
             return
         }
+        navigator.observeStartedDataNavigation(navigation, in: webView)
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = true
@@ -5516,6 +5517,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
            enhancedWebView.handleProvisionalNavigationStarted(navigation) == .stale {
             return
         }
+        navigator.observeStartedDataNavigation(navigation, in: webView)
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
@@ -5850,6 +5852,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
         fileprivate let id: UUID
     }
 
+    /// Identity of one prepared data load, independent of resolver intents and
+    /// policy callback order. Only its concrete native navigation may retain it.
+    public struct IssuedDataNavigationIdentity: Equatable, Sendable {
+        fileprivate let owner: UUID
+        fileprivate let id: UUID
+    }
+
     /// Evidence that this navigator accepted a request, including queueing it
     /// until its native view attaches. This does not prove a WebKit load began
     /// or completed. Acceptance remains evidence after later supersession.
@@ -5897,6 +5906,51 @@ public class WebViewNavigator: NSObject, ObservableObject {
         let receipt = NavigationDispatchReceipt(intent: beginNavigationIntent())
         loadRequest(request)
         return .issued(receipt)
+    }
+
+    private let issuedDataNavigationOwner = UUID()
+    @MainActor public private(set) var issuedDataNavigationIdentity: IssuedDataNavigationIdentity?
+    @MainActor private var issuedDataNativeNavigation: WKNavigation?
+    @MainActor private weak var issuedDataWebView: WKWebView?
+
+    @MainActor
+    private func recordIssuedDataNavigation() {
+        issuedDataNativeNavigation = nil
+        issuedDataWebView = nil
+        issuedDataNavigationIdentity = IssuedDataNavigationIdentity(owner: issuedDataNavigationOwner, id: UUID())
+    }
+
+    @MainActor
+    private func retireIssuedDataNavigation() {
+        issuedDataNavigationIdentity = nil
+        issuedDataNativeNavigation = nil
+        issuedDataWebView = nil
+    }
+
+    @MainActor
+    private func rememberIssuedDataNavigation(_ navigation: WKNavigation?, in webView: WKWebView) {
+        guard issuedDataNavigationIdentity != nil else { return }
+        guard let navigation else {
+            retireIssuedDataNavigation()
+            return
+        }
+        issuedDataNativeNavigation = navigation
+        issuedDataWebView = webView
+    }
+
+    @MainActor
+    fileprivate func observeStartedDataNavigation(_ navigation: WKNavigation?, in webView: WKWebView) {
+        guard issuedDataNavigationIdentity != nil else { return }
+        guard let navigation, issuedDataWebView === webView,
+              issuedDataNativeNavigation === navigation else {
+            retireIssuedDataNavigation()
+            return
+        }
+    }
+
+    @MainActor
+    public func isCurrent(_ identity: IssuedDataNavigationIdentity) -> Bool {
+        issuedDataNavigationIdentity == identity
     }
 
     public struct DebugLoadSnapshot: Sendable {
@@ -6466,6 +6520,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     ) -> WKNavigation? {
         guard ownsBoundWebView(sourceWebView) else { return nil }
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         guard let navigation = start() else {
             return nil
         }
@@ -6920,6 +6975,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             // view exists. Detachment and replacement retire their old owner.
             if oldValue != nil, oldValue !== webView {
                 beginNavigationIntent()
+                retireIssuedDataNavigation()
             }
             let shouldLogDiagnostics = swiftUIWebViewPageTurnDiagnosticsEnabled
             let nextHasAttachedWebView = webView != nil
@@ -7007,6 +7063,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     characterEncodingName: pendingDataLoad.characterEncodingName,
                     baseURL: pendingDataLoad.baseURL
                 )
+                rememberIssuedDataNavigation(navigation, in: webView)
                 beginPooledContentUnkeyedNavigation(
                     webView,
                     navigation: navigation
@@ -7064,6 +7121,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func loadRequest(_ request: URLRequest) {
+        retireIssuedDataNavigation()
         lastLoadedRequest = request
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
@@ -7127,6 +7185,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
         beginNavigationIntent()
+        recordIssuedDataNavigation()
         lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedHTML = nil
@@ -7187,6 +7246,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             characterEncodingName: characterEncodingName,
             baseURL: baseURL
         )
+        rememberIssuedDataNavigation(navigation, in: webView)
         beginPooledContentUnkeyedNavigation(
             webView,
             navigation: navigation
@@ -7208,6 +7268,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         contentID: WebViewPoolContentID? = nil
     ) {
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         //                debugPrint("# WebViewNavigator.loadHTML(...)", html.prefix(100), baseURL)
         lastLoadedHTML = (html: html, baseURL: baseURL)
         lastLoadedRequest = nil
@@ -7295,6 +7356,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func reload() {
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         logCompetingOperationIfNeeded("reload", metadata: [:])
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "reload") {
@@ -7340,6 +7402,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func reloadWithoutContentRules() {
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         logCompetingOperationIfNeeded("reloadWithoutContentRules", metadata: [:])
         guard let webView else { return }
         let navigation = performUnkeyedNavigation(
@@ -7402,6 +7465,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func go(_ item: WKBackForwardListItem) {
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "goToHistoryItem") {
             webView.go(to: item)
@@ -7411,6 +7475,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func goBack() {
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "goBack") {
             webView.goBack()
@@ -7420,6 +7485,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     public func goForward() {
         beginNavigationIntent()
+        retireIssuedDataNavigation()
         guard let webView else { return }
         performUnkeyedNavigation(on: webView, reason: "goForward") {
             webView.goForward()
