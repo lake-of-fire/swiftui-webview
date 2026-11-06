@@ -31,10 +31,16 @@ private final class HotfixPendingNavigationDelegate: NSObject, WKNavigationDeleg
 @MainActor
 private final class HotfixPendingRequestWebView: EnhancedWKWebView {
     var requests: [URLRequest] = []
+    var reloadCount = 0
     var issuedNavigation: WKNavigation?
     var outgoingURLDuringProvisionalReceipt: URL?
 
     override var url: URL? { outgoingURLDuringProvisionalReceipt ?? super.url }
+
+    override func reload() -> WKNavigation? {
+        reloadCount += 1
+        return super.reload()
+    }
 
     override func load(_ request: URLRequest) -> WKNavigation? {
         requests.append(request)
@@ -105,8 +111,109 @@ private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate,
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
 
+
+@MainActor
+private final class HotfixStreamingRequestBoundary: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
+    let committed: XCTestExpectation
+    private var didCommit = false
+
+    init(committed: XCTestExpectation) { self.committed = committed }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard !didCommit else { return }
+        didCommit = true
+        committed.fulfill()
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let data = Data(("<html><body>" + String(repeating: "Waiting for the rest of this document. ", count: 100)).utf8)
+        urlSchemeTask.didReceive(URLResponse(
+            url: urlSchemeTask.request.url!, mimeType: "text/html",
+            expectedContentLength: -1, textEncodingName: "utf-8"
+        ))
+        urlSchemeTask.didReceive(data)
+        // Keep this real native navigation loading after commit. Stop owns cleanup.
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
+
 @MainActor
 final class WebViewHotfixControllerBehaviorTests: XCTestCase {
+
+    func testDeferredSameURLPostPreservesBodyAndHeadersOnAttachment() async throws {
+        var request = URLRequest(url: URL(string: "pending-request://fixture/document")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data("message=new-document".utf8)
+        request.setValue("replacement", forHTTPHeaderField: "X-Manabi-Request")
+        try await assertDeferredSameURLRequestIsIssued(request)
+    }
+
+    func testDeferredSameURLGetPreservesHeadersAndCachePolicyOnAttachment() async throws {
+        var request = URLRequest(url: URL(string: "pending-request://fixture/document")!)
+        request.setValue("replacement", forHTTPHeaderField: "X-Manabi-Request")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        try await assertDeferredSameURLRequestIsIssued(request)
+    }
+
+    func testDeferredIdenticalSameURLRequestStillRestartsOnAttachment() async throws {
+        try await assertDeferredSameURLRequestIsIssued(
+            URLRequest(url: URL(string: "pending-request://fixture/document")!)
+        )
+    }
+
+    private func assertDeferredSameURLRequestIsIssued(_ request: URLRequest) async throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        var state = WebViewState.empty
+        let model = WebView(navigator: navigator, state: Binding(
+            get: { state }, set: { state = $0 }
+        ))
+        let coordinator = model.makeCoordinatorForTesting()
+        let committed = expectation(description: "Original same-URL document commits while its body is held")
+        let boundary = HotfixStreamingRequestBoundary(committed: committed)
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(boundary, forURLScheme: "pending-request")
+        let web = HotfixPendingRequestWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: configuration
+        )
+        let controller = WebViewController(webView: web)
+        let window = HotfixSafeAreaWindow(frame: web.frame)
+        window.rootViewController = controller
+        window.isHidden = false
+        controller.view.layoutIfNeeded()
+        web.navigationDelegate = boundary
+        defer {
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        web.load(URLRequest(url: try XCTUnwrap(request.url)))
+        await fulfillment(of: [committed], timeout: 10)
+        XCTAssertEqual(web.url, request.url)
+        XCTAssertTrue(web.isLoading)
+        guard web.url == request.url, web.isLoading else { return }
+
+        // The navigator has no bound native view: its public load must queue
+        // the complete request before the real controller attachment flush.
+        navigator.load(request)
+        let priorRequests = web.requests.count
+        let priorReloads = web.reloadCount
+        coordinator.setWebView(web)
+
+        XCTAssertEqual(web.reloadCount, priorReloads)
+        XCTAssertEqual(web.requests.count, priorRequests + 1)
+        let issued = try XCTUnwrap(web.requests.last)
+        XCTAssertEqual(issued.url, request.url)
+        XCTAssertEqual(issued.httpMethod, request.httpMethod)
+        XCTAssertEqual(issued.httpBody, request.httpBody)
+        XCTAssertEqual(issued.allHTTPHeaderFields, request.allHTTPHeaderFields)
+        XCTAssertEqual(issued.cachePolicy, request.cachePolicy)
+    }
+
+
     func testPendingRequestStartWithOutgoingURLCannotReplayAfterReaderReady() async throws {
         let navigator = WebViewNavigator()
         navigator.shouldLoadFallbackOnAttach = false
