@@ -3157,6 +3157,9 @@ public class WebViewCoordinator: NSObject {
     var onDocumentContextInvalidated: (@MainActor (WebViewState, WebViewDocumentContextInvalidationReason) -> Void)?
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
+#if os(macOS)
+    var makeOpenPanel: @MainActor () -> NSOpenPanel = { NSOpenPanel() }
+#endif
     var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
@@ -4999,9 +5002,9 @@ extension WebViewCoordinator: WKUIDelegate {
             completionHandler(nil)
             return
         }
-        let openPanel = NSOpenPanel()
-        openPanel.allowsMultipleSelection = true
-        openPanel.canChooseDirectories = false
+        let openPanel = makeOpenPanel()
+        openPanel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        openPanel.canChooseDirectories = parameters.allowsDirectories
         openPanel.canChooseFiles = true
         openPanel.resolvesAliases = true
         
@@ -5010,13 +5013,7 @@ extension WebViewCoordinator: WKUIDelegate {
                 completionHandler(nil)
                 return
             }
-            if result == NSApplication.ModalResponse.OK {
-                if let url = openPanel.url {
-                    completionHandler([url])
-                }
-            } else if result == NSApplication.ModalResponse.cancel {
-                completionHandler(nil)
-            }
+            completionHandler(result == .OK ? openPanel.urls : nil)
         }
         
         if let window = webView.window {
