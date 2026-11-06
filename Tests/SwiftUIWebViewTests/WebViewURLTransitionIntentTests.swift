@@ -389,7 +389,7 @@ private final class LoaderPolicyActionCapture: NSObject, WKNavigationDelegate, W
     var allowsMainDocument = false
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+                 decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
         if allowsMainDocument, navigationAction.targetFrame?.isMainFrame == true {
             decisionHandler(.allow)
             return
