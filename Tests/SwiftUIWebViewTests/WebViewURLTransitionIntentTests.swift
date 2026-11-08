@@ -64,6 +64,7 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
             await fulfillment(of: [olderCaptured], timeout: 10)
             XCTAssertNotNil(olderAction)
         }
+        capture.capturesAllowedMainDocument = true
         capture.allowsMainDocument = true
         let started = expectation(description: "issued data starts its concrete native navigation")
         var issuedNativeNavigation: WKNavigation?
@@ -141,6 +142,7 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
 
     func testBrowserReloadPolicyRetiresIssuedDataIdentity() async throws {
         let capture = LoaderPolicyActionCapture()
+        capture.capturesAllowedMainDocument = true
         capture.allowsMainDocument = true
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
@@ -164,6 +166,7 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
             mimeType: "text/html", characterEncodingName: "utf-8", baseURL: url)
         let issued = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
         await fulfillment(of: [loaded], timeout: 10)
+        capture.capturesAllowedMainDocument = true
         capture.allowsMainDocument = true
         let started = expectation(description: "native browser reload starts its concrete navigation")
         var reloadNavigation: WKNavigation?
@@ -564,6 +567,7 @@ private final class WithdrawalCallbackCount: @unchecked Sendable {
 private final class LoaderPolicyActionCapture: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
     var receive: ((WKNavigationAction) -> Void)?
     var allowsMainDocument = false
+    var capturesAllowedMainDocument = false
     var finished: (() -> Void)?
     var started: ((WKNavigation) -> Void)?
 
@@ -582,13 +586,14 @@ private final class LoaderPolicyActionCapture: NSObject, WKNavigationDelegate, W
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if allowsMainDocument, navigationAction.targetFrame?.isMainFrame == true {
+        let allowsAction = allowsMainDocument && navigationAction.targetFrame?.isMainFrame == true
+        if allowsAction, !capturesAllowedMainDocument {
             decisionHandler(.allow)
             return
         }
         let callback = receive
         receive = nil
-        decisionHandler(.cancel)
+        decisionHandler(allowsAction ? .allow : .cancel)
         callback?(navigationAction)
     }
 
