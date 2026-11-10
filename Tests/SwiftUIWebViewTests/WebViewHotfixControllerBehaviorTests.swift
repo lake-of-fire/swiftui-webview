@@ -15,31 +15,58 @@ private final class HotfixSafeAreaWindow: UIWindow {
 private final class HotfixPendingNavigationDelegate: NSObject, WKNavigationDelegate {
     let reachedPolicy: XCTestExpectation
     var decision: ((WKNavigationActionPolicy) -> Void)?
+    private var additionalDecisions: [(WKNavigationActionPolicy) -> Void] = []
+    private var didReachPolicy = false
     init(_ reachedPolicy: XCTestExpectation) { self.reachedPolicy = reachedPolicy }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        decision = decisionHandler
-        reachedPolicy.fulfill()
+        if didReachPolicy {
+            additionalDecisions.append(decisionHandler)
+        } else {
+            didReachPolicy = true
+            decision = decisionHandler
+            reachedPolicy.fulfill()
+        }
     }
     func cancel() {
         let handler = decision
         decision = nil
+        let additional = additionalDecisions
+        additionalDecisions = []
         handler?(.cancel)
+        additional.forEach { $0(.cancel) }
     }
 }
 
 @MainActor
 private final class HotfixPendingRequestWebView: EnhancedWKWebView {
     var requests: [URLRequest] = []
+    var reloadCount = 0
     var issuedNavigation: WKNavigation?
     var outgoingURLDuringProvisionalReceipt: URL?
+    var requestsToRefuse = 0
+    var onAcceptedRequest: ((URLRequest, WKNavigation?) -> Void)?
+    var onRefusedRequest: (() -> Void)?
 
     override var url: URL? { outgoingURLDuringProvisionalReceipt ?? super.url }
 
+    override func reload() -> WKNavigation? {
+        reloadCount += 1
+        return super.reload()
+    }
+
     override func load(_ request: URLRequest) -> WKNavigation? {
         requests.append(request)
+        // Control the optional native-return boundary without creating a fake
+        // WKNavigation. Recovery must use super.load and real WebKit policy.
+        if requestsToRefuse > 0 {
+            requestsToRefuse -= 1
+            onRefusedRequest?()
+            return nil
+        }
         let navigation = super.load(request)
         issuedNavigation = navigation
+        onAcceptedRequest?(request, navigation)
         return navigation
     }
 }
@@ -105,8 +132,407 @@ private final class HotfixReaderRequestBoundary: NSObject, WKNavigationDelegate,
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
 }
 
+
+@MainActor
+private final class HotfixStreamingRequestBoundary: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
+    let committed: XCTestExpectation
+    private var didCommit = false
+
+    init(committed: XCTestExpectation) { self.committed = committed }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard !didCommit else { return }
+        didCommit = true
+        committed.fulfill()
+    }
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        let data = Data(("<html><body>" + String(repeating: "Waiting for the rest of this document. ", count: 100)).utf8)
+        urlSchemeTask.didReceive(URLResponse(
+            url: urlSchemeTask.request.url!, mimeType: "text/html",
+            expectedContentLength: -1, textEncodingName: "utf-8"
+        ))
+        urlSchemeTask.didReceive(data)
+        // Keep this real native navigation loading after commit. Stop owns cleanup.
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {}
+}
+
 @MainActor
 final class WebViewHotfixControllerBehaviorTests: XCTestCase {
+
+    func testDeferredSameURLPostPreservesBodyAndHeadersOnAttachment() async throws {
+        var request = URLRequest(url: URL(string: "pending-request://fixture/document")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data("message=new-document".utf8)
+        request.setValue("replacement", forHTTPHeaderField: "X-Manabi-Request")
+        try await assertDeferredSameURLRequestIsIssued(request)
+    }
+
+    func testDeferredSameURLGetPreservesHeadersAndCachePolicyOnAttachment() async throws {
+        var request = URLRequest(url: URL(string: "pending-request://fixture/document")!)
+        request.setValue("replacement", forHTTPHeaderField: "X-Manabi-Request")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        try await assertDeferredSameURLRequestIsIssued(request)
+    }
+
+    func testDeferredIdenticalSameURLRequestStillRestartsOnAttachment() async throws {
+        try await assertDeferredSameURLRequestIsIssued(
+            URLRequest(url: URL(string: "pending-request://fixture/document")!)
+        )
+    }
+
+    private func assertDeferredSameURLRequestIsIssued(_ request: URLRequest) async throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        var state = WebViewState.empty
+        let model = WebView(navigator: navigator, state: Binding(
+            get: { state }, set: { state = $0 }
+        ))
+        let coordinator = model.makeCoordinatorForTesting()
+        let committed = expectation(description: "Original same-URL document commits while its body is held")
+        let boundary = HotfixStreamingRequestBoundary(committed: committed)
+        let policy = expectation(description: "Replacement held before provisional start")
+        let pendingBoundary = HotfixPendingNavigationDelegate(policy)
+        let configuration = WKWebViewConfiguration()
+        configuration.setURLSchemeHandler(boundary, forURLScheme: "pending-request")
+        let web = HotfixPendingRequestWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: configuration
+        )
+        let controller = WebViewController(webView: web)
+        let window = HotfixSafeAreaWindow(frame: web.frame)
+        window.rootViewController = controller
+        window.isHidden = false
+        controller.view.layoutIfNeeded()
+        web.navigationDelegate = boundary
+        defer {
+            web.onAcceptedRequest = nil
+            pendingBoundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        web.load(URLRequest(url: try XCTUnwrap(request.url)))
+        await fulfillment(of: [committed], timeout: 10)
+        XCTAssertEqual(web.url, request.url)
+        XCTAssertTrue(web.isLoading)
+        guard web.url == request.url, web.isLoading else { return }
+
+        // The navigator has no bound native view: its public load must queue
+        // the complete request before the real controller attachment flush.
+        web.navigationDelegate = pendingBoundary
+        navigator.load(request)
+        let priorRequests = web.requests.count
+        let priorReloads = web.reloadCount
+        coordinator.setWebView(web)
+
+        XCTAssertEqual(web.reloadCount, priorReloads)
+        XCTAssertEqual(web.requests.count, priorRequests + 1)
+        let issued = try XCTUnwrap(web.requests.last)
+        XCTAssertEqual(issued.url, request.url)
+        XCTAssertEqual(issued.httpMethod, request.httpMethod)
+        XCTAssertEqual(issued.httpBody, request.httpBody)
+        XCTAssertEqual(issued.allHTTPHeaderFields, request.allHTTPHeaderFields)
+        XCTAssertEqual(issued.cachePolicy, request.cachePolicy)
+
+        // Repeated host notifications must retain the accepted native owner,
+        // including while policy holds the request beyond the old retry timer.
+        let replay = expectation(description: "Accepted request cannot load again before provisional start")
+        replay.isInverted = true
+        web.onAcceptedRequest = { _, _ in replay.fulfill() }
+        navigator.handleWindowAttachmentChanged(webView: web)
+        coordinator.setWebView(web)
+        navigator.handleWindowAttachmentChanged(webView: web)
+        XCTAssertEqual(web.requests.count, priorRequests + 1)
+        await fulfillment(of: [policy], timeout: 10)
+        XCTAssertNotNil(pendingBoundary.decision)
+        await fulfillment(of: [replay], timeout: 0.25)
+        web.onAcceptedRequest = nil
+        XCTAssertEqual(web.requests.count, priorRequests + 1)
+
+        // Equal request bytes are still a distinct explicit user intent.
+        let firstNavigation = try XCTUnwrap(web.issuedNavigation)
+        navigator.load(request)
+        XCTAssertEqual(web.requests.count, priorRequests + 2)
+        XCTAssertFalse(web.issuedNavigation === firstNavigation)
+    }
+
+    private func requestHost() -> (WebViewNavigator, WebViewCoordinator, HotfixPendingRequestWebView, UIWindow) {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        let web = HotfixPendingRequestWebView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: .init()
+        )
+        let controller = WebViewController(webView: web)
+        let window = HotfixSafeAreaWindow(frame: web.frame)
+        window.rootViewController = controller
+        window.isHidden = false
+        controller.view.layoutIfNeeded()
+        return (navigator, coordinator, web, window)
+    }
+
+    func testPendingRequestRetriesNilNativeReturnsUntilOneNavigationIsAccepted() async throws {
+        let (navigator, coordinator, web, window) = requestHost()
+        let policy = expectation(description: "Retry reaches real native policy")
+        let boundary = HotfixPendingNavigationDelegate(policy)
+        web.navigationDelegate = boundary
+        defer {
+            web.onAcceptedRequest = nil
+            boundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var request = URLRequest(url: URL(string: "https://pending.example/retry")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data("retry-payload".utf8)
+        request.setValue("preserved", forHTTPHeaderField: "X-Manabi-Request")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        web.requestsToRefuse = 2
+        navigator.load(request)
+        coordinator.setWebView(web)
+        XCTAssertEqual(web.requests.count, 1, "Redundant attachment cannot bypass a scheduled nil-return retry")
+        navigator.handleWindowAttachmentChanged(webView: web)
+        XCTAssertEqual(web.requests.count, 1)
+        await fulfillment(of: [policy], timeout: 10)
+        XCTAssertEqual(web.requests.count, 3)
+        XCTAssertNotNil(web.issuedNavigation)
+        for attempted in web.requests {
+            XCTAssertEqual(attempted.url, request.url)
+            XCTAssertEqual(attempted.httpMethod, request.httpMethod)
+            XCTAssertEqual(attempted.httpBody, request.httpBody)
+            XCTAssertEqual(attempted.allHTTPHeaderFields, request.allHTTPHeaderFields)
+            XCTAssertEqual(attempted.cachePolicy, request.cachePolicy)
+        }
+        let replay = expectation(description: "Successful retry cannot issue another accepted navigation")
+        replay.isInverted = true
+        web.onAcceptedRequest = { _, _ in replay.fulfill() }
+        navigator.handleWindowAttachmentChanged(webView: web)
+        await fulfillment(of: [replay], timeout: 0.25)
+        XCTAssertEqual(web.requests.count, 3)
+    }
+
+    func testReentrantSameURLSuccessorKeepsItsConcreteNavigationOwnership() async throws {
+        let (navigator, coordinator, web, window) = requestHost()
+        let policy = expectation(description: "Reentrant successor reaches real native policy")
+        let boundary = HotfixPendingNavigationDelegate(policy)
+        web.navigationDelegate = boundary
+        defer {
+            web.onAcceptedRequest = nil
+            boundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        let request = URLRequest(url: URL(string: "https://pending.example/reentrant")!)
+        var obsoleteNavigation: WKNavigation?
+        web.onAcceptedRequest = { _, navigation in
+            web.onAcceptedRequest = nil
+            obsoleteNavigation = navigation
+            let issuedCount = web.requests.count
+            navigator.handleWindowAttachmentChanged(webView: web)
+            XCTAssertEqual(web.requests.count, issuedCount,
+                           "Attachment during a synchronous load cannot issue the same intent again")
+            // A real native load has returned to its override, but has not yet
+            // returned to the old navigator call. Admit an equal newer request.
+            navigator.load(request)
+        }
+        navigator.load(request)
+        coordinator.setWebView(web)
+        let obsolete = try XCTUnwrap(obsoleteNavigation)
+        let successor = try XCTUnwrap(web.issuedNavigation)
+        XCTAssertFalse(obsolete === successor)
+        XCTAssertEqual(web.requests.count, 2)
+        await fulfillment(of: [policy], timeout: 10)
+
+        // The obsolete synchronous return must not reclaim the pool's native
+        // navigation owner. The successor's real receipt must still consume its
+        // pending request at the held public policy boundary.
+        XCTAssertEqual(web.navigationCallbackDisposition(successor), .current)
+        navigator.handleWindowAttachmentChanged(webView: web)
+        XCTAssertEqual(web.requests.count, 2)
+        coordinator.webView(web, didStartProvisionalNavigation: successor)
+        coordinator.tearDownBindingsForDetachedWebView(web)
+        coordinator.setWebView(web)
+        XCTAssertEqual(web.requests.count, 2, "The successor's own start must consume its request before reattachment")
+    }
+
+    func testNilReturnRetryCannotReplayAfterPreparedDataSupersedesRequest() async throws {
+        let (navigator, coordinator, web, window) = requestHost()
+        let policy = expectation(description: "Prepared data reaches real native policy")
+        let boundary = HotfixPendingNavigationDelegate(policy)
+        web.navigationDelegate = boundary
+        defer {
+            web.onAcceptedRequest = nil
+            boundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        web.requestsToRefuse = 1
+        navigator.load(URLRequest(url: URL(string: "https://pending.example/obsolete")!))
+        coordinator.setWebView(web)
+        XCTAssertEqual(web.requests.count, 1)
+        navigator.load(Data("<html><body>Prepared successor</body></html>".utf8),
+                       mimeType: "text/html", characterEncodingName: "utf-8",
+                       baseURL: URL(string: "https://pending.example/prepared")!)
+        let identity = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
+        await fulfillment(of: [policy], timeout: 10)
+        let replay = expectation(description: "Canceled request retry cannot replace prepared data")
+        replay.isInverted = true
+        web.onAcceptedRequest = { _, _ in replay.fulfill() }
+        navigator.handleWindowAttachmentChanged(webView: web)
+        await fulfillment(of: [replay], timeout: 0.25)
+        XCTAssertEqual(web.requests.count, 1)
+        XCTAssertTrue(navigator.isCurrent(identity))
+    }
+
+    func testAcceptedPostCannotReplayWhenHostDetachesBeforeProvisionalStart() async throws {
+        try await assertAcceptedPostCannotReplay(rebindBeforeNativeReturn: false)
+    }
+
+    func testAcceptedPostCannotReplayWhenHostRebindsInsideNativeLoad() async throws {
+        try await assertAcceptedPostCannotReplay(rebindBeforeNativeReturn: true)
+    }
+
+    private func assertAcceptedPostCannotReplay(rebindBeforeNativeReturn: Bool) async throws {
+        let (navigator, coordinator, web, window) = requestHost()
+        let policy = expectation(description: "Accepted POST is held before provisional start")
+        let boundary = HotfixPendingNavigationDelegate(policy)
+        web.navigationDelegate = boundary
+        defer {
+            web.onAcceptedRequest = nil
+            boundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var request = URLRequest(url: URL(string: "https://pending.example/accepted-reattach")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data("accepted-post-payload".utf8)
+        request.setValue("preserved", forHTTPHeaderField: "X-Manabi-Request")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        if rebindBeforeNativeReturn {
+            web.onAcceptedRequest = { _, _ in
+                web.onAcceptedRequest = nil
+                coordinator.tearDownBindingsForDetachedWebView(web)
+                coordinator.setWebView(web)
+                XCTAssertEqual(web.requests.count, 1, "A rebind must wait for the native acceptance result")
+            }
+        }
+        navigator.load(request)
+        coordinator.setWebView(web)
+        await fulfillment(of: [policy], timeout: 10)
+        let accepted = try XCTUnwrap(web.issuedNavigation)
+        XCTAssertEqual(web.requests.count, 1)
+
+        // Detach retires the old navigation receipt. Its accepted request must
+        // retire with it rather than becoming a fresh queued POST on rebind.
+        coordinator.tearDownBindingsForDetachedWebView(web)
+        let replay = expectation(description: "Accepted POST cannot replay after native host retirement")
+        replay.isInverted = true
+        web.onAcceptedRequest = { _, _ in replay.fulfill() }
+        coordinator.setWebView(web)
+        navigator.handleWindowAttachmentChanged(webView: web)
+        await fulfillment(of: [replay], timeout: 0.25)
+        web.onAcceptedRequest = nil
+        XCTAssertEqual(web.requests.count, 1)
+        XCTAssertTrue(web.issuedNavigation === accepted)
+
+        // An equal subsequent explicit intent remains eligible to issue.
+        navigator.load(request)
+        XCTAssertEqual(web.requests.count, 2)
+        XCTAssertFalse(web.issuedNavigation === accepted)
+        let issued = try XCTUnwrap(web.requests.last)
+        XCTAssertEqual(issued.httpMethod, request.httpMethod)
+        XCTAssertEqual(issued.httpBody, request.httpBody)
+        XCTAssertEqual(issued.allHTTPHeaderFields, request.allHTTPHeaderFields)
+        XCTAssertEqual(issued.cachePolicy, request.cachePolicy)
+    }
+
+    func testNilNativeReturnAfterSynchronousHostRebindStillRetriesOnce() async throws {
+        let (navigator, coordinator, web, window) = requestHost()
+        let policy = expectation(description: "Rebound nil-return request reaches native policy")
+        let boundary = HotfixPendingNavigationDelegate(policy)
+        web.navigationDelegate = boundary
+        defer {
+            web.onRefusedRequest = nil
+            web.onAcceptedRequest = nil
+            boundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        web.requestsToRefuse = 1
+        web.onRefusedRequest = {
+            web.onRefusedRequest = nil
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            coordinator.setWebView(web)
+            XCTAssertEqual(web.requests.count, 1, "A rebind must await the optional native return")
+        }
+        navigator.load(URLRequest(url: URL(string: "https://pending.example/nil-rebind")!))
+        coordinator.setWebView(web)
+        XCTAssertEqual(web.requests.count, 1)
+        await fulfillment(of: [policy], timeout: 10)
+        XCTAssertEqual(web.requests.count, 2)
+        XCTAssertNotNil(web.issuedNavigation)
+        let replay = expectation(description: "Accepted rebind retry cannot issue again")
+        replay.isInverted = true
+        web.onAcceptedRequest = { _, _ in replay.fulfill() }
+        navigator.handleWindowAttachmentChanged(webView: web)
+        await fulfillment(of: [replay], timeout: 0.25)
+        XCTAssertEqual(web.requests.count, 2)
+    }
+
+    func testDetachedHostCancelsNilReturnRetryAndReattachmentIssuesOnce() async throws {
+        let (navigator, coordinator, web, window) = requestHost()
+        let policy = expectation(description: "Reattached request reaches real native policy")
+        let boundary = HotfixPendingNavigationDelegate(policy)
+        web.navigationDelegate = boundary
+        defer {
+            web.onAcceptedRequest = nil
+            boundary.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.stopLoading()
+            web.navigationDelegate = nil
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        web.requestsToRefuse = 1
+        let request = URLRequest(url: URL(string: "https://pending.example/reattach")!)
+        navigator.load(request)
+        coordinator.setWebView(web)
+        XCTAssertEqual(web.requests.count, 1)
+        coordinator.tearDownBindingsForDetachedWebView(web)
+        let detachedLoad = expectation(description: "A retired host cannot retry its native request")
+        detachedLoad.isInverted = true
+        web.onAcceptedRequest = { _, _ in detachedLoad.fulfill() }
+        await fulfillment(of: [detachedLoad], timeout: 0.25)
+        web.onAcceptedRequest = nil
+        XCTAssertEqual(web.requests.count, 1)
+        coordinator.setWebView(web)
+        await fulfillment(of: [policy], timeout: 10)
+        XCTAssertEqual(web.requests.count, 2)
+        navigator.handleWindowAttachmentChanged(webView: web)
+        XCTAssertEqual(web.requests.count, 2)
+    }
+
+
     func testPendingRequestStartWithOutgoingURLCannotReplayAfterReaderReady() async throws {
         let navigator = WebViewNavigator()
         navigator.shouldLoadFallbackOnAttach = false
