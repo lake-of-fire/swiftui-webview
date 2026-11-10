@@ -5964,6 +5964,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     fileprivate var pendingRequest: URLRequest?
     private var pendingRequestNavigation: WKNavigation?
+    private var pendingRequestIdentity = UUID()
+    @MainActor private var pendingRequestNativeCallIdentity: UUID?
     fileprivate var pendingHTML: (html: String, baseURL: URL?)?
     fileprivate var pendingHTMLContentID: WebViewPoolContentID?
     fileprivate var pendingDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
@@ -5979,6 +5981,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var contentRulesBypassGate = WebViewContentRulesBypassGate()
     @MainActor private var pendingRequestLoadGeneration: Int = 0
     @MainActor private var pendingRequestLoadTask: Task<Void, Never>?
+    @MainActor private var pendingRequestIssuingGeneration: Int?
     @MainActor private var attachFallbackLoadGeneration: Int = 0
     @MainActor private var attachFallbackLoadTask: Task<Void, Never>?
     @MainActor private var readerLoadTraceID: UUID?
@@ -6221,7 +6224,10 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "webViewID": readerLoadObjectIDString(webView)
             ]
         )
+        let generation = pendingRequestLoadGeneration
         webView.stopLoading()
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView) else { return true }
         schedulePendingRequestLoadRetry(
             request: request,
             webView: webView,
@@ -6485,6 +6491,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         pendingRequestLoadGeneration &+= 1
         pendingRequestLoadTask?.cancel()
         pendingRequestLoadTask = nil
+        pendingRequestIssuingGeneration = nil
     }
 
     /// Provisional start can still expose the outgoing document URL. Retire only
@@ -6494,6 +6501,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard let navigation, pendingRequestNavigation === navigation else { return false }
         pendingRequest = nil
         pendingRequestNavigation = nil
+        pendingRequestIdentity = UUID()
         cancelPendingRequestLoadTask()
         return true
     }
@@ -6505,6 +6513,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         }
         pendingRequest = nil
         pendingRequestNavigation = nil
+        pendingRequestIdentity = UUID()
         pendingHTML = nil
         pendingHTMLContentID = nil
         pendingDataLoad = nil
@@ -6661,7 +6670,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         ] as [String : Any]
                     )
                 }
-                guard self.pendingRequest?.url == request.url else { return }
+                guard self.pendingRequest != nil, self.pendingRequestNavigation == nil else { return }
                 if webView.window != nil && webView.superview != nil {
                     if swiftUIWebViewDebugBuildEnabled
                         && (self.shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
@@ -6675,23 +6684,20 @@ public class WebViewNavigator: NSObject, ObservableObject {
                             ] as [String : Any]
                         )
                     }
-                    let navigation: WKNavigation?
-                    if let url = request.url, url.isFileURL {
-                        navigation = webView.loadFileURL(
-                            url,
-                            allowingReadAccessTo: url
-                        )
-                    } else {
-                        navigation = webView.load(request)
-                    }
-                    self.pendingRequestNavigation = navigation
-                    beginPooledContentUnkeyedNavigation(
-                        webView,
-                        navigation: navigation
+                    self.pendingRequestIssuingGeneration = generation
+                    let finished = self.startPendingRequestNavigation(
+                        request, on: webView, generation: generation,
+                        diagnosticsReason: "retry"
                     )
-                    self.pendingRequestLoadGeneration &+= 1
-                    self.pendingRequestLoadTask = nil
-                    return
+                    if self.pendingRequestIssuingGeneration == generation {
+                        self.pendingRequestIssuingGeneration = nil
+                    }
+                    if finished {
+                        if self.pendingRequestLoadGeneration == generation {
+                            self.pendingRequestLoadTask = nil
+                        }
+                        return
+                    }
                 }
                 currentAttempt += 1
             }
@@ -6725,10 +6731,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "requestURL": request.url?.absoluteString ?? "nil"
             ]
         )
+        let generation = pendingRequestLoadGeneration
         webView.stopLoading()
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView) else { return }
         let navigation = webView.load(
             URLRequest(url: URL(string: "about:blank")!)
         )
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView) else { return }
         beginPooledContentUnkeyedNavigation(
             webView,
             navigation: navigation
@@ -6744,6 +6755,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     private func issuePendingRequestLoad(_ request: URLRequest, on webView: WKWebView, restartIfSameURL: Bool, diagnosticsReason: String) {
         guard ownsBoundWebView(webView) else { return }
+        // Keep the request until its concrete provisional-start receipt, but do
+        // not issue it again while WebKit has accepted it or an attempt is active.
+        guard pendingRequest != nil, pendingRequestNavigation == nil,
+              pendingRequestNativeCallIdentity != pendingRequestIdentity,
+              pendingRequestIssuingGeneration == nil,
+              pendingRequestLoadTask == nil else { return }
         guard webView.window != nil, webView.superview != nil else {
             if swiftUIWebViewDebugBuildEnabled
                 && (shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
@@ -6761,6 +6778,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             return
         }
+        let generation = pendingRequestLoadGeneration
+        pendingRequestIssuingGeneration = generation
+        defer {
+            if pendingRequestIssuingGeneration == generation {
+                pendingRequestIssuingGeneration = nil
+            }
+        }
         logPreIssueLoadState(for: request, reason: "issuePendingRequestLoad:\(diagnosticsReason)")
         if recoverFromStaleAboutBlankIfNeeded(
             for: request,
@@ -6769,6 +6793,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
         ) {
             return
         }
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView) else { return }
         if resetInFlightAboutBlankIfNeeded(
             for: request,
             on: webView,
@@ -6812,9 +6838,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 ] as [String : Any]
             )
         }
-        if disposition != .deferUntilAttached {
-            beginPooledContentUnkeyedNavigation(webView)
-        }
         switch disposition {
         case .deferUntilAttached:
             if swiftUIWebViewDebugBuildEnabled
@@ -6832,84 +6855,75 @@ public class WebViewNavigator: NSObject, ObservableObject {
             )
             }
             return
-        case .skipAlreadyLoading:
-            if swiftUIWebViewDebugBuildEnabled
-                && (shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
-                debugPrint(
-                    "# READER navigator.flushPendingRequest.skipAlreadyLoading",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil",
-                        "reason": diagnosticsReason,
-                        "webViewURL": webView.url?.absoluteString ?? "nil",
-                        "webViewIsLoading": webView.isLoading,
-                    "webViewEstimatedProgress": webView.estimatedProgress
-                ] as [String : Any]
-            )
-            }
-            let nextGeneration = pendingRequestLoadGeneration
-            if swiftUIWebViewDebugBuildEnabled
-                && (shouldLoadFallbackOnAttach || swiftUIWebViewPageTurnDiagnosticsEnabled) {
-                debugPrint(
-                    "# READER navigator.flushPendingRequest.restart.fire",
-                    [
-                        "navigatorID": debugIdentifier ?? "nil",
-                        "navigatorObjectID": debugObjectID,
-                        "url": request.url?.absoluteString ?? "nil",
-                        "reason": diagnosticsReason,
-                        "webViewURL": webView.url?.absoluteString ?? "nil",
-                        "webViewIsLoading": webView.isLoading,
-                        "webViewEstimatedProgress": webView.estimatedProgress
-                    ] as [String : Any]
+        case .skipAlreadyLoading, .loadFileURL, .loadRequest:
+            // A new explicit same-URL intent still loads its complete request.
+            if !startPendingRequestNavigation(
+                request, on: webView, generation: generation,
+                diagnosticsReason: diagnosticsReason
+            ) {
+                schedulePendingRequestLoadRetry(
+                    request: request, webView: webView, attempt: 1,
+                    generation: generation
                 )
             }
-            let navigation: WKNavigation?
-            // Reissue the full pending request so its payload and headers are retained.
-            if let url = request.url, url.isFileURL {
-                markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
-                navigation = webView.loadFileURL(
-                    url,
-                    allowingReadAccessTo: url
-                )
-            } else {
-                markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
-                navigation = webView.load(request)
-            }
-            pendingRequestNavigation = navigation
-            beginPooledContentUnkeyedNavigation(
-                webView,
-                navigation: navigation
-            )
-            self.schedulePendingRequestLoadRetry(
-                request: request,
-                webView: webView,
-                attempt: 1,
-                generation: nextGeneration
-            )
-            return
-        case .loadFileURL:
-            guard let url = request.url else { return }
-            markReaderLoadIssued(for: request, reason: "loadFileURL:\(diagnosticsReason)")
-            let navigation = webView.loadFileURL(
+        }
+    }
+
+    /// Returns false only when the current request received no native navigation
+    /// and needs another bounded attempt. Synchronous native calls may reenter
+    /// the navigator; an obsolete return must not claim a successor's request.
+    @MainActor
+    private func startPendingRequestNavigation(
+        _ request: URLRequest, on webView: WKWebView, generation: Int,
+        diagnosticsReason: String
+    ) -> Bool {
+        // The pending-load generation follows accepted request ownership. Native
+        // policy acknowledgment may advance the separate resolver intent.
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView), pendingRequest != nil else { return true }
+        markReaderLoadIssued(for: request, reason: "pendingRequest:\(diagnosticsReason)")
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView), pendingRequest != nil else { return true }
+        beginPooledContentUnkeyedNavigation(webView)
+        let requestIdentity = pendingRequestIdentity
+        pendingRequestNativeCallIdentity = requestIdentity
+        let navigation: WKNavigation?
+        if let url = request.url, url.isFileURL {
+            navigation = webView.loadFileURL(
                 url,
                 allowingReadAccessTo: url
             )
-            pendingRequestNavigation = navigation
-            beginPooledContentUnkeyedNavigation(
-                webView,
-                navigation: navigation
-            )
-        case .loadRequest:
-            markReaderLoadIssued(for: request, reason: "loadRequest:\(diagnosticsReason)")
-            let navigation = webView.load(request)
-            pendingRequestNavigation = navigation
-            beginPooledContentUnkeyedNavigation(
-                webView,
-                navigation: navigation
-            )
+        } else {
+            navigation = webView.load(request)
         }
-        self.cancelPendingRequestLoadTask()
+        if pendingRequestNativeCallIdentity == requestIdentity {
+            pendingRequestNativeCallIdentity = nil
+        }
+        guard pendingRequestLoadGeneration == generation,
+              ownsBoundWebView(webView), pendingRequest != nil else {
+            // A native load may synchronously retire/rebind its host before its
+            // optional navigation returns. Hold that same request out of attach
+            // flushing until we know whether WebKit accepted it. Equal newer
+            // explicit intents have another identity and remain untouched.
+            if pendingRequestIdentity == requestIdentity, pendingRequest != nil {
+                if navigation != nil {
+                    pendingRequest = nil
+                    pendingRequestIdentity = UUID()
+                } else if let currentWebView = self.webView,
+                          ownsBoundWebView(currentWebView) {
+                    schedulePendingRequestLoadRetry(
+                        request: request, webView: currentWebView, attempt: 1,
+                        generation: pendingRequestLoadGeneration
+                    )
+                }
+            }
+            return true
+        }
+        pendingRequestNavigation = navigation
+        beginPooledContentUnkeyedNavigation(webView, navigation: navigation)
+        guard navigation != nil else { return false }
+        cancelPendingRequestLoadTask()
+        return true
     }
 
     @MainActor
@@ -6976,6 +6990,16 @@ public class WebViewNavigator: NSObject, ObservableObject {
             if oldValue != nil, oldValue !== webView {
                 beginNavigationIntent()
                 retireIssuedDataNavigation()
+                // Ownership retirement cannot make an accepted request eligible
+                // for replay (in particular, a POST may already have side effects).
+                // Keep only requests that WebKit has not yet accepted so they can
+                // retry when a native host becomes available again.
+                if pendingRequestNavigation != nil {
+                    pendingRequest = nil
+                    pendingRequestIdentity = UUID()
+                }
+                pendingRequestNavigation = nil
+                cancelPendingRequestLoadTask()
             }
             let shouldLogDiagnostics = swiftUIWebViewPageTurnDiagnosticsEnabled
             let nextHasAttachedWebView = webView != nil
@@ -7012,7 +7036,6 @@ public class WebViewNavigator: NSObject, ObservableObject {
             }
             guard let webView else { return }
             if let request = pendingRequest {
-                clearPoolContentState(on: webView)
                 cancelAttachFallbackLoadTask(reason: "pendingRequestFlushedOnAttach")
                 if swiftUIWebViewDebugBuildEnabled && (shouldLogDiagnostics || !shouldLoadFallbackOnAttach) {
                     debugPrint(
@@ -7126,59 +7149,16 @@ public class WebViewNavigator: NSObject, ObservableObject {
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
         supersedePendingLoads(attachFallbackReason: "explicitRequestLoad")
+        pendingRequest = request
+        let generation = pendingRequestLoadGeneration
         beginReaderLoadTrace(for: request)
+        guard pendingRequestLoadGeneration == generation else { return }
         if let webView = webView {
             clearPoolContentState(on: webView)
-            logPreIssueLoadState(for: request, reason: "navigator.load")
-            if webView.window == nil || webView.superview == nil {
-                pendingRequest = request
-                readerLoadLog(
-                    "webViewNavigator.requestDeferredUntilAttached",
-                    [
-                        "url": request.url?.absoluteString ?? "nil",
-                        "hasSuperview": "\(webView.superview != nil)",
-                        "hasWindow": "\(webView.window != nil)"
-                    ]
-                )
-                return
-            }
-            if recoverFromStaleAboutBlankIfNeeded(for: request, on: webView, reason: "navigator.load") {
-                return
-            }
-            if resetInFlightAboutBlankIfNeeded(for: request, on: webView, reason: "navigator.load") {
-                return
-            }
-            if shouldResetThroughAboutBlankBeforeInternalReaderLoad(
-                currentURL: webView.url,
-                requestURL: request.url
-            ) {
-                stagePendingRequestThroughAboutBlank(
-                    request,
-                    on: webView,
-                    diagnosticsReason: "navigator.load"
-                )
-                return
-            }
-            if let url = request.url, url.isFileURL {
-                markReaderLoadIssued(for: request, reason: "navigator.loadFileURL")
-                let navigation = webView.loadFileURL(
-                    url,
-                    allowingReadAccessTo: url
-                )
-                beginPooledContentUnkeyedNavigation(
-                    webView,
-                    navigation: navigation
-                )
-            } else {
-                markReaderLoadIssued(for: request, reason: "navigator.loadRequest")
-                let navigation = webView.load(request)
-                beginPooledContentUnkeyedNavigation(
-                    webView,
-                    navigation: navigation
-                )
-            }
-        } else {
-            pendingRequest = request
+            issuePendingRequestLoad(
+                request, on: webView, restartIfSameURL: false,
+                diagnosticsReason: "navigator.load"
+            )
         }
     }
     
