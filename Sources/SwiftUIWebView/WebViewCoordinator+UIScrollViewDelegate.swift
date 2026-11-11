@@ -86,17 +86,18 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     /// Both bottom-state and navigation bindings can synchronously reenter the delegate.
-    private func beginScrollCallback(for webView: WKWebView) -> () -> Bool {
+    private func beginScrollCallback(for webView: WKWebView) -> @MainActor () -> Bool {
         scrollCallbackGeneration &+= 1
         let generation = scrollCallbackGeneration
+        // Retain both participants through this synchronous publication. The
+        // release optimizer previously destroyed a local weak capture before
+        // its final invocation during native scroll reentry.
         let context = captureDocumentCallbackContext(for: webView)
-        let binding = javaScriptBindingToken(for: webView)
-        return { [weak self, weak webView] in
-            guard let self, let webView else { return false }
-            return self.navigator.webView === webView
-                && self.scrollCallbackGeneration == generation
+        let ownsNavigation = navigationCallbackFence(for: webView)
+        return {
+            self.scrollCallbackGeneration == generation
+                && ownsNavigation()
                 && self.captureDocumentCallbackContext(for: webView) == context
-                && self.javaScriptBindingToken(for: webView) == binding
         }
     }
 

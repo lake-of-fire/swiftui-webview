@@ -997,6 +997,45 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
         XCTAssertLessThan(scroll.contentInset.left + scroll.contentInset.right, controller.webView.bounds.width)
     }
 
+    func testInsetLayoutWithScrollDelegatePreservesPinnedAndRestoredOffsets() {
+        let (window, controller) = host()
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        let webView = controller.webView
+        let scrollView = webView.scrollView
+        coordinator.setWebView(webView)
+        scrollView.delegate = coordinator
+        defer {
+            coordinator.onScrollBottomStateChanged = nil
+            coordinator.tearDownBindingsForDetachedWebView(webView)
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        scrollView.contentSize = CGSize(width: 640, height: 2000)
+        scrollView.contentOffset = CGPoint(x: -scrollView.adjustedContentInset.left,
+                                           y: -scrollView.adjustedContentInset.top)
+        var publications = 0
+        coordinator.onScrollBottomStateChanged = { _ in publications += 1 }
+        coordinator.lastPublishedScrollBottomState = nil
+        controller.obscuredInsets = UIEdgeInsets(top: 40, left: 10, bottom: 30, right: 12)
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+        XCTAssertGreaterThan(publications, 0)
+        XCTAssertEqual(scrollView.contentOffset.y, -scrollView.adjustedContentInset.top, accuracy: 1)
+
+        scrollView.contentOffset = CGPoint(x: 60, y: 400)
+        for top in stride(from: CGFloat(50), through: 90, by: 10) {
+            coordinator.lastPublishedScrollBottomState = nil
+            controller.obscuredInsets = UIEdgeInsets(top: top, left: 20, bottom: 40, right: 22)
+            controller.view.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            XCTAssertEqual(scrollView.contentOffset.x, 60, accuracy: 1)
+            XCTAssertEqual(scrollView.contentOffset.y, 400, accuracy: 1)
+        }
+    }
+
     func testZeroLayoutDefersClearanceUntilUsableViewport() {
         let web = EnhancedWKWebView(frame: .zero, configuration: .init())
         let controller = WebViewController(webView: web)

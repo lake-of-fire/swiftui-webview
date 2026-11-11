@@ -200,6 +200,65 @@ final class WebViewScrollCompletionOwnershipTests: XCTestCase {
         XCTAssertEqual(coordinator.lastContentOffset, CGPoint(x: 11, y: 29))
     }
 
+    func testQueuedHostReplacementDuringPublicationPreservesReplacementScrollState() {
+        let (coordinator, view) = fixture()
+        let replacement = WKWebView(frame: view.frame, configuration: .init())
+        defer {
+            coordinator.onScrollBottomStateChanged = nil
+            coordinator.tearDownBindingsForDetachedWebView(replacement)
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        coordinator.webView(view, didCommit: nil)
+        XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: view))
+        coordinator.onScrollBottomStateChanged = { _ in
+            coordinator.scheduleWebViewBinding(replacement, paginationReason: "test.pendingReplacement")
+            coordinator.accumulatedScrollOffset = 59
+            coordinator.lastContentOffset = CGPoint(x: 43, y: 61)
+        }
+        coordinator.lastPublishedScrollBottomState = nil
+        coordinator.scrollViewWillBeginDragging(view.scrollView)
+        XCTAssertEqual(coordinator.accumulatedScrollOffset, 59)
+        XCTAssertEqual(coordinator.lastContentOffset, CGPoint(x: 43, y: 61))
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: view))
+    }
+
+    func testInactiveDocumentInvalidationDuringPublicationPreservesNewScrollState() {
+        let (coordinator, view) = fixture()
+        defer {
+            coordinator.onScrollBottomStateChanged = nil
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: view))
+        coordinator.onScrollBottomStateChanged = { _ in
+            coordinator.webView(view, didStartProvisionalNavigation: nil)
+            coordinator.accumulatedScrollOffset = 41
+            coordinator.lastContentOffset = CGPoint(x: 31, y: 43)
+        }
+        coordinator.lastPublishedScrollBottomState = nil
+        coordinator.scrollViewWillBeginDragging(view.scrollView)
+        XCTAssertEqual(coordinator.accumulatedScrollOffset, 41)
+        XCTAssertEqual(coordinator.lastContentOffset, CGPoint(x: 31, y: 43))
+    }
+
+    func testUnboundCallerReplacementDuringPublicationPreservesNewScrollState() {
+        let (coordinator, view) = fixture()
+        coordinator.updateScriptCaller(WebViewScriptCaller())
+        defer {
+            coordinator.onScrollBottomStateChanged = nil
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        XCTAssertNil(coordinator.javaScriptBindingToken(for: view))
+        coordinator.onScrollBottomStateChanged = { _ in
+            coordinator.updateScriptCaller(WebViewScriptCaller())
+            coordinator.accumulatedScrollOffset = 47
+            coordinator.lastContentOffset = CGPoint(x: 37, y: 53)
+        }
+        coordinator.lastPublishedScrollBottomState = nil
+        coordinator.scrollViewWillBeginDragging(view.scrollView)
+        XCTAssertEqual(coordinator.accumulatedScrollOffset, 47)
+        XCTAssertEqual(coordinator.lastContentOffset, CGPoint(x: 37, y: 53))
+    }
+
     func testRuntimeProvidersReaderInferenceAndOrdinaryWritingModes() async throws {
         // In HTML, WebKit propagates the body's writing mode to the root's
         // computed style. Opposing authored html/body styles do not establish

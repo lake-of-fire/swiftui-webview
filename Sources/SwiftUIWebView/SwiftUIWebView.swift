@@ -3644,7 +3644,7 @@ public class WebViewCoordinator: NSObject {
     /// source, document, or caller. Retain the native receipt's existing owner
     /// through those publication boundaries, including inactive error contexts.
     @MainActor
-    private func navigationCallbackFence(for sourceWebView: WKWebView) -> @MainActor () -> Bool {
+    internal func navigationCallbackFence(for sourceWebView: WKWebView) -> @MainActor () -> Bool {
         let generation = documentCallbackGeneration
         let binding = javaScriptBindingToken(for: sourceWebView)
         let callerGeneration = scriptCallerReplacementGeneration
