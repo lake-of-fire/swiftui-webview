@@ -15,7 +15,7 @@ let package = Package(
             targets: ["SwiftUIWebView"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-collections.git", branch: "main"),
+        .package(url: "https://github.com/apple/swift-collections.git", exact: "1.6.0"),
         .package(url: "https://github.com/nicklockwood/LRUCache.git", from: "1.1.2"),
 //        .package(url: "https://github.com/lake-of-fire/bookmark-storage.git", branch: "master"),
     ],
