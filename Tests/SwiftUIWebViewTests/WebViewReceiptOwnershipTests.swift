@@ -2,6 +2,9 @@ import Foundation
 import WebKit
 import XCTest
 @testable import SwiftUIWebView
+#if os(iOS)
+import UIKit
+#endif
 
 @MainActor
 private final class ReceiptOwnershipGate {
@@ -189,7 +192,11 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
         handlers: WebViewMessageHandlers,
         operation: (EnhancedWKWebView) async throws -> Void
     ) async rethrows {
-        let model = WebView(navigator: WebViewNavigator(), state: .constant(.empty))
+        let navigator = WebViewNavigator()
+        // The fixture loads its own document. An attach fallback must not
+        // replace that document while the broker defers its captured receipt.
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
         let coordinator = model.makeCoordinatorForTesting(messageHandlers: handlers)
         let view = EnhancedWKWebView(
             frame: CGRect(x: 0, y: 0, width: 320, height: 480),
@@ -200,10 +207,28 @@ final class WebViewReceiptOwnershipTests: XCTestCase {
             on: view, requiredHandlers: [name], environmentHandlerNames: [name]
         )
         view.navigationDelegate = coordinator
+#if os(iOS)
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: view.frame)
+        window.frame = view.frame
+        let controller = UIViewController()
+        window.rootViewController = controller
+        controller.view.addSubview(view)
+        view.frame = controller.view.bounds
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        window.isHidden = false
+        controller.view.layoutIfNeeded()
+#endif
         defer {
             view.stopLoading()
             coordinator.tearDownBindingsForDetachedWebView(view)
             view.navigationDelegate = nil
+#if os(iOS)
+            window.isHidden = true
+            view.removeFromSuperview()
+            window.rootViewController = nil
+#endif
         }
         try await operation(view)
     }
