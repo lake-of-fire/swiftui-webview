@@ -182,7 +182,437 @@ private func drainMainDispatchQueue() async {
 }
 
 @MainActor
+private final class NavigationPublicationProbeWebView: EnhancedWKWebView {
+    var summaryRequests = 0
+
+    override func evaluateJavaScript(
+        _ javaScriptString: String,
+        completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)? = nil
+    ) {
+        if javaScriptString == webViewReaderDocumentSummaryScript { summaryRequests += 1 }
+        super.evaluateJavaScript(javaScriptString, completionHandler: completionHandler)
+    }
+}
+
+@MainActor
 final class WebViewScriptCallerTests: XCTestCase {
+    func testHTTPClientContextCapturesBoundHTTPOnlyCookiesAndUserAgent() async throws {
+        let caller = WebViewScriptCaller()
+        let model = WebView(navigator: WebViewNavigator(), state: .constant(.empty), scriptCaller: caller)
+        let coordinator = model.makeCoordinatorForTesting()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        webView.customUserAgent = "ManabiHTTPContextTest/1"
+        let cookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: "example.com", .path: "/private", .name: "session",
+            .value: "native-only", .secure: "TRUE", .init("HttpOnly"): "TRUE"
+        ]))
+        XCTAssertTrue(cookie.isHTTPOnly)
+        await withCheckedContinuation { continuation in
+            configuration.websiteDataStore.httpCookieStore.setCookie(cookie) {
+                continuation.resume()
+            }
+        }
+        coordinator.scheduleWebViewBinding(webView, paginationReason: "test.http-context")
+        coordinator.webView(webView, didCommit: nil)
+        coordinator.installScriptCallerBinding(
+            for: webView,
+            asyncCaller: { [weak webView] script, arguments, frame, world in
+                guard let webView else { throw CancellationError() }
+                let value = try await webView.callAsyncJavaScriptUsingCompletionHandler(
+                    script, arguments: arguments ?? [:], in: frame, contentWorld: world ?? .page
+                )
+                return WebViewScriptCaller.JavaScriptEvaluationResult(value)
+            },
+            unsafeCaller: nil, snapshotCapture: nil
+        )
+        defer { coordinator.tearDownBindingsForDetachedWebView(webView) }
+        let token = try XCTUnwrap(caller.currentJavaScriptBindingToken)
+        let context = try await caller.captureHTTPClientContext(requiring: token)
+        XCTAssertEqual(context.userAgent, "ManabiHTTPContextTest/1")
+        let captured = try XCTUnwrap(context.cookies.first { $0.name == "session" })
+        XCTAssertEqual(captured.value, "native-only")
+        XCTAssertEqual(captured.path, "/private")
+        XCTAssertTrue(captured.isSecure)
+        XCTAssertTrue(captured.isHTTPOnly)
+        let fence = try XCTUnwrap(caller.makeJavaScriptBindingCommitFence(requiring: token))
+        XCTAssertTrue(fence())
+        coordinator.webView(webView, didCommit: nil)
+        XCTAssertFalse(fence())
+    }
+
+    private enum HTTPContextRetirement {
+        case replacement, sameURLCommit, cancellation
+    }
+
+    private func assertHTTPContextRejectsRetirementDuringUserAgent(
+        _ retirement: HTTPContextRetirement
+    ) async throws {
+        let caller = WebViewScriptCaller()
+        let model = WebView(navigator: WebViewNavigator(), state: .constant(.empty), scriptCaller: caller)
+        let coordinator = model.makeCoordinatorForTesting()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let webView = RecordingLoadWebView(frame: .zero, configuration: configuration)
+        webView.simulatedURL = URL(string: "https://example.com/same")
+        let replacement = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        coordinator.scheduleWebViewBinding(webView, paginationReason: "test.http-retirement")
+        coordinator.webView(webView, didCommit: nil)
+        let gate = JavaScriptEvaluationGate()
+        let entered = expectation(description: "bound User-Agent evaluation entered")
+        coordinator.installScriptCallerBinding(
+            for: webView,
+            asyncCaller: { script, _, _, _ in
+                XCTAssertEqual(script, "return navigator.userAgent;")
+                entered.fulfill()
+                await gate.wait()
+                return WebViewScriptCaller.JavaScriptEvaluationResult("retired-agent")
+            },
+            unsafeCaller: nil, snapshotCapture: nil
+        )
+        let token = try XCTUnwrap(caller.currentJavaScriptBindingToken)
+        let task = Task { @MainActor in
+            do {
+                _ = try await caller.captureHTTPClientContext(requiring: token)
+                XCTFail("Retired HTTP context must not escape")
+            } catch is CancellationError {
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+        await fulfillment(of: [entered], timeout: 10)
+        switch retirement {
+        case .replacement:
+            coordinator.scheduleWebViewBinding(replacement, paginationReason: "test.http-replacement")
+            coordinator.webView(replacement, didCommit: nil)
+            coordinator.installScriptCallerBinding(
+                for: replacement,
+                asyncCaller: { _, _, _, _ in
+                    XCTFail("Retired request must not evaluate on replacement")
+                    return WebViewScriptCaller.JavaScriptEvaluationResult("replacement")
+                },
+                unsafeCaller: nil, snapshotCapture: nil
+            )
+        case .sameURLCommit:
+            let originalURL = webView.url
+            coordinator.webView(webView, didCommit: nil)
+            XCTAssertEqual(webView.url, originalURL)
+            XCTAssertNotEqual(caller.currentJavaScriptBindingToken, token)
+        case .cancellation:
+            task.cancel()
+        }
+        // Opening the gate also admits a late evaluator if the bounded arrival
+        // failed, so no continuation can be installed after its release chance.
+        await gate.open()
+        await task.value
+        coordinator.tearDownBindingsForDetachedWebView(webView)
+        coordinator.tearDownBindingsForDetachedWebView(replacement)
+    }
+
+    func testHTTPClientContextRejectsActualBindingReplacement() async throws {
+        try await assertHTTPContextRejectsRetirementDuringUserAgent(.replacement)
+    }
+
+    func testHTTPClientContextRejectsSameURLDocumentCommit() async throws {
+        try await assertHTTPContextRejectsRetirementDuringUserAgent(.sameURLCommit)
+    }
+
+    func testHTTPClientContextRejectsCancellationDuringUserAgent() async throws {
+        try await assertHTTPContextRejectsRetirementDuringUserAgent(.cancellation)
+    }
+
+    private func assertHTTPContextRejectsRetirementDuringCookieRead(
+        _ retirement: HTTPContextRetirement
+    ) async throws {
+        let caller = WebViewScriptCaller()
+        let generation = DocumentGenerationBox()
+        let gate = JavaScriptEvaluationGate()
+        let entered = expectation(description: "bound native cookie read entered")
+        caller.installBinding(
+            ownedBy: UUID(),
+            asyncCaller: { _, _, _, _ in
+                XCTFail("Retired cookie result must not authorize a User-Agent evaluation")
+                return WebViewScriptCaller.JavaScriptEvaluationResult("unexpected")
+            },
+            unsafeCaller: nil, snapshotCapture: nil, coordinateOriginInWindow: { nil },
+            documentGenerationProvider: { generation.value },
+            httpCookieCapture: {
+                entered.fulfill()
+                await gate.wait()
+                return []
+            }
+        )
+        let token = try XCTUnwrap(caller.currentJavaScriptBindingToken)
+        let task = Task { @MainActor in
+            do {
+                _ = try await caller.captureHTTPClientContext(requiring: token)
+                XCTFail("Retired cookie read must not escape")
+            } catch is CancellationError {
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        switch retirement {
+        case .replacement:
+            caller.installBinding(
+                ownedBy: UUID(),
+                asyncCaller: { _, _, _, _ in
+                    XCTFail("Retired cookie read must not evaluate on replacement")
+                    return WebViewScriptCaller.JavaScriptEvaluationResult("replacement")
+                },
+                unsafeCaller: nil, snapshotCapture: nil, coordinateOriginInWindow: { nil }
+            )
+        case .sameURLCommit:
+            generation.value &+= 1
+        case .cancellation:
+            task.cancel()
+        }
+        await gate.open()
+        await task.value
+    }
+
+    func testHTTPClientContextRejectsReplacementDuringCookieRead() async throws {
+        try await assertHTTPContextRejectsRetirementDuringCookieRead(.replacement)
+    }
+
+    func testHTTPClientContextRejectsDocumentRetirementDuringCookieRead() async throws {
+        try await assertHTTPContextRejectsRetirementDuringCookieRead(.sameURLCommit)
+    }
+
+    func testHTTPClientContextRejectsCancellationDuringCookieRead() async throws {
+        try await assertHTTPContextRejectsRetirementDuringCookieRead(.cancellation)
+    }
+
+    private enum NavigationPublicationEvent: CaseIterable, Equatable {
+        case provisionalStart, commit, finish, provisionalFailure, committedFailure, termination
+
+        var expectedCallbacks: [String] {
+            switch self {
+            case .provisionalStart: return []
+            case .commit: return ["commit-invalidation", "commit"]
+            case .finish: return ["finish"]
+            case .provisionalFailure, .committedFailure: return ["failure-disposition", "failure"]
+            case .termination: return ["termination-invalidation"]
+            }
+        }
+    }
+
+    func testNavigationPublicationRetirementSuppressesOriginalCallbacks() {
+        for event in NavigationPublicationEvent.allCases {
+            for replacement in ["view", "document", "caller"] {
+                exerciseNavigationPublication(event, replacement: replacement)
+            }
+            exerciseNavigationPublication(event, replacement: "caller", installedBinding: false)
+            exerciseNavigationPublication(event, replacement: "caller-aba", installedBinding: false)
+        }
+    }
+
+    func testLiveNavigationPublicationRetainsCallbacksForConstantAndMutableBindings() {
+        for event in NavigationPublicationEvent.allCases {
+            exerciseNavigationPublication(event, replacement: nil)
+            exerciseNavigationPublication(event, replacement: nil, constantBinding: true)
+            exerciseNavigationPublication(event, replacement: nil, installedBinding: false)
+        }
+    }
+
+    private func exerciseNavigationPublication(_ event: NavigationPublicationEvent,
+                                               replacement: String?, constantBinding: Bool = false,
+                                               installedBinding: Bool = true) {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let caller = WebViewScriptCaller(), nextCaller = WebViewScriptCaller()
+        var state = WebViewState.empty
+        var callbacks = [String]()
+        var retire: (() -> Void)?
+        var armed = false
+        var retirements = 0
+        let binding = Binding(get: { state }, set: { value in
+            state = value
+            if armed {
+                armed = false
+                retire?()
+            }
+        })
+        let model = WebView(navigator: navigator,
+            state: constantBinding ? .constant(.empty) : binding, scriptCaller: caller,
+            onNavigationCommitted: { _ in callbacks.append("commit") },
+            onNavigationFinished: { _ in callbacks.append("finish") },
+            onNavigationFailed: { _ in callbacks.append("failure") },
+            onNavigationFailedWithDisposition: { _, _ in callbacks.append("failure-disposition") },
+            onDocumentContextInvalidated: { _, reason in
+                if reason == .navigationCommitted { callbacks.append("commit-invalidation") }
+                if reason == .webContentProcessTerminated { callbacks.append("termination-invalidation") }
+            })
+        let coordinator = model.makeCoordinatorForTesting()
+        let source = EnhancedWKWebView(frame: .zero, configuration: .init())
+        let successor = EnhancedWKWebView(frame: .zero, configuration: .init())
+        coordinator.setWebView(source)
+        if installedBinding {
+            coordinator.installScriptCallerBinding(for: source,
+                asyncCaller: { _, _, _, _ in .init(nil) }, unsafeCaller: nil, snapshotCapture: nil)
+        }
+        coordinator.webView(source, didCommit: nil)
+        if event == .provisionalFailure {
+            coordinator.webView(source, didStartProvisionalNavigation: nil)
+        }
+        callbacks.removeAll()
+        retire = {
+            retirements += 1
+            switch replacement {
+            case "view":
+                coordinator.setWebView(successor)
+                coordinator.installScriptCallerBinding(for: successor,
+                    asyncCaller: { _, _, _, _ in .init(nil) }, unsafeCaller: nil, snapshotCapture: nil)
+            case "document": coordinator.webView(source, didCommit: nil)
+            case "caller", "caller-aba":
+                coordinator.updateScriptCaller(nextCaller)
+                if replacement == "caller-aba" { coordinator.updateScriptCaller(caller) }
+                if installedBinding {
+                    coordinator.installScriptCallerBinding(for: source,
+                        asyncCaller: { _, _, _, _ in .init(nil) }, unsafeCaller: nil, snapshotCapture: nil)
+                }
+            default: break
+            }
+            // A nested successor commit is valid. Only callbacks occurring
+            // after this replacement returns belong to the obsolete receipt.
+            callbacks.removeAll()
+            state.pageTitle = "successor-state"
+            state.isProvisionallyNavigating = false
+        }
+        defer {
+            retire = nil
+            coordinator.tearDownBindingsForDetachedWebView(source)
+            coordinator.tearDownBindingsForDetachedWebView(successor)
+            source.stopLoading()
+            successor.stopLoading()
+        }
+        armed = replacement != nil
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        switch event {
+        case .provisionalStart: coordinator.webView(source, didStartProvisionalNavigation: nil)
+        case .commit: coordinator.webView(source, didCommit: nil)
+        case .finish: coordinator.webView(source, didFinish: nil)
+        case .provisionalFailure: coordinator.webView(source, didFailProvisionalNavigation: nil, withError: error)
+        case .committedFailure: coordinator.webView(source, didFail: nil, withError: error)
+        case .termination: coordinator.webViewWebContentProcessDidTerminate(source)
+        }
+        XCTAssertEqual(callbacks, replacement == nil ? event.expectedCallbacks : [], "\(event)/\(replacement ?? "live")")
+        XCTAssertEqual(retirements, replacement == nil ? 0 : 1)
+        if replacement != nil {
+            XCTAssertEqual(state.pageTitle, "successor-state")
+            XCTAssertFalse(state.isProvisionallyNavigating)
+        }
+    }
+
+    func testCommitInvalidationReentryCannotPublishOriginalCommitToReplacement() {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let source = EnhancedWKWebView(frame: .zero, configuration: .init())
+        let successor = EnhancedWKWebView(frame: .zero, configuration: .init())
+        var replace: (() -> Void)?
+        var committed = 0
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onNavigationCommitted: { _ in committed += 1 },
+            onDocumentContextInvalidated: { _, reason in
+                if reason == .navigationCommitted { replace?() }
+            })
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        replace = { coordinator.setWebView(successor) }
+        defer { replace = nil; coordinator.tearDownBindingsForDetachedWebView(successor) }
+        coordinator.webView(source, didCommit: nil)
+        XCTAssertEqual(committed, 0)
+        XCTAssertTrue(navigator.webView === successor)
+    }
+
+    func testFailureDispositionReentryCannotPublishLegacyFailureToReplacement() {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let source = EnhancedWKWebView(frame: .zero, configuration: .init())
+        let successor = EnhancedWKWebView(frame: .zero, configuration: .init())
+        var replace: (() -> Void)?
+        var failed = 0
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onNavigationFailed: { _ in failed += 1 },
+            onNavigationFailedWithDisposition: { _, _ in replace?() })
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        replace = { coordinator.setWebView(successor) }
+        defer { replace = nil; coordinator.tearDownBindingsForDetachedWebView(successor) }
+        coordinator.webView(source, didFail: nil,
+            withError: NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost))
+        XCTAssertEqual(failed, 0)
+        XCTAssertTrue(navigator.webView === successor)
+    }
+
+    func testStateEqualityCannotAuthorizeURLPublicationAfterDocumentReentry() {
+        for replacement in ["document", "caller", "caller-aba", "same-caller"] {
+            exerciseEqualStatePublicationReentry(replacement: replacement)
+        }
+    }
+
+    private func exerciseEqualStatePublicationReentry(replacement: String) {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let source = EnhancedWKWebView(frame: .zero, configuration: .init())
+        let caller = WebViewScriptCaller(), nextCaller = WebViewScriptCaller()
+        var state = WebViewState.empty
+        var replace: (() -> Void)?
+        var urlPublications = 0
+        let model = WebView(navigator: navigator,
+            state: Binding(get: { state }, set: { value in
+                state = value
+                if let operation = replace {
+                    replace = nil
+                    operation()
+                    // Equal display state does not restore the old document.
+                    state = value
+                }
+            }), scriptCaller: caller, onURLChanged: { _ in urlPublications += 1 })
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        coordinator.webView(source, didCommit: nil)
+        replace = {
+            if replacement == "same-caller" {
+                coordinator.updateScriptCaller(caller)
+            } else if replacement != "document" {
+                // Neither caller has an installed binding: nil token equality
+                // must not grant ownership to the replacement caller.
+                coordinator.updateScriptCaller(nextCaller)
+                if replacement == "caller-aba" { coordinator.updateScriptCaller(caller) }
+            } else {
+                coordinator.webView(source, didCommit: nil)
+            }
+            urlPublications = 0
+        }
+        defer { replace = nil; coordinator.tearDownBindingsForDetachedWebView(source) }
+        _ = coordinator.setLoading(true, pageURL: URL(string: "https://example.com/retired")!)
+        XCTAssertEqual(urlPublications, replacement == "same-caller" ? 1 : 0,
+                       "Equal state on the same WebView cannot revive a retired native publication")
+    }
+
+    func testFinishCallbackReentryDoesNotExtractReplacementDocument() {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let source = NavigationPublicationProbeWebView(frame: .zero, configuration: .init())
+        var replace: (() -> Void)?
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onNavigationFinished: { _ in replace?() })
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        coordinator.webView(source, didCommit: nil)
+        replace = {
+            coordinator.webView(source, didCommit: nil)
+            source.summaryRequests = 0
+        }
+        defer { replace = nil; coordinator.tearDownBindingsForDetachedWebView(source) }
+        coordinator.webView(source, didFinish: nil)
+        XCTAssertEqual(source.summaryRequests, 0,
+                       "An old finish cannot start extraction after its callback admits another document")
+    }
+
     private func waitForRecordedFallbackRequest(
         on webView: RecordingLoadWebView
     ) async throws {

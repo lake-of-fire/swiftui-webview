@@ -6,6 +6,353 @@ import XCTest
 
 @MainActor
 final class WebViewURLTransitionIntentTests: XCTestCase {
+    func testIssuedPreparedDataIdentitySurvivesNativePolicyAcknowledgment() async throws {
+        try await verifyIssuedPreparedDataPolicy(unissuedSuccessor: false)
+    }
+
+    func testUnissuedSameURLNativeNavigationRetiresPreparedDataIdentity() async throws {
+        try await verifyIssuedPreparedDataPolicy(unissuedSuccessor: true)
+    }
+
+    func testOlderNativePolicyCannotRetireNewerIssuedDataIdentity() async throws {
+        try await verifyIssuedPreparedDataPolicy(unissuedSuccessor: false, deliversOlderPolicy: true)
+    }
+
+    func testQueuedDataIdentitySurvivesInitialAttachmentButNotDetach() throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let url = URL(string: "https://example.com/prepared-document")!
+        navigator.load(Data("Prepared document".utf8), mimeType: "text/plain",
+            characterEncodingName: "utf-8", baseURL: url)
+        let issued = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
+        let webView = WKWebView(frame: .zero)
+        defer {
+            webView.stopLoading()
+            navigator.webView = nil
+        }
+        navigator.webView = webView
+        XCTAssertTrue(navigator.isCurrent(issued), "Flushing a queued data load keeps its producer")
+        navigator.webView = nil
+        XCTAssertFalse(navigator.isCurrent(issued), "A detached document cannot retain dispatch authority")
+    }
+
+    private func verifyIssuedPreparedDataPolicy(
+        unissuedSuccessor: Bool, deliversOlderPolicy: Bool = false
+    ) async throws {
+        let capture = LoaderPolicyActionCapture()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.setURLSchemeHandler(capture, forURLScheme: "internal")
+        let source = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        source.navigationDelegate = capture
+        defer {
+            source.stopLoading()
+            source.navigationDelegate = nil
+            coordinator.tearDownBindingsForDetachedWebView(source)
+        }
+        var olderAction: WKNavigationAction?
+        if deliversOlderPolicy {
+            let olderCaptured = expectation(description: "capture older native policy before the next dispatch")
+            capture.receive = { olderAction = $0; olderCaptured.fulfill() }
+            navigator.load(Data("Older document".utf8), mimeType: "text/html",
+                characterEncodingName: "utf-8", baseURL: URL(string: "internal://local/older-document")!)
+            await fulfillment(of: [olderCaptured], timeout: 10)
+            XCTAssertNotNil(olderAction)
+        }
+        capture.capturesAllowedMainDocument = true
+        capture.allowsMainDocument = true
+        let started = expectation(description: "issued data starts its concrete native navigation")
+        var issuedNativeNavigation: WKNavigation?
+        capture.started = { issuedNativeNavigation = $0; started.fulfill() }
+        let captured = expectation(description: "issued data reaches actual native navigation policy")
+        var action: WKNavigationAction?
+        capture.receive = { action = $0; captured.fulfill() }
+        let url = URL(string: "internal://local/prepared-document")!
+        navigator.load(Data("<html><body>Prepared document</body></html>".utf8),
+            mimeType: "text/html", characterEncodingName: "utf-8", baseURL: url)
+        let issued = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
+        await fulfillment(of: [captured, started], timeout: 10)
+        let nativeAction = try XCTUnwrap(action)
+        XCTAssertEqual(nativeAction.targetFrame?.isMainFrame, true)
+        XCTAssertEqual(nativeAction.navigationType, .other)
+        source.navigationDelegate = nil
+        if let olderAction {
+            _ = await coordinator.webView(
+                source, decidePolicyFor: olderAction, preferences: WKWebpagePreferences()
+            )
+        }
+        let decision = await coordinator.webView(
+            source, decidePolicyFor: nativeAction, preferences: WKWebpagePreferences()
+        )
+        XCTAssertEqual(decision.0, .allow)
+        coordinator.webView(source, didStartProvisionalNavigation: try XCTUnwrap(issuedNativeNavigation))
+        XCTAssertTrue(navigator.isCurrent(issued),
+            "Native acknowledgment of our own data load must retain its issued identity")
+        if unissuedSuccessor {
+            let nextCaptured = expectation(description: "a distinct native same-URL navigation reaches policy")
+            var nextAction: WKNavigationAction?
+            capture.receive = { nextAction = $0; nextCaptured.fulfill() }
+            let successorStarted = expectation(description: "native successor starts its own concrete navigation")
+            var successorNavigation: WKNavigation?
+            capture.started = { successorNavigation = $0; successorStarted.fulfill() }
+            source.navigationDelegate = capture
+            XCTAssertNotNil(source.loadHTMLString("<html><body>Browser successor</body></html>", baseURL: url))
+            await fulfillment(of: [nextCaptured, successorStarted], timeout: 10)
+            let nativeSuccessor = try XCTUnwrap(nextAction)
+            XCTAssertEqual(nativeSuccessor.navigationType, .other)
+            source.navigationDelegate = nil
+            _ = await coordinator.webView(
+                source, decidePolicyFor: nativeSuccessor, preferences: WKWebpagePreferences()
+            )
+            coordinator.webView(source, didStartProvisionalNavigation: try XCTUnwrap(successorNavigation))
+            XCTAssertFalse(navigator.isCurrent(issued),
+                "A distinct native navigation cannot inherit the prepared data load")
+            return
+        }
+        navigator.load(URLRequest(url: url))
+        XCTAssertFalse(navigator.isCurrent(issued), "A same-URL explicit request is a new producer")
+    }
+
+    func testDispatchReceiptsAndIssuedDataKeepIndependentOwnership() throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let url = URL(string: "https://example.com/prepared-document")!
+        let staleIntent = navigator.beginNavigationIntent()
+        navigator.load(Data("prepared".utf8), mimeType: "text/plain",
+            characterEncodingName: "utf-8", baseURL: url)
+        let issued = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
+        XCTAssertEqual(navigator.dispatch(URLRequest(url: url), for: staleIntent), .refused)
+        XCTAssertTrue(navigator.isCurrent(issued))
+        let requestIntent = navigator.beginNavigationIntent()
+        guard case let .issued(receipt) = navigator.dispatch(URLRequest(url: url), for: requestIntent) else {
+            return XCTFail("Current request must be accepted before native attachment")
+        }
+        XCTAssertTrue(navigator.isCurrent(receipt))
+        XCTAssertFalse(navigator.isCurrent(issued))
+    }
+
+    func testExplicitLoadReloadAndHistoryCommandsSupersedeIssuedDataIdentity() throws {
+        let navigator = WebViewNavigator()
+        let other = WebViewNavigator()
+        let url = URL(string: "https://example.com/prepared-document")!
+        let commands: [() -> Void] = [
+            { navigator.load(URLRequest(url: url)) },
+            { navigator.loadHTML("<p>Replacement</p>", baseURL: url) },
+            { navigator.load(Data("replacement".utf8), mimeType: "text/plain", characterEncodingName: "utf-8", baseURL: url) },
+            { navigator.reload() }, { navigator.reloadLast() },
+            { navigator.reloadWithoutContentRules() },
+            { navigator.prepareForReloadAfterReattach() },
+            { navigator.goBack() }, { navigator.goForward() },
+        ]
+        for command in commands {
+            navigator.load(Data("prepared".utf8), mimeType: "text/plain", characterEncodingName: "utf-8", baseURL: url)
+            let issued = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
+            XCTAssertTrue(navigator.isCurrent(issued))
+            XCTAssertFalse(other.isCurrent(issued))
+            command()
+            XCTAssertFalse(navigator.isCurrent(issued))
+        }
+    }
+
+    func testBrowserReloadPolicyRetiresIssuedDataIdentity() async throws {
+        let capture = LoaderPolicyActionCapture()
+        capture.capturesAllowedMainDocument = true
+        capture.allowsMainDocument = true
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.setURLSchemeHandler(capture, forURLScheme: "internal")
+        let source = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        source.navigationDelegate = capture
+        defer {
+            source.stopLoading()
+            source.navigationDelegate = nil
+            coordinator.tearDownBindingsForDetachedWebView(source)
+        }
+        let loaded = expectation(description: "issued data finishes before native browser reload")
+        capture.finished = { loaded.fulfill() }
+        let url = URL(string: "internal://local/prepared-browser-reload")!
+        navigator.load(Data("<html><body>Prepared document</body></html>".utf8),
+            mimeType: "text/html", characterEncodingName: "utf-8", baseURL: url)
+        let issued = try XCTUnwrap(navigator.issuedDataNavigationIdentity)
+        await fulfillment(of: [loaded], timeout: 10)
+        capture.capturesAllowedMainDocument = true
+        capture.allowsMainDocument = true
+        let started = expectation(description: "native browser reload starts its concrete navigation")
+        var reloadNavigation: WKNavigation?
+        capture.started = { reloadNavigation = $0; started.fulfill() }
+        let captured = expectation(description: "native browser reload reaches policy")
+        var action: WKNavigationAction?
+        capture.receive = { action = $0; captured.fulfill() }
+        XCTAssertNotNil(source.reload())
+        await fulfillment(of: [captured, started], timeout: 10)
+        let nativeAction = try XCTUnwrap(action)
+        XCTAssertEqual(nativeAction.navigationType, .reload)
+        source.navigationDelegate = nil
+        _ = await coordinator.webView(
+            source, decidePolicyFor: nativeAction, preferences: WKWebpagePreferences()
+        )
+        coordinator.webView(source, didStartProvisionalNavigation: try XCTUnwrap(reloadNavigation))
+        XCTAssertFalse(navigator.isCurrent(issued))
+    }
+
+    func testReentrantDataLoadCannotBindOlderNativeReturnToSuccessorIdentity() throws {
+        try verifyReentrantDataLoadIdentity(queuedBeforeAttachment: false)
+    }
+
+    func testQueuedDataFlushCannotBindOlderNativeReturnToSuccessorIdentity() throws {
+        try verifyReentrantDataLoadIdentity(queuedBeforeAttachment: true)
+    }
+
+    private func verifyReentrantDataLoadIdentity(queuedBeforeAttachment: Bool) throws {
+        let source = ReentrantPreparedDataWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let model = WebView(navigator: navigator, state: .constant(.empty))
+        let coordinator = model.makeCoordinatorForTesting()
+        let url = URL(string: "https://example.com/same-prepared-document")!
+        var older: WebViewNavigator.IssuedDataNavigationIdentity?
+        var successor: WebViewNavigator.IssuedDataNavigationIdentity?
+        source.onIssuedData = {
+            older = navigator.issuedDataNavigationIdentity
+            navigator.load(Data("successor".utf8), mimeType: "text/plain",
+                characterEncodingName: "utf-8", baseURL: url)
+            successor = navigator.issuedDataNavigationIdentity
+        }
+        defer {
+            source.onIssuedData = nil
+            source.stopLoading()
+            source.navigationDelegate = nil
+            coordinator.tearDownBindingsForDetachedWebView(source)
+        }
+        if !queuedBeforeAttachment { coordinator.setWebView(source) }
+        navigator.load(Data("original".utf8), mimeType: "text/plain",
+            characterEncodingName: "utf-8", baseURL: url)
+        if queuedBeforeAttachment { coordinator.setWebView(source) }
+        let olderIdentity = try XCTUnwrap(older)
+        let successorIdentity = try XCTUnwrap(successor)
+        XCTAssertNotEqual(olderIdentity, successorIdentity)
+        XCTAssertFalse(navigator.isCurrent(olderIdentity))
+        XCTAssertTrue(navigator.isCurrent(successorIdentity))
+        coordinator.webView(source, didStartProvisionalNavigation: try XCTUnwrap(source.lastNativeNavigation))
+        XCTAssertTrue(navigator.isCurrent(successorIdentity),
+            "The successor must remain bound to its own concrete native navigation")
+    }
+
+    func testSuspendedPolicyCannotResumeAfterDocumentLifecycleRetirement() async throws {
+        for retirement in ["commit", "provisional", "termination", "detach-and-rebind"] {
+            for isSubframe in [false, true] {
+                try await assertSuspendedPolicy(retirement: retirement, isSubframe: isSubframe)
+            }
+        }
+    }
+
+    func testSuspendedPolicyWithLiveDocumentStillUsesHostPolicy() async throws {
+        try await assertSuspendedPolicy(retirement: nil)
+    }
+
+    func testSuspendedPolicyWithLiveDocumentStillAllowsNavigation() async throws {
+        try await assertSuspendedPolicy(retirement: nil, blocksHost: false)
+    }
+
+    private func assertSuspendedPolicy(retirement: String?, blocksHost: Bool = true,
+                                       isSubframe: Bool = false) async throws {
+        let url = try XCTUnwrap(URL(string:
+            "internal://local/load/reader?reader-url=https://blocked.example/article"))
+        let capture = LoaderPolicyActionCapture()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.setURLSchemeHandler(capture, forURLScheme: "internal")
+        let source = EnhancedWKWebView(frame: .zero, configuration: configuration)
+        source.navigationDelegate = capture
+        defer {
+            source.stopLoading()
+            source.navigationDelegate = nil
+        }
+        let captured = expectation(description: "Capture real WebKit navigation action")
+        var action: WKNavigationAction?
+        capture.receive = { action = $0; captured.fulfill() }
+        capture.allowsMainDocument = isSubframe
+        if isSubframe {
+            XCTAssertNotNil(source.loadHTMLString(
+                "<html><body><iframe src='\(url.absoluteString)'></iframe></body></html>",
+                baseURL: URL(string: "https://fixture.invalid")))
+        } else {
+            XCTAssertNotNil(source.load(URLRequest(url: url)))
+        }
+        await fulfillment(of: [captured], timeout: 10)
+        let policyAction = try XCTUnwrap(action)
+        XCTAssertEqual(policyAction.targetFrame?.isMainFrame, !isSubframe)
+        source.navigationDelegate = nil
+        let successorURL = try XCTUnwrap(URL(string: "https://successor.example/article"))
+
+        var state = WebViewState.empty
+        let navigator = WebViewNavigator()
+        let suspended = expectation(description: "Policy awaits application decision")
+        var release: CheckedContinuation<WKNavigationActionPolicy?, Never>?
+        var callbackAdmissionClosed = false
+        let model = WebView(navigator: navigator,
+            state: Binding(get: { state }, set: { state = $0 }),
+            blockedHosts: blocksHost ? ["blocked.example"] : [],
+            onNavigationAction: { _ in
+                guard !callbackAdmissionClosed else { return .cancel }
+                suspended.fulfill()
+                return await withCheckedContinuation { release = $0 }
+            })
+        let coordinator = model.makeCoordinatorForTesting()
+        coordinator.setWebView(source)
+        coordinator.webView(source, didCommit: nil)
+        defer { coordinator.tearDownBindingsForDetachedWebView(source) }
+        let pending = Task { @MainActor in
+            await coordinator.webView(source, decidePolicyFor: policyAction,
+                                      preferences: WKWebpagePreferences())
+        }
+        let arrival = await XCTWaiter.fulfillment(of: [suspended], timeout: 10)
+        guard arrival == .completed, let continuation = release else {
+            // A callback entering after the timeout must not create a new held
+            // continuation while cleanup is joining the pending policy task.
+            callbackAdmissionClosed = true
+            pending.cancel()
+            let pendingRelease = release
+            release = nil
+            pendingRelease?.resume(returning: .cancel)
+            _ = await pending.value
+            XCTFail("Policy did not register its controlled continuation before the bounded arrival wait ended")
+            return
+        }
+        switch retirement {
+        case "commit": coordinator.webView(source, didCommit: nil)
+        case "provisional": coordinator.webView(source, didStartProvisionalNavigation: nil)
+        case "termination": coordinator.webViewWebContentProcessDidTerminate(source)
+        case "detach-and-rebind":
+            coordinator.tearDownBindingsForDetachedWebView(source)
+            coordinator.setWebView(source)
+            coordinator.webView(source, didCommit: nil)
+        default: break
+        }
+        state.pageURL = successorURL
+        state.isLoading = true
+        state.isProvisionallyNavigating = true
+        callbackAdmissionClosed = true
+        release = nil
+        continuation.resume(returning: .allow)
+        let result = await pending.value
+        XCTAssertEqual(result.0, retirement == nil && !blocksHost ? .allow : .cancel)
+        XCTAssertEqual(state.pageURL, successorURL)
+        XCTAssertEqual(state.isLoading, retirement != nil || !blocksHost,
+                       "Only a live policy may settle loading via the blocked-host rule: \(retirement ?? "live")")
+        XCTAssertEqual(state.isProvisionallyNavigating, retirement != nil || !blocksHost)
+    }
+
     func testRetiredLoaderPolicyCannotClearSuccessorLoadingState() async throws {
         try await assertRetiredPolicyCannotClearSuccessorLoadingState(isSubframe: false)
     }
@@ -53,16 +400,19 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         XCTAssertEqual(actions[1].targetFrame?.isMainFrame, true)
         source.navigationDelegate = nil
 
+        let successorURL = try XCTUnwrap(canonicalContentURLForReaderLoader(second))
         var state = WebViewState.empty
         let navigator = WebViewNavigator()
         let suspended = expectation(description: "Older policy is awaiting app callback")
         var release: CheckedContinuation<WKNavigationActionPolicy?, Never>?
+        var callbackAdmissionClosed = false
         let model = WebView(
             navigator: navigator,
             state: Binding(get: { state }, set: { state = $0 }),
             blockedHosts: ["blocked.example"],
             onNavigationAction: { action in
                 if action.request.url == first {
+                    guard !callbackAdmissionClosed else { return .cancel }
                     suspended.fulfill()
                     return await withCheckedContinuation { release = $0 }
                 }
@@ -71,17 +421,32 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
         )
         let coordinator = model.makeCoordinatorForTesting()
         coordinator.setWebView(source)
+        defer { coordinator.tearDownBindingsForDetachedWebView(source) }
         let stale = Task { @MainActor in
             await coordinator.webView(source, decidePolicyFor: actions[0],
                                       preferences: WKWebpagePreferences())
         }
-        await fulfillment(of: [suspended], timeout: 10)
+        let arrival = await XCTWaiter.fulfillment(of: [suspended], timeout: 10)
+        guard arrival == .completed, let continuation = release else {
+            // Late policy callbacks must not create a held continuation after
+            // cleanup's final release opportunity.
+            callbackAdmissionClosed = true
+            stale.cancel()
+            let pendingRelease = release
+            release = nil
+            pendingRelease?.resume(returning: .cancel)
+            _ = await stale.value
+            XCTFail("Older policy did not register its controlled continuation before the bounded arrival wait ended")
+            return
+        }
         let successor = await coordinator.webView(source, decidePolicyFor: actions[1],
                                                  preferences: WKWebpagePreferences())
         XCTAssertEqual(successor.0, .allow)
-        state.pageURL = try XCTUnwrap(canonicalContentURLForReaderLoader(second))
+        state.pageURL = successorURL
         state.isLoading = true
-        release?.resume(returning: .allow)
+        callbackAdmissionClosed = true
+        release = nil
+        continuation.resume(returning: .allow)
         let retired = await stale.value
         XCTAssertEqual(retired.0, .cancel)
         XCTAssertTrue(state.isLoading, "An older blocked source must not stop its successor")
@@ -253,6 +618,27 @@ final class WebViewURLTransitionIntentTests: XCTestCase {
 
 }
 
+@MainActor
+private final class ReentrantPreparedDataWebView: EnhancedWKWebView {
+    var onIssuedData: (() -> Void)?
+    private(set) var lastNativeNavigation: WKNavigation?
+
+    override func load(
+        _ data: Data,
+        mimeType: String,
+        characterEncodingName: String,
+        baseURL: URL
+    ) -> WKNavigation? {
+        let navigation = super.load(data, mimeType: mimeType,
+            characterEncodingName: characterEncodingName, baseURL: baseURL)
+        lastNativeNavigation = navigation
+        let callback = onIssuedData
+        onIssuedData = nil
+        callback?()
+        return navigation
+    }
+}
+
 private final class WithdrawalCallbackCount: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
@@ -264,16 +650,33 @@ private final class WithdrawalCallbackCount: @unchecked Sendable {
 private final class LoaderPolicyActionCapture: NSObject, WKNavigationDelegate, WKURLSchemeHandler {
     var receive: ((WKNavigationAction) -> Void)?
     var allowsMainDocument = false
+    var capturesAllowedMainDocument = false
+    var finished: (() -> Void)?
+    var started: ((WKNavigation) -> Void)?
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard let navigation else { return }
+        let callback = started
+        started = nil
+        callback?(navigation)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        let callback = finished
+        finished = nil
+        callback?()
+    }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if allowsMainDocument, navigationAction.targetFrame?.isMainFrame == true {
+                 decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+        let allowsAction = allowsMainDocument && navigationAction.targetFrame?.isMainFrame == true
+        if allowsAction, !capturesAllowedMainDocument {
             decisionHandler(.allow)
             return
         }
         let callback = receive
         receive = nil
-        decisionHandler(.cancel)
+        decisionHandler(allowsAction ? .allow : .cancel)
         callback?(navigationAction)
     }
 

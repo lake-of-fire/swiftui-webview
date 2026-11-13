@@ -18,6 +18,18 @@ private final class InitialDocumentScriptHandler: NSObject, WKScriptMessageHandl
 
 @MainActor
 final class WebViewMacColdUserScriptTests: XCTestCase {
+    func testDetachedFactoryUsesPublicBackgroundColorForOpaqueAndTransparentHosts() {
+        let view = WebView(navigator: WebViewNavigator(), state: .constant(.empty))
+        let opaque = view.makeDetachedWebViewFactory(
+            config: WebViewConfig(isOpaque: true, backgroundColor: .red), drawsBackground: true
+        )()
+        XCTAssertEqual(opaque.underPageBackgroundColor, NSColor(Color.red))
+        let transparent = view.makeDetachedWebViewFactory(
+            config: WebViewConfig(isOpaque: false, backgroundColor: .red), drawsBackground: true
+        )()
+        XCTAssertEqual(transparent.underPageBackgroundColor, NSColor.clear)
+    }
+
     func testDocumentStartScriptRunsOnFirstNavigationBeforeSwiftUIUpdate() async throws {
         let script = WebViewUserScript(
             source: "window.webkit.messageHandlers.initialScriptProbe.postMessage(document.readyState)",
