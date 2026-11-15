@@ -105,7 +105,7 @@ final class WebViewNavigationIntentTests: XCTestCase {
         XCTAssertTrue(navigator.isCurrent(reload), "An older failed navigation or policy cannot retire the successor")
 
         let stagedFinished = expectation(description: "owned blank stage and final reader request finished")
-        let target = URL(string: "internal://local/load/reader?url=https%3A%2F%2Fexample.com%2Farticle")!
+        let target = URL(string: "internal://local/load/reader?reader-url=https%3A%2F%2Fexample.com%2Farticle")!
         probe.finished = { source in
             if source.url == target {
                 probe.finished = nil
