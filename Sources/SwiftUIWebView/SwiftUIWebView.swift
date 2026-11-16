@@ -3910,7 +3910,9 @@ public class WebViewCoordinator: NSObject {
 #if os(iOS)
     @MainActor
     internal func canPublishScrollBottomState(for webView: WKWebView) -> Bool {
-        guard hasCommittedDocument else { return true }
+        // Only a fresh host may publish before its first navigation callback.
+        // A terminal or detached document must wait for a successor commit.
+        guard hasCommittedDocument else { return documentCallbackGeneration == 0 }
         guard let context = captureDocumentCallbackContext(for: webView),
               let publication = initialScrollBottomPublication else { return false }
         return publication.context == context && publication.rendererWaitState == .completed
