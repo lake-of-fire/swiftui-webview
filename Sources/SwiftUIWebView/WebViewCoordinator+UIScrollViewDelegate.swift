@@ -112,14 +112,14 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             scrollBottomContentInsetObservation = nil
             scrollBottomObservedScrollView = nil
             lastPublishedScrollBottomState = nil
-            initialScrollBottomPublication = nil
+            initialScrollBottomPublication?.rendererWaitState = .retired
             return
         }
         guard scrollBottomObservedScrollView !== scrollView else { return }
 
         scrollBottomObservedScrollView = scrollView
         lastPublishedScrollBottomState = nil
-        initialScrollBottomPublication = nil
+        initialScrollBottomPublication?.rendererWaitState = .retired
         scrollBottomContentSizeObservation = scrollView.observe(\.contentSize, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
             Task { @MainActor in
                 guard let scrollView else { return }
@@ -138,6 +138,14 @@ extension WebViewCoordinator: UIScrollViewDelegate {
                 self?.publishScrollBottomState(for: scrollView)
             }
         }
+        // A retired publication proves this document has already reached finish.
+        // Reinstalling its observers must not depend on another finish callback.
+        if let webView = navigator.webView,
+           webView.scrollView === scrollView,
+           let publication = initialScrollBottomPublication,
+           publication.context == captureDocumentCallbackContext(for: webView) {
+            publishInitialScrollBottomState(for: webView)
+        }
     }
 
     /// A loaded document must reach its reset consumer even with unchanged geometry.
@@ -145,7 +153,8 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     @MainActor
     internal func publishInitialScrollBottomState(for webView: WKWebView) {
         guard let context = captureDocumentCallbackContext(for: webView),
-              initialScrollBottomPublication?.context != context else { return }
+              initialScrollBottomPublication?.context != context
+                || initialScrollBottomPublication?.rendererWaitState == .retired else { return }
         // Reserve before dispatch: repeated finish must not schedule another replay.
         // A new identity also fences resets that reuse the same document context.
         let publication = InitialScrollBottomPublication(context: context)
@@ -160,6 +169,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         ) { [weak self, weak webView] _, error in
             guard let self, let webView,
                   self.initialScrollBottomPublication === publication,
+                  publication.rendererWaitState == .pending,
                   self.ownsDocumentCallbackContext(context) else { return }
             guard self.scriptCallerReplacementGeneration == callerGeneration,
                   self.javaScriptBindingToken(for: webView) == binding else {
@@ -169,6 +179,9 @@ extension WebViewCoordinator: UIScrollViewDelegate {
                 self.publishInitialScrollBottomState(for: webView)
                 return
             }
+            // Even a failed wait may be followed by a valid native layout event.
+            // Open that path without sampling the failed reply or retrying it.
+            publication.rendererWaitState = .completed
             guard error == nil else { return }
             self.lastPublishedScrollBottomState = nil
             self.publishScrollBottomState(for: webView.scrollView)
@@ -177,7 +190,9 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     @MainActor
     internal func publishScrollBottomState(for scrollView: UIScrollView) {
-        guard navigator.webView?.scrollView === scrollView,
+        guard let webView = navigator.webView,
+              webView.scrollView === scrollView,
+              canPublishScrollBottomState(for: webView),
               let onScrollBottomStateChanged else {
             return
         }
