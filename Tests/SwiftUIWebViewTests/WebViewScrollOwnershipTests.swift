@@ -211,6 +211,56 @@ final class WebViewScrollOwnershipTests: XCTestCase {
         XCTAssertEqual(publications, [false, true])
     }
 
+    func testTerminatedDocumentRejectsNativeBottomUntilReplacementLayout() {
+        verifyTerminalDocumentBottomPublication(terminateProcess: true)
+    }
+
+    func testFailedDocumentRejectsNativeBottomUntilReplacementLayout() {
+        verifyTerminalDocumentBottomPublication(terminateProcess: false)
+    }
+
+    private func verifyTerminalDocumentBottomPublication(terminateProcess: Bool) {
+        let navigator = WebViewNavigator()
+        var publications: [Bool] = []
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onScrollBottomStateChanged: { publications.append($0) })
+        let coordinator = model.makeCoordinatorForTesting()
+        let view = BottomLayoutHeldWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: .init())
+        navigator.webView = view
+        defer {
+            view.discardLayoutCompletions()
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        view.scrollView.bounds = view.bounds
+        view.scrollView.contentSize = CGSize(width: 320, height: 960)
+        coordinator.webView(view, didCommit: nil)
+        coordinator.webView(view, didFinish: nil)
+        view.completeLayout()
+        XCTAssertEqual(publications, [false])
+        if terminateProcess {
+            coordinator.webViewWebContentProcessDidTerminate(view)
+        } else {
+            coordinator.webView(view, didFail: nil, withError: URLError(.cannotParseResponse))
+        }
+        XCTAssertNil(coordinator.captureDocumentCallbackContext(for: view))
+        publications.removeAll()
+        // WebKit can shrink native geometry while discarding a failed document.
+        view.scrollView.contentSize.height = 240
+        coordinator.scrollViewDidScroll(view.scrollView)
+        coordinator.scrollViewWillBeginDragging(view.scrollView)
+        coordinator.scrollViewDidEndDragging(view.scrollView, willDecelerate: false)
+        coordinator.scrollViewDidEndDecelerating(view.scrollView)
+        coordinator.scrollViewDidEndScrollingAnimation(view.scrollView)
+        XCTAssertTrue(publications.isEmpty, "An invalidated document cannot become a fresh bootstrap host")
+
+        coordinator.webView(view, didCommit: nil)
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertTrue(publications.isEmpty, "A successor must reach its own renderer boundary")
+        coordinator.webView(view, didFinish: nil)
+        view.completeLayout()
+        XCTAssertEqual(publications, [true], "The loaded successor resumes native bottom publication")
+    }
+
     func testEachFinishedDocumentPublishesBottomAfterConsumerReset() {
         let navigator = WebViewNavigator()
         var isAtBottom = false
