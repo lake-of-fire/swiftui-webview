@@ -285,6 +285,63 @@ final class WebViewScrollOwnershipTests: XCTestCase {
         XCTAssertEqual(publications, [true], "Replacing the script caller retires its pending layout sample")
     }
 
+    func testPendingInitialBottomSampleRearmsAfterCallerOrBindingReplacement() {
+        let retiredErrors: [Error?] = [nil, URLError(.cancelled)]
+        for transition in ["caller", "initialBinding", "binding"] {
+            for retiredError in retiredErrors {
+                let navigator = WebViewNavigator()
+                let caller = WebViewScriptCaller()
+                var publications: [Bool] = []
+                let model = WebView(navigator: navigator, state: .constant(.empty),
+                    scriptCaller: caller,
+                    onScrollBottomStateChanged: { publications.append($0) })
+                let coordinator = model.makeCoordinatorForTesting()
+                let view = BottomLayoutHeldWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: WKWebViewConfiguration())
+                navigator.webView = view
+                defer {
+                    view.discardLayoutCompletions()
+                    coordinator.tearDownBindingsForDetachedWebView(view)
+                }
+                let installBinding = {
+                    coordinator.installScriptCallerBinding(for: view,
+                        asyncCaller: { _, _, _, _ in .init(nil) },
+                        unsafeCaller: nil, snapshotCapture: nil)
+                }
+                if transition != "initialBinding" { installBinding() }
+                view.scrollView.bounds = view.bounds
+                view.scrollView.contentSize = CGSize(width: 320, height: 240)
+                coordinator.webView(view, didCommit: nil)
+                let document = coordinator.captureDocumentCallbackContext(for: view)
+                coordinator.webView(view, didFinish: nil)
+                XCTAssertEqual(view.layoutCompletions.count, 1)
+
+                if transition == "caller" {
+                    coordinator.updateScriptCaller(WebViewScriptCaller())
+                }
+                installBinding()
+                XCTAssertEqual(document, coordinator.captureDocumentCallbackContext(for: view))
+                view.completeLayout(error: retiredError)
+                XCTAssertTrue(publications.isEmpty, "A retired owner cannot publish its layout reply")
+                XCTAssertEqual(view.layoutCompletions.count, 1, "The current owner must receive a replacement layout wait")
+                coordinator.updateScriptCaller(WebViewScriptCaller())
+                installBinding()
+                view.completeLayout(error: retiredError)
+                XCTAssertTrue(publications.isEmpty, "Another ownership change must also retire the replacement reply")
+                XCTAssertEqual(view.layoutCompletions.count, 1, "Repeated ownership changes must keep the initial sample live")
+                coordinator.webView(view, didFinish: nil)
+                XCTAssertEqual(view.layoutCompletions.count, 1, "Repeated finish must not duplicate the replacement wait")
+                view.completeLayout()
+                XCTAssertEqual(publications, [true], "The same document still publishes its initial bottom state")
+
+                coordinator.updateScriptCaller(WebViewScriptCaller())
+                installBinding()
+                coordinator.webView(view, didFinish: nil)
+                XCTAssertTrue(view.layoutCompletions.isEmpty, "An already published document must not invent another bottom arrival")
+                XCTAssertEqual(publications, [true])
+            }
+        }
+    }
+
     func testDelayedLayoutCompletionRejectsSameDocumentObservationReset() {
         let retiredErrors: [Error?] = [nil, URLError(.cancelled)]
         for retiredError in retiredErrors {

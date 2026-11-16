@@ -162,12 +162,20 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             "await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); return true;",
             arguments: [:], inFrame: nil, in: .defaultClient
         ) { [weak self, weak webView] _, error in
-            guard error == nil, let self, let webView,
+            guard let self, let webView,
                   self.initialScrollBottomPublicationContext == context,
                   self.initialScrollBottomPublicationAttempt === attempt,
-                  self.ownsDocumentCallbackContext(context),
-                  self.scriptCallerReplacementGeneration == callerGeneration,
-                  self.javaScriptBindingToken(for: webView) == binding else { return }
+                  self.ownsDocumentCallbackContext(context) else { return }
+            guard self.scriptCallerReplacementGeneration == callerGeneration,
+                  self.javaScriptBindingToken(for: webView) == binding else {
+                // The document still needs its initial sample. Retire this owner’s
+                // reply and wait for layout under the current caller/binding.
+                self.initialScrollBottomPublicationContext = nil
+                self.initialScrollBottomPublicationAttempt = nil
+                self.publishInitialScrollBottomState(for: webView)
+                return
+            }
+            guard error == nil else { return }
             self.lastPublishedScrollBottomState = nil
             self.publishScrollBottomState(for: webView.scrollView)
         }
