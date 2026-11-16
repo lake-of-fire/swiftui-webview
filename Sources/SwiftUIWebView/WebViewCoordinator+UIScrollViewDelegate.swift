@@ -112,12 +112,16 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             scrollBottomContentInsetObservation = nil
             scrollBottomObservedScrollView = nil
             lastPublishedScrollBottomState = nil
+            initialScrollBottomPublicationContext = nil
+            initialScrollBottomPublicationAttempt = nil
             return
         }
         guard scrollBottomObservedScrollView !== scrollView else { return }
 
         scrollBottomObservedScrollView = scrollView
         lastPublishedScrollBottomState = nil
+        initialScrollBottomPublicationContext = nil
+        initialScrollBottomPublicationAttempt = nil
         scrollBottomContentSizeObservation = scrollView.observe(\.contentSize, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
             Task { @MainActor in
                 guard let scrollView else { return }
@@ -135,6 +139,37 @@ extension WebViewCoordinator: UIScrollViewDelegate {
                 guard let scrollView else { return }
                 self?.publishScrollBottomState(for: scrollView)
             }
+        }
+    }
+
+    /// A loaded document must reach its reset consumer even with unchanged geometry.
+    /// Call after the finish callback, once per active document context.
+    @MainActor
+    internal func publishInitialScrollBottomState(for webView: WKWebView) {
+        guard let context = captureDocumentCallbackContext(for: webView),
+              initialScrollBottomPublicationContext != context else { return }
+        // Reserve before dispatch: repeated finish must not schedule another replay.
+        initialScrollBottomPublicationContext = context
+        // Observation resets may reuse the same document context. Fence this
+        // dispatch separately so an older reply cannot adopt a replacement replay.
+        let attempt = NSObject()
+        initialScrollBottomPublicationAttempt = attempt
+        let binding = javaScriptBindingToken(for: webView)
+        let callerGeneration = scriptCallerReplacementGeneration
+        // didFinish can precede native geometry delivery. An intervening renderer
+        // frame lets WebKit deliver layout without a timer or a DOM scan.
+        webView.__callAsyncJavaScript(
+            "await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); return true;",
+            arguments: [:], inFrame: nil, in: .defaultClient
+        ) { [weak self, weak webView] _, error in
+            guard error == nil, let self, let webView,
+                  self.initialScrollBottomPublicationContext == context,
+                  self.initialScrollBottomPublicationAttempt === attempt,
+                  self.ownsDocumentCallbackContext(context),
+                  self.scriptCallerReplacementGeneration == callerGeneration,
+                  self.javaScriptBindingToken(for: webView) == binding else { return }
+            self.lastPublishedScrollBottomState = nil
+            self.publishScrollBottomState(for: webView.scrollView)
         }
     }
 

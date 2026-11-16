@@ -3065,7 +3065,7 @@ public class WebViewCoordinator: NSObject {
     
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
-    private var scriptCallerReplacementGeneration: UInt64 = 0
+    internal private(set) var scriptCallerReplacementGeneration: UInt64 = 0
     private let scriptCallerBindingOwnerID = UUID()
     private weak var scriptCallerBoundWebView: WKWebView?
     private var documentCallbackGeneration: UInt64 = 0
@@ -3127,6 +3127,8 @@ public class WebViewCoordinator: NSObject {
     internal var scrollBottomBoundsObservation: NSKeyValueObservation?
     internal var scrollBottomContentInsetObservation: NSKeyValueObservation?
     internal var lastPublishedScrollBottomState: Bool?
+    internal var initialScrollBottomPublicationContext: WebViewDocumentCallbackContext?
+    internal var initialScrollBottomPublicationAttempt: NSObject?
     private var awaitingSnapshotReload = false
     private var snapshotReloadCommitted = false
     private var snapshotReloadDocumentReady = false
@@ -3914,6 +3916,8 @@ public class WebViewCoordinator: NSObject {
         scrollBottomContentInsetObservation = nil
         scrollBottomObservedScrollView = nil
         lastPublishedScrollBottomState = nil
+        initialScrollBottomPublicationContext = nil
+        initialScrollBottomPublicationAttempt = nil
 #endif
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
@@ -5151,6 +5155,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         onNavigationFinished?(newState)
         guard isCurrentCallback() else { return }
+#if os(iOS)
+        // Commit can still expose predecessor geometry. Replay once the new
+        // document has loaded and the consumer's finish callback has settled.
+        publishInitialScrollBottomState(for: webView)
+        guard isCurrentCallback() else { return }
+#endif
 
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
