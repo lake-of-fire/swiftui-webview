@@ -72,6 +72,145 @@ private final class BottomLayoutHeldWebView: WKWebView {
 
 @MainActor
 final class WebViewScrollOwnershipTests: XCTestCase {
+    func testNativeScrollCallbacksWaitForInitialDocumentLayout() async {
+        let navigator = WebViewNavigator()
+        var publications: [Bool] = []
+        let observedSample = expectation(description: "native geometry observation delivered")
+        var didObserveSample = false
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onDocumentContextInvalidated: { _, _ in publications.removeAll() },
+            onScrollBottomStateChanged: { publications.append($0) })
+        let coordinator = model.makeCoordinatorForTesting()
+        let view = BottomLayoutHeldWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: WKWebViewConfiguration())
+        navigator.webView = view
+        view.scrollView.bounds = view.bounds
+        view.scrollView.contentSize = CGSize(width: 320, height: 240)
+        coordinator.installScrollBottomStateObservations(for: view.scrollView)
+        let sizeObservation = view.scrollView.observe(\.contentSize, options: [.new]) { _, _ in
+            Task { @MainActor in
+                guard !didObserveSample else { return }
+                didObserveSample = true
+                observedSample.fulfill()
+            }
+        }
+        defer {
+            sizeObservation.invalidate()
+            view.discardLayoutCompletions()
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        coordinator.webView(view, didCommit: nil)
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertTrue(publications.isEmpty, "Commit cannot expose predecessor geometry through a native scroll callback")
+        coordinator.webView(view, didFinish: nil)
+        view.scrollView.contentSize.height = 241
+        await fulfillment(of: [observedSample], timeout: 2)
+        XCTAssertTrue(publications.isEmpty, "Content-size observations must wait for the same renderer boundary")
+        view.scrollView.contentSize = CGSize(width: 320, height: 960)
+        view.completeLayout()
+        XCTAssertEqual(publications, [false])
+        view.scrollView.contentOffset.y = 480
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertEqual(publications, [false, true], "Ordinary bottom arrivals remain live after initial layout")
+    }
+
+    func testPreservedProvisionalFailureRearmsBottomLayoutForSurvivingDocument() {
+        let navigator = WebViewNavigator()
+        var publications: [Bool] = []
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onScrollBottomStateChanged: { publications.append($0) })
+        let coordinator = model.makeCoordinatorForTesting()
+        let view = BottomLayoutHeldWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: .init())
+        navigator.webView = view
+        defer {
+            view.discardLayoutCompletions()
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        view.scrollView.bounds = view.bounds
+        view.scrollView.contentSize = CGSize(width: 320, height: 240)
+        coordinator.webView(view, didCommit: nil)
+        coordinator.webView(view, didFinish: nil)
+        view.completeLayout()
+        XCTAssertEqual(publications, [true])
+        coordinator.webView(view, didStartProvisionalNavigation: nil)
+        coordinator.webView(view, didFailProvisionalNavigation: nil, withError: URLError(.cancelled))
+        XCTAssertEqual(view.layoutCompletions.count, 1, "A preserved document will not receive another finish callback")
+        view.scrollView.contentSize.height = 960
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertEqual(publications, [true], "The restored context must settle before native publication")
+        view.completeLayout()
+        XCTAssertEqual(publications, [true, false])
+        view.scrollView.contentOffset.y = 480
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertEqual(publications, [true, false, true])
+    }
+
+    func testObserverReinstallationRearmsFinishedAndPendingLayoutWithoutAnotherFinish() {
+        let navigator = WebViewNavigator()
+        var publications: [Bool] = []
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onScrollBottomStateChanged: { publications.append($0) })
+        let coordinator = model.makeCoordinatorForTesting()
+        let view = BottomLayoutHeldWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: .init())
+        navigator.webView = view
+        defer {
+            view.discardLayoutCompletions()
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        view.scrollView.bounds = view.bounds
+        view.scrollView.contentSize = CGSize(width: 320, height: 240)
+        coordinator.webView(view, didCommit: nil)
+        coordinator.webView(view, didFinish: nil)
+        view.completeLayout()
+        XCTAssertEqual(publications, [true])
+        let reinstall = {
+            coordinator.onScrollBottomStateChanged = nil
+            coordinator.installScrollBottomStateObservations(for: view.scrollView)
+            coordinator.onScrollBottomStateChanged = { publications.append($0) }
+            coordinator.installScrollBottomStateObservations(for: view.scrollView)
+        }
+        reinstall()
+        XCTAssertEqual(view.layoutCompletions.count, 1)
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertEqual(publications, [true])
+        view.completeLayout()
+        XCTAssertEqual(publications, [true, true])
+        reinstall()
+        reinstall()
+        XCTAssertEqual(view.layoutCompletions.count, 2)
+        view.completeLayout()
+        XCTAssertEqual(publications, [true, true], "The retired wait cannot complete the replacement installation")
+        view.completeLayout()
+        XCTAssertEqual(publications, [true, true, true])
+    }
+
+    func testCurrentRendererErrorAllowsLaterNativeGeometryWithoutRetry() {
+        let navigator = WebViewNavigator()
+        var publications: [Bool] = []
+        let model = WebView(navigator: navigator, state: .constant(.empty),
+            onScrollBottomStateChanged: { publications.append($0) })
+        let coordinator = model.makeCoordinatorForTesting()
+        let view = BottomLayoutHeldWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: .init())
+        navigator.webView = view
+        defer {
+            view.discardLayoutCompletions()
+            coordinator.tearDownBindingsForDetachedWebView(view)
+        }
+        view.scrollView.bounds = view.bounds
+        view.scrollView.contentSize = CGSize(width: 320, height: 240)
+        coordinator.webView(view, didCommit: nil)
+        coordinator.webView(view, didFinish: nil)
+        view.completeLayout(error: URLError(.cancelled))
+        XCTAssertTrue(publications.isEmpty)
+        coordinator.webView(view, didFinish: nil)
+        XCTAssertTrue(view.layoutCompletions.isEmpty)
+        view.scrollView.contentSize.height = 960
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertEqual(publications, [false])
+        view.scrollView.contentOffset.y = 480
+        coordinator.scrollViewDidScroll(view.scrollView)
+        XCTAssertEqual(publications, [false, true])
+    }
+
     func testEachFinishedDocumentPublishesBottomAfterConsumerReset() {
         let navigator = WebViewNavigator()
         var isAtBottom = false
@@ -379,6 +518,14 @@ final class WebViewScrollOwnershipTests: XCTestCase {
     }
 
     func testRealHTMLShortToLongNavigationDoesNotReplayShortBottomAtCommit() async throws {
+        try await verifyRealHTMLShortToLongNavigation(observesNativeScroll: false)
+    }
+
+    func testRealHTMLWithNativeScrollObservationsDoesNotPublishPreLayoutBottom() async throws {
+        try await verifyRealHTMLShortToLongNavigation(observesNativeScroll: true)
+    }
+
+    private func verifyRealHTMLShortToLongNavigation(observesNativeScroll: Bool) async throws {
         let navigator = WebViewNavigator()
         navigator.shouldLoadFallbackOnAttach = false
         var publications: [Bool] = []
@@ -416,9 +563,12 @@ final class WebViewScrollOwnershipTests: XCTestCase {
         host.view.addSubview(view)
         window.isHidden = false
         host.view.layoutIfNeeded()
-        // Initial-publication-only fixture: keep production KVO and scroll
-        // delegates uninstalled so corrective events cannot hide an early replay.
+        // Exercise both the isolated initial replay and the normal native callbacks.
         navigator.webView = view
+        if observesNativeScroll {
+            view.scrollView.delegate = coordinator
+            coordinator.installScrollBottomStateObservations(for: view.scrollView)
+        }
         let navigationProbe = BottomNavigationProbe(coordinator: coordinator)
         view.navigationDelegate = navigationProbe
         defer {

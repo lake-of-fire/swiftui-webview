@@ -9,6 +9,22 @@ import XCTest
 /// replacement can be exercised deterministically between dispatch and completion.
 @MainActor
 private final class ScrollCompletionHeldWebView: EnhancedWKWebView {
+    var completeNextRendererWait = false
+
+    override func __callAsyncJavaScript(
+        _ functionBody: String, arguments: [String: Any]?, inFrame frame: WKFrameInfo?,
+        in contentWorld: WKContentWorld,
+        completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)? = nil
+    ) {
+        guard completeNextRendererWait else {
+            super.__callAsyncJavaScript(functionBody, arguments: arguments, inFrame: frame,
+                                      in: contentWorld, completionHandler: completionHandler)
+            return
+        }
+        completeNextRendererWait = false
+        completionHandler?(true, nil)
+    }
+
     var holdNextEvaluation = false
     var evaluationFinished: XCTestExpectation?
     var heldDelivery: (() -> Void)?
@@ -187,6 +203,9 @@ final class WebViewScrollCompletionOwnershipTests: XCTestCase {
             coordinator.tearDownBindingsForDetachedWebView(view)
         }
         coordinator.webView(view, didCommit: nil)
+        view.completeNextRendererWait = true
+        coordinator.webView(view, didFinish: nil)
+        XCTAssertFalse(view.completeNextRendererWait)
         let reason = coordinator.paginationController.lastApplyReason
         coordinator.accumulatedScrollOffset = 37
         coordinator.lastContentOffset = CGPoint(x: 11, y: 29)
@@ -209,6 +228,9 @@ final class WebViewScrollCompletionOwnershipTests: XCTestCase {
             coordinator.tearDownBindingsForDetachedWebView(view)
         }
         coordinator.webView(view, didCommit: nil)
+        view.completeNextRendererWait = true
+        coordinator.webView(view, didFinish: nil)
+        XCTAssertFalse(view.completeNextRendererWait)
         XCTAssertNotNil(coordinator.captureDocumentCallbackContext(for: view))
         coordinator.onScrollBottomStateChanged = { _ in
             coordinator.scheduleWebViewBinding(replacement, paginationReason: "test.pendingReplacement")

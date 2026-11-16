@@ -3129,7 +3129,10 @@ public class WebViewCoordinator: NSObject {
     internal var lastPublishedScrollBottomState: Bool?
     /// Context and attempt identity travel together through layout completion.
     internal final class InitialScrollBottomPublication {
+        enum RendererWaitState { case pending, completed, retired }
+
         let context: WebViewDocumentCallbackContext
+        var rendererWaitState: RendererWaitState = .pending
 
         init(context: WebViewDocumentCallbackContext) {
             self.context = context
@@ -3903,6 +3906,16 @@ public class WebViewCoordinator: NSObject {
         }
         invalidateContentRulesApplication(on: webView)
     }
+
+#if os(iOS)
+    @MainActor
+    internal func canPublishScrollBottomState(for webView: WKWebView) -> Bool {
+        guard hasCommittedDocument else { return true }
+        guard let context = captureDocumentCallbackContext(for: webView),
+              let publication = initialScrollBottomPublication else { return false }
+        return publication.context == context && publication.rendererWaitState == .completed
+    }
+#endif
 
     @MainActor
     private func invalidateWebViewObservations() {
@@ -5302,6 +5315,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             isCurrent: isCurrentCallback
         )
         guard isCurrentCallback() else { return }
+#if os(iOS)
+        if preservesCommittedDocument {
+            publishInitialScrollBottomState(for: webView)
+            guard isCurrentCallback() else { return }
+        }
+#endif
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
             navigation: navigation
@@ -5416,6 +5435,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = true
+#if os(iOS)
+        lastPublishedScrollBottomState = nil
+#endif
         scriptCaller?.removeAllMultiTargetFrames()
         activateDocumentCallbackContext(for: webView)
 #if os(iOS)
