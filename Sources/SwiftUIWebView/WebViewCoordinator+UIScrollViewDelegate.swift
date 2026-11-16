@@ -112,16 +112,14 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             scrollBottomContentInsetObservation = nil
             scrollBottomObservedScrollView = nil
             lastPublishedScrollBottomState = nil
-            initialScrollBottomPublicationContext = nil
-            initialScrollBottomPublicationAttempt = nil
+            initialScrollBottomPublication = nil
             return
         }
         guard scrollBottomObservedScrollView !== scrollView else { return }
 
         scrollBottomObservedScrollView = scrollView
         lastPublishedScrollBottomState = nil
-        initialScrollBottomPublicationContext = nil
-        initialScrollBottomPublicationAttempt = nil
+        initialScrollBottomPublication = nil
         scrollBottomContentSizeObservation = scrollView.observe(\.contentSize, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
             Task { @MainActor in
                 guard let scrollView else { return }
@@ -147,13 +145,11 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     @MainActor
     internal func publishInitialScrollBottomState(for webView: WKWebView) {
         guard let context = captureDocumentCallbackContext(for: webView),
-              initialScrollBottomPublicationContext != context else { return }
+              initialScrollBottomPublication?.context != context else { return }
         // Reserve before dispatch: repeated finish must not schedule another replay.
-        initialScrollBottomPublicationContext = context
-        // Observation resets may reuse the same document context. Fence this
-        // dispatch separately so an older reply cannot adopt a replacement replay.
-        let attempt = NSObject()
-        initialScrollBottomPublicationAttempt = attempt
+        // A new identity also fences resets that reuse the same document context.
+        let publication = InitialScrollBottomPublication(context: context)
+        initialScrollBottomPublication = publication
         let binding = javaScriptBindingToken(for: webView)
         let callerGeneration = scriptCallerReplacementGeneration
         // didFinish can precede native geometry delivery. An intervening renderer
@@ -163,15 +159,13 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             arguments: [:], inFrame: nil, in: .defaultClient
         ) { [weak self, weak webView] _, error in
             guard let self, let webView,
-                  self.initialScrollBottomPublicationContext == context,
-                  self.initialScrollBottomPublicationAttempt === attempt,
+                  self.initialScrollBottomPublication === publication,
                   self.ownsDocumentCallbackContext(context) else { return }
             guard self.scriptCallerReplacementGeneration == callerGeneration,
                   self.javaScriptBindingToken(for: webView) == binding else {
                 // The document still needs its initial sample. Retire this owner’s
                 // reply and wait for layout under the current caller/binding.
-                self.initialScrollBottomPublicationContext = nil
-                self.initialScrollBottomPublicationAttempt = nil
+                self.initialScrollBottomPublication = nil
                 self.publishInitialScrollBottomState(for: webView)
                 return
             }

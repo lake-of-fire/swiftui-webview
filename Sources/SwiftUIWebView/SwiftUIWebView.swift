@@ -3127,8 +3127,15 @@ public class WebViewCoordinator: NSObject {
     internal var scrollBottomBoundsObservation: NSKeyValueObservation?
     internal var scrollBottomContentInsetObservation: NSKeyValueObservation?
     internal var lastPublishedScrollBottomState: Bool?
-    internal var initialScrollBottomPublicationContext: WebViewDocumentCallbackContext?
-    internal var initialScrollBottomPublicationAttempt: NSObject?
+    /// Context and attempt identity travel together through layout completion.
+    internal final class InitialScrollBottomPublication {
+        let context: WebViewDocumentCallbackContext
+
+        init(context: WebViewDocumentCallbackContext) {
+            self.context = context
+        }
+    }
+    internal var initialScrollBottomPublication: InitialScrollBottomPublication?
     private var awaitingSnapshotReload = false
     private var snapshotReloadCommitted = false
     private var snapshotReloadDocumentReady = false
@@ -3916,8 +3923,7 @@ public class WebViewCoordinator: NSObject {
         scrollBottomContentInsetObservation = nil
         scrollBottomObservedScrollView = nil
         lastPublishedScrollBottomState = nil
-        initialScrollBottomPublicationContext = nil
-        initialScrollBottomPublicationAttempt = nil
+        initialScrollBottomPublication = nil
 #endif
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
