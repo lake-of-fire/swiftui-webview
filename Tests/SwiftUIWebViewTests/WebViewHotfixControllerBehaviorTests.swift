@@ -1004,22 +1004,37 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
         XCTAssertLessThan(scroll.contentInset.left + scroll.contentInset.right, controller.webView.bounds.width)
     }
 
-    func testPageBackgroundUsesPublicThemeColorAndConfiguredFallback() {
+    func testPageBackgroundUsesPublicThemeColorAndConfiguredFallback() throws {
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        func assertColor(_ actual: UIColor?, equals expected: UIColor,
+                         line: UInt = #line) throws {
+            let actual = try XCTUnwrap(actual?.cgColor.converted(
+                to: colorSpace, intent: .relativeColorimetric, options: nil), line: line)
+            let expected = try XCTUnwrap(expected.cgColor.converted(
+                to: colorSpace, intent: .relativeColorimetric, options: nil), line: line)
+            let actualComponents = try XCTUnwrap(actual.components, line: line)
+            let expectedComponents = try XCTUnwrap(expected.components, line: line)
+            XCTAssertEqual(actualComponents.count, expectedComponents.count, line: line)
+            for (actual, expected) in zip(actualComponents, expectedComponents) {
+                XCTAssertEqual(actual, expected, accuracy: 0.00001, line: line)
+            }
+        }
+
         let webView = HotfixPageThemeWebView(frame: .zero)
         let configuration = WebViewConfig(
             backgroundColor: .red, usesSampledPageTopColorForUnderPageBackground: true
         )
         webView.pageThemeColor = .blue
         webView.applyUnderPageBackgroundColor(config: configuration)
-        XCTAssertEqual(webView.underPageBackgroundColor, UIColor.blue)
-        XCTAssertEqual(webView.resolvedUnderPageBackgroundColor(config: configuration), UIColor.blue)
+        try assertColor(webView.underPageBackgroundColor, equals: UIColor.blue)
+        try assertColor(webView.resolvedUnderPageBackgroundColor(config: configuration), equals: UIColor.blue)
 
         webView.applyUnderPageBackgroundColor(config: configuration, allowSampledPageTopColor: false)
-        XCTAssertEqual(webView.underPageBackgroundColor, UIColor(Color.red))
+        try assertColor(webView.underPageBackgroundColor, equals: UIColor(Color.red))
         webView.pageThemeColor = nil
         webView.applyUnderPageBackgroundColor(config: configuration)
-        XCTAssertEqual(webView.underPageBackgroundColor, UIColor(Color.red))
-        XCTAssertEqual(webView.resolvedUnderPageBackgroundColor(config: configuration), UIColor(Color.red))
+        try assertColor(webView.underPageBackgroundColor, equals: UIColor(Color.red))
+        try assertColor(webView.resolvedUnderPageBackgroundColor(config: configuration), equals: UIColor(Color.red))
     }
 
     func testZeroLayoutDefersClearanceUntilUsableViewport() {
