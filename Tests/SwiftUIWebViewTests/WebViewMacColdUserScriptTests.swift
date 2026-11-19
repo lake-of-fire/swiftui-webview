@@ -18,6 +18,28 @@ private final class InitialDocumentScriptHandler: NSObject, WKScriptMessageHandl
 
 @MainActor
 final class WebViewMacColdUserScriptTests: XCTestCase {
+    func testDetachedFactoryUsesPublicBackgroundColorForOpaqueAndTransparentHosts() throws {
+        let view = WebView(navigator: WebViewNavigator(), state: .constant(.empty))
+        let opaque = view.makeDetachedWebViewFactory(
+            config: WebViewConfig(isOpaque: true, backgroundColor: .red), drawsBackground: true
+        )()
+        // WebKit resolves the dynamic SwiftUI color when setting the native property.
+        let actual = try XCTUnwrap(opaque.underPageBackgroundColor?.usingColorSpace(.sRGB))
+        let expected = try XCTUnwrap(NSColor(Color.red).usingColorSpace(.sRGB))
+        XCTAssertEqual(actual.redComponent, expected.redComponent, accuracy: 0.000_001)
+        XCTAssertEqual(actual.greenComponent, expected.greenComponent, accuracy: 0.000_001)
+        XCTAssertEqual(actual.blueComponent, expected.blueComponent, accuracy: 0.000_001)
+        XCTAssertEqual(actual.alphaComponent, expected.alphaComponent, accuracy: 0.000_001)
+        let transparent = view.makeDetachedWebViewFactory(
+            config: WebViewConfig(isOpaque: false, backgroundColor: .red), drawsBackground: true
+        )()
+        let clear = try XCTUnwrap(transparent.underPageBackgroundColor?.usingColorSpace(.sRGB))
+        XCTAssertEqual(clear.redComponent, 0, accuracy: 0.000_001)
+        XCTAssertEqual(clear.greenComponent, 0, accuracy: 0.000_001)
+        XCTAssertEqual(clear.blueComponent, 0, accuracy: 0.000_001)
+        XCTAssertEqual(clear.alphaComponent, 0, accuracy: 0.000_001)
+    }
+
     func testDocumentStartScriptRunsOnFirstNavigationBeforeSwiftUIUpdate() async throws {
         let script = WebViewUserScript(
             source: "window.webkit.messageHandlers.initialScriptProbe.postMessage(document.readyState)",

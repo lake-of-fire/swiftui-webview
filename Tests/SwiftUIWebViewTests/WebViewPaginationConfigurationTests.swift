@@ -1,4 +1,5 @@
 import XCTest
+import WebKit
 @testable import SwiftUIWebView
 
 final class WebViewPaginationConfigurationTests: XCTestCase {
@@ -133,4 +134,36 @@ final class WebViewPaginationConfigurationTests: XCTestCase {
         XCTAssertTrue(resolved.behavesLikeColumns)
         XCTAssertTrue(resolved.usesViewLength)
     }
+
+    @MainActor
+    func test_nativePaginationRemainsDisabledAndPreservesRuntimeSpreadState() throws {
+        let controller = WebViewPaginationController()
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 600, height: 800))
+        _ = controller.attach(webView: webView)
+        let sequence = WebViewPaginationSpreadSequence(spreads: [
+            .init(index: 0, slots: [.init(kind: .page, pageIndex: 0)]),
+            .init(index: 1, slots: [.init(kind: .page, pageIndex: 1)])
+        ], currentIndex: 0)
+        _ = controller.updateRuntimeSpreadSequence(sequence, reason: "runtime")
+        let requested = WebViewPaginationConfiguration(
+            mode: .leftToRight, storedPageLength: 800, gapBetweenPages: 20,
+            behavesLikeColumns: true, layoutSize: webView.bounds.size
+        )
+
+        let applied = try controller.apply(requested, reason: "configuration")
+        let readback = try controller.refreshReadback(reason: "readback")
+        for state in [applied, readback] {
+            XCTAssertEqual(state.desiredConfiguration, .disabled)
+            XCTAssertNil(state.appliedConfiguration)
+            XCTAssertNil(state.pageCount)
+            XCTAssertEqual(state.paginationComplete, false)
+            XCTAssertFalse(state.isAppliedToMountedHost)
+            XCTAssertEqual(state.spreadSequence, sequence)
+            XCTAssertEqual(state.visiblePageIndices, [0])
+            XCTAssertEqual(state.canMoveForward, true)
+            XCTAssertEqual(state.canMoveBackward, false)
+        }
+        XCTAssertNil(controller.detach().spreadSequence)
+    }
+
 }
