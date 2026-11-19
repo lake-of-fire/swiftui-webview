@@ -12227,6 +12227,7 @@ extension WebView {
             }
 
             let webView = EnhancedWKWebView(frame: .zero, configuration: configuration)
+            Self.applyDarkModeSetting(config.darkModeSetting, to: webView)
 #if os(iOS)
             webView.isOpaque = config.isOpaque
             if #available(iOS 14.0, *) {
@@ -12341,9 +12342,14 @@ extension WebView {
 
     @MainActor
     func refreshDarkModeSetting(webView: WKWebView) {
+        Self.applyDarkModeSetting(config.darkModeSetting, to: webView)
+    }
+
+    @MainActor
+    private static func applyDarkModeSetting(_ setting: DarkModeSetting, to webView: WKWebView) {
 #if os(iOS)
         let desiredStyle: UIUserInterfaceStyle
-        switch config.darkModeSetting {
+        switch setting {
         case .system:
             desiredStyle = .unspecified
         case .darkModeOverride:
@@ -12356,7 +12362,7 @@ extension WebView {
         }
 #elseif os(macOS)
         let desiredAppearanceName: NSAppearance.Name?
-        switch config.darkModeSetting {
+        switch setting {
         case .system:
             desiredAppearanceName = nil
         case .darkModeOverride:
