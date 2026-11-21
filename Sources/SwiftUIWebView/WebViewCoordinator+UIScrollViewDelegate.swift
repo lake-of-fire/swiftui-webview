@@ -6,6 +6,7 @@ import WebKit
 extension WebViewCoordinator: UIScrollViewDelegate {
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
+        navigator.scrollViewSuppressingNavigationReveal = nil
         let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
@@ -16,6 +17,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
+        navigator.scrollViewSuppressingNavigationReveal = nil
         let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
@@ -59,7 +61,8 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
         if abs(accumulatedScrollOffset) >= threshold {
             let newValue = accumulatedScrollOffset > 0
-            if newValue != currentHideNavigationDueToScroll {
+            if newValue != currentHideNavigationDueToScroll,
+               navigator.allowsScrollDrivenNavigationVisibility(newValue, for: scrollView) {
 #if DEBUG
                 debugPrint(
                     "# TABBAR webScrollHideNav",

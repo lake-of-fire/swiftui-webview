@@ -5893,6 +5893,24 @@ extension WebViewCoordinator: WKNavigationDelegate {
 }
 
 public class WebViewNavigator: NSObject, ObservableObject {
+#if os(iOS)
+    @MainActor weak var scrollViewSuppressingNavigationReveal: UIScrollView?
+
+    /// Keeps a host-requested collapse from being undone by the native
+    /// reveal threshold during the same drag.
+    @MainActor
+    public func suppressNavigationRevealForCurrentDrag() {
+        guard let scrollView = webView?.scrollView,
+              scrollView.isTracking || scrollView.isDragging else { return }
+        scrollViewSuppressingNavigationReveal = scrollView
+    }
+
+    @MainActor
+    func allowsScrollDrivenNavigationVisibility(_ hidden: Bool, for scrollView: UIScrollView) -> Bool {
+        hidden || scrollViewSuppressingNavigationReveal !== scrollView
+    }
+#endif
+
     /// Authority for one navigator intent, independent of URL equality. A newer
     /// intent invalidates an older asynchronous resolver before it can dispatch.
     public struct NavigationIntent: Equatable, Sendable {
@@ -7081,6 +7099,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
             // Initial attachment must preserve requests queued before a native
             // view exists. Detachment and replacement retire their old owner.
             if oldValue != nil, oldValue !== webView {
+#if os(iOS)
+                scrollViewSuppressingNavigationReveal = nil
+#endif
                 beginNavigationIntent()
                 retireIssuedNavigation()
                 // Ownership retirement cannot make an accepted request eligible
