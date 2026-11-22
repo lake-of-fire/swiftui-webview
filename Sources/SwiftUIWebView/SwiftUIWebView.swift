@@ -4792,8 +4792,17 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             webView.state = newState
         } else if message.name == "swiftUIWebViewUnhandledTap" {
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
-            let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
+            let navigationPayload = message.body as? [String: Any]
+            let requestedHideNavigation = navigationPayload?["hideNavigationDueToScroll"] as? Bool
             let isNavigationStateMessage = requestedHideNavigation != nil
+#if os(iOS)
+            if requestedHideNavigation == true,
+               navigationPayload?["reason"] as? String == "documentScrollDown",
+               navigationPayload?["inputType"] as? String == "touch",
+               shouldSuppressNativeDownwardNavigationHide?() == true {
+                return
+            }
+#endif
             if isNavigationStateMessage {
                 lastScrollHideNavigationMessageAt = Date.timeIntervalSinceReferenceDate
             }

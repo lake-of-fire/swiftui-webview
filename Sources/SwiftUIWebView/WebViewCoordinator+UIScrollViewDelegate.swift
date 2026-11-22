@@ -61,7 +61,8 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
         if abs(accumulatedScrollOffset) >= threshold {
             let newValue = accumulatedScrollOffset > 0
-            let suppressesHide = newValue && navigationScrollAxis == .vertical
+            let isVerticalScroll = navigationScrollAxis == .vertical || abs(deltaY) >= abs(deltaX)
+            let suppressesHide = newValue && isVerticalScroll
                 && shouldSuppressNativeDownwardNavigationHide?() == true
             guard ownsCallback() else { return }
             if !suppressesHide,
