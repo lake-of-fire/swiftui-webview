@@ -519,6 +519,34 @@ final class WebViewPoolTests: XCTestCase {
         )
     }
 
+    func testDisplacedNativeReceiptRemainsStaleAcrossHostOwnershipResets() {
+        let displaced = NSObject()
+        let successor = NSObject()
+        let successorContent = WebViewPoolContentID("successor")
+        var gate = WebViewPoolContentNavigationGate<NSObject>()
+        gate.beginKeyedNavigation(contentID: successorContent, navigation: successor)
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: displaced), .unknown)
+
+        gate.recordDisplacedNavigation(displaced)
+        XCTAssertEqual(gate.handleProvisionalNavigationStarted(displaced), .stale)
+        XCTAssertEqual(gate.admitNavigationCallback(displaced), .stale)
+        XCTAssertFalse(gate.handleNavigationFinished(displaced))
+        XCTAssertFalse(gate.handleNavigationFailed(displaced))
+        XCTAssertEqual(gate.pendingContentID, successorContent)
+        XCTAssertEqual(gate.navigationCallbackDisposition(for: successor), .current)
+        XCTAssertTrue(gate.handleNavigationFinished(successor))
+        XCTAssertEqual(gate.readyContentID, successorContent)
+
+        gate.setReadyContentID(successorContent)
+        XCTAssertEqual(gate.admitNavigationCallback(displaced), .stale)
+        XCTAssertEqual(gate.readyContentID, successorContent)
+
+        gate.resetNavigationOwnership()
+        XCTAssertEqual(gate.admitNavigationCallback(displaced), .stale)
+        let unownedNavigation = NSObject()
+        XCTAssertEqual(gate.admitNavigationCallback(unownedNavigation), .current)
+    }
+
     func testUnknownProvisionalNavigationBecomesCurrentAndInvalidatesKeyedIdentity() {
         let keyedNavigation = NSObject()
         let externalNavigation = NSObject()

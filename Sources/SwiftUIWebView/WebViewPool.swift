@@ -14,7 +14,7 @@ public struct WebViewPoolContentID: Equatable, Hashable, Sendable {
 }
 
 /// Classifies a delegate receipt without rejecting untracked WebKit navigation.
-/// Only an exact previously admitted receipt can be proven stale.
+/// Only an exact known or displaced receipt can be proven stale.
 internal enum WebViewNavigationCallbackDisposition: Equatable {
     case current
     case stale
@@ -36,6 +36,9 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
     }
 
     private var knownNavigations = [WeakNavigation]()
+    // A native load can return after its issuing navigator lost the physical
+    // host. Record that exact callback without replacing the host's newer state.
+    private var displacedNavigations = [WeakNavigation]()
     private var latestNavigation: WeakNavigation?
     private var pendingNavigation: PendingNavigation?
     private(set) var readyContentID: WebViewPoolContentID?
@@ -83,11 +86,25 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
         readyContentID = nil
     }
 
+    mutating func recordDisplacedNavigation(_ navigation: Navigation) {
+        displacedNavigations.removeAll { $0.value == nil }
+        if !isDisplacedNavigation(navigation) {
+            displacedNavigations.append(WeakNavigation(navigation))
+        }
+    }
+
+    func isDisplacedNavigation(_ navigation: Navigation) -> Bool {
+        displacedNavigations.contains { $0.value === navigation }
+    }
+
     mutating func navigationCallbackDisposition(
         for navigation: Navigation?
     ) -> WebViewNavigationCallbackDisposition {
         guard let navigation else { return .unknown }
         compactKnownNavigations()
+        if isDisplacedNavigation(navigation) {
+            return .stale
+        }
         if latestNavigation?.value === navigation {
             return .current
         }
@@ -106,7 +123,7 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
 
     @discardableResult
     mutating func handleNavigationFinished(_ navigation: Navigation?) -> Bool {
-        guard let navigation else { return false }
+        guard let navigation, !isDisplacedNavigation(navigation) else { return false }
         defer { removeKnownNavigation(navigation) }
         guard let pendingNavigation,
               pendingNavigation.navigation === navigation else {
@@ -119,7 +136,7 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
 
     @discardableResult
     mutating func handleNavigationFailed(_ navigation: Navigation?) -> Bool {
-        guard let navigation else { return false }
+        guard let navigation, !isDisplacedNavigation(navigation) else { return false }
         defer { removeKnownNavigation(navigation) }
         guard let pendingNavigation,
               pendingNavigation.navigation === navigation else {
@@ -170,6 +187,7 @@ internal struct WebViewPoolContentNavigationGate<Navigation: AnyObject> {
 
     private mutating func compactKnownNavigations() {
         knownNavigations.removeAll { $0.value == nil }
+        displacedNavigations.removeAll { $0.value == nil }
         if latestNavigation?.value == nil {
             latestNavigation = nil
         }
