@@ -115,12 +115,16 @@ final class WebViewScrollOwnershipTests: XCTestCase {
 
     func testTouchHideWaitsForActualDecelerationRestingOffset() {
         let navigator = WebViewNavigator()
-        var settledBottomValues: [Bool] = []
+        var isNavigationHidden = false
+        var visibilityChanges: [Bool] = []
         let model = WebView(
             navigator: navigator,
             state: .constant(.empty),
-            onTouchScrollWillBeginDragging: { 1 },
-            onTouchScrollDidSettle: { _, atBottom in settledBottomValues.append(atBottom) }
+            shouldDeferTouchDownwardNavigationHide: { true },
+            hideNavigationDueToScroll: Binding(
+                get: { isNavigationHidden },
+                set: { isNavigationHidden = $0; visibilityChanges.append($0) }
+            )
         )
         let coordinator = model.makeCoordinatorForTesting()
         let view = BottomLayoutHeldWebView(
@@ -138,43 +142,62 @@ final class WebViewScrollOwnershipTests: XCTestCase {
 
         coordinator.scrollViewWillBeginDragging(view.scrollView)
         coordinator.pendingDeferredDownwardHide = true
-        // UIKit may project this gesture to the bottom while the actual
-        // deceleration later comes to rest short of it.
+        // The projected destination reaches bottom but the actual resting
+        // position falls short, so native visibility must hide after settling.
         view.scrollView.contentOffset = CGPoint(x: 0, y: 500)
         coordinator.scrollViewDidEndDragging(view.scrollView, willDecelerate: true)
-        XCTAssertTrue(settledBottomValues.isEmpty, "Do not commit from the projected drag destination")
+        XCTAssertTrue(visibilityChanges.isEmpty, "Do not commit from the projected drag destination")
 
         view.scrollView.contentOffset = CGPoint(x: 0, y: 490)
         coordinator.scrollViewDidEndDecelerating(view.scrollView)
-        XCTAssertEqual(settledBottomValues, [false])
+        XCTAssertTrue(isNavigationHidden)
+        XCTAssertEqual(visibilityChanges, [true])
 
-        // A projection that predicts a short stop can likewise decelerate to
-        // the actual bottom. The final native offset controls the decision.
+        // The inverse projection can settle at bottom, discarding the pending hide.
         coordinator.scrollViewWillBeginDragging(view.scrollView)
+        isNavigationHidden = false
         coordinator.pendingDeferredDownwardHide = true
         view.scrollView.contentOffset = CGPoint(x: 0, y: 490)
         coordinator.scrollViewDidEndDragging(view.scrollView, willDecelerate: true)
-        XCTAssertEqual(settledBottomValues, [false])
         view.scrollView.contentOffset = CGPoint(x: 0, y: 520)
         coordinator.scrollViewDidEndDecelerating(view.scrollView)
-        XCTAssertEqual(settledBottomValues, [false, true])
+        XCTAssertFalse(isNavigationHidden)
+        XCTAssertEqual(visibilityChanges, [true])
 
         coordinator.scrollViewWillBeginDragging(view.scrollView)
+        isNavigationHidden = false
         coordinator.pendingDeferredDownwardHide = true
         view.scrollView.contentOffset = CGPoint(x: 0, y: 510)
         coordinator.scrollViewDidEndDragging(view.scrollView, willDecelerate: false)
-        XCTAssertEqual(settledBottomValues, [false, true, false],
-                       "A gesture without deceleration settles from its actual drag-end offset")
+        XCTAssertTrue(isNavigationHidden, "A gesture without deceleration settles at drag end")
+        XCTAssertEqual(visibilityChanges, [true, true])
+
+        coordinator.scrollViewWillBeginDragging(view.scrollView)
+        isNavigationHidden = false
+        coordinator.scrollViewDidEndDragging(view.scrollView, willDecelerate: true)
+        coordinator.scrollViewWillBeginDragging(view.scrollView)
+        coordinator.pendingDeferredDownwardHide = true
+        coordinator.scrollViewDidEndDecelerating(view.scrollView)
+        XCTAssertFalse(isNavigationHidden, "An earlier deceleration must not settle the replacement drag")
+        XCTAssertEqual(visibilityChanges, [true, true])
+
+        view.scrollView.contentOffset = CGPoint(x: 0, y: 520)
+        coordinator.scrollViewDidEndDragging(view.scrollView, willDecelerate: false)
+        XCTAssertFalse(isNavigationHidden, "The replacement drag settled at the bottom")
+        XCTAssertEqual(visibilityChanges, [true, true])
     }
 
     func testTouchHideIsDiscardedWhenDocumentChangesBeforeDecelerationEnds() {
         let navigator = WebViewNavigator()
-        var settledBottomValues: [Bool] = []
+        var isNavigationHidden = false
         let model = WebView(
             navigator: navigator,
             state: .constant(.empty),
-            onTouchScrollWillBeginDragging: { 1 },
-            onTouchScrollDidSettle: { _, atBottom in settledBottomValues.append(atBottom) }
+            shouldDeferTouchDownwardNavigationHide: { true },
+            hideNavigationDueToScroll: Binding(
+                get: { isNavigationHidden },
+                set: { isNavigationHidden = $0 }
+            )
         )
         let coordinator = model.makeCoordinatorForTesting()
         let view = BottomLayoutHeldWebView(
@@ -197,7 +220,7 @@ final class WebViewScrollOwnershipTests: XCTestCase {
         view.scrollView.contentOffset = CGPoint(x: 0, y: 400)
         coordinator.scrollViewDidEndDecelerating(view.scrollView)
 
-        XCTAssertTrue(settledBottomValues.isEmpty, "A prior document's pending hide must not mutate its replacement")
+        XCTAssertFalse(isNavigationHidden, "A prior document's pending hide must not mutate its replacement")
     }
 
     func testPreservedProvisionalFailureRearmsBottomLayoutForSurvivingDocument() {

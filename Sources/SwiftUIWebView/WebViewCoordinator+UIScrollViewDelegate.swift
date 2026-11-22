@@ -6,15 +6,17 @@ import WebKit
 extension WebViewCoordinator: UIScrollViewDelegate {
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
+        let ownsCallback = beginScrollCallback(for: webView)
+        let shouldDeferDownwardHide = shouldDeferTouchDownwardNavigationHide?() ?? false
+        guard ownsCallback() else { return }
         navigator.scrollViewSuppressingNavigationReveal = nil
         pendingDeferredDownwardHide = false
         deferredTouchDragReversed = false
-        deferredTouchDragIdentifier = onTouchScrollWillBeginDragging?()
-        deferDownwardHideUntilScrollSettles = deferredTouchDragIdentifier != nil
+        deferredTouchDragIsDecelerating = false
+        deferDownwardHideUntilScrollSettles = shouldDeferDownwardHide
         deferredTouchDragDocumentContext = deferDownwardHideUntilScrollSettles
             ? captureDocumentCallbackContext(for: webView)
             : nil
-        let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
         lastContentOffset = scrollView.contentOffset
@@ -28,8 +30,9 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
+        deferredTouchDragIsDecelerating = deferDownwardHideUntilScrollSettles && decelerate
         if !decelerate {
-            settleDeferredTouchDrag(in: scrollView, webView: webView, ownsCallback: ownsCallback)
+            settleDeferredTouchDrag(in: scrollView, ownsCallback: ownsCallback)
         }
         guard ownsCallback() else { return }
         guard !decelerate else { return }
@@ -43,7 +46,9 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
-        settleDeferredTouchDrag(in: scrollView, webView: webView, ownsCallback: ownsCallback)
+        if deferredTouchDragIsDecelerating && !scrollView.isDecelerating {
+            settleDeferredTouchDrag(in: scrollView, ownsCallback: ownsCallback)
+        }
         guard ownsCallback() else { return }
         accumulatedScrollOffset = 0
         lastContentOffset = scrollView.contentOffset
@@ -60,7 +65,6 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     private func settleDeferredTouchDrag(
         in scrollView: UIScrollView,
-        webView: WKWebView,
         ownsCallback: @MainActor () -> Bool
     ) {
         // A later touch can interrupt a prior deceleration. Ignore an end
@@ -69,25 +73,23 @@ extension WebViewCoordinator: UIScrollViewDelegate {
               !scrollView.isTracking,
               !scrollView.isDragging else { return }
         let dragContext = deferredTouchDragDocumentContext
-        let dragIdentifier = deferredTouchDragIdentifier
         let shouldKeepNavigationVisible = deferredTouchDragReversed
             || scrollOffsetIsAtEnd(scrollView.contentOffset, in: scrollView)
         let shouldApplyPendingHide = pendingDeferredDownwardHide && !shouldKeepNavigationVisible
 
-        // Clear the drag state before publishing to Reader; that callback can
-        // synchronously change presentation or replace the document.
+        // Clear drag state before changing visibility. Native scroll position
+        // owns the decision; the WebKit message only identifies direction.
         pendingDeferredDownwardHide = false
         deferredTouchDragReversed = false
+        deferredTouchDragIsDecelerating = false
         deferDownwardHideUntilScrollSettles = false
         deferredTouchDragDocumentContext = nil
-        deferredTouchDragIdentifier = nil
 
-        guard let dragIdentifier,
-              let dragContext,
+        guard let dragContext,
               ownsDocumentCallbackContext(dragContext),
-              ownsCallback() else { return }
-        onTouchScrollDidSettle?(dragIdentifier, shouldKeepNavigationVisible)
-        guard ownsCallback(), shouldApplyPendingHide, !currentHideNavigationDueToScroll else { return }
+              ownsCallback(),
+              shouldApplyPendingHide,
+              !currentHideNavigationDueToScroll else { return }
         withAnimation(.easeIn(duration: 0.3)) {
             setHideNavigationDueToScroll(true)
         }
@@ -101,7 +103,10 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         guard scrollView.isTracking || scrollView.isDragging else { return }
 
         let currentOffset = scrollView.contentOffset
-        let threshold: CGFloat = accumulatedScrollOffset > 0 ? 50.0 : 10.0
+        let isDeferredDownwardTouch = deferDownwardHideUntilScrollSettles && accumulatedScrollOffset >= 0
+        let threshold: CGFloat = isDeferredDownwardTouch
+            ? 24.0
+            : accumulatedScrollOffset > 0 ? 50.0 : 10.0
         let deltaX = currentOffset.x - lastContentOffset.x
         let deltaY = currentOffset.y - lastContentOffset.y
         let scrollDifference = resolvedScrollDifference(deltaX: deltaX, deltaY: deltaY)
@@ -115,11 +120,20 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             }
             if newValue != currentHideNavigationDueToScroll,
                navigator.allowsScrollDrivenNavigationVisibility(newValue, for: scrollView) {
-                if newValue && deferDownwardHideUntilScrollSettles {
-                    pendingDeferredDownwardHide = true
-                    accumulatedScrollOffset = 0
-                    lastContentOffset = currentOffset
-                    return
+                if newValue {
+                    let shouldDefer = deferDownwardHideUntilScrollSettles
+                        || shouldDeferTouchDownwardNavigationHide?() == true
+                    guard ownsCallback() else { return }
+                    if shouldDefer {
+                        // UIKit can track a touch before delivering drag-start.
+                        // Only an armed drag can carry a hide to settlement.
+                        if deferDownwardHideUntilScrollSettles {
+                            pendingDeferredDownwardHide = true
+                        }
+                        accumulatedScrollOffset = 0
+                        lastContentOffset = currentOffset
+                        return
+                    }
                 }
 #if DEBUG
                 debugPrint(
