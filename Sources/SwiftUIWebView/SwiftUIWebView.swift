@@ -2940,7 +2940,7 @@ public class WebViewCoordinator: NSObject {
     
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
-    private var scriptCallerReplacementGeneration: UInt64 = 0
+    internal private(set) var scriptCallerReplacementGeneration: UInt64 = 0
     private let scriptCallerBindingOwnerID = UUID()
     private weak var scriptCallerBoundWebView: WKWebView?
     private var documentCallbackGeneration: UInt64 = 0
@@ -3002,6 +3002,19 @@ public class WebViewCoordinator: NSObject {
     internal var scrollBottomBoundsObservation: NSKeyValueObservation?
     internal var scrollBottomContentInsetObservation: NSKeyValueObservation?
     internal var lastPublishedScrollBottomState: Bool?
+    internal final class InitialScrollBottomPublication {
+        enum RendererWaitState {
+            case pending, resolvingScrollSemantics, needsScrollSemantics, completed, retired
+        }
+
+        let context: WebViewDocumentCallbackContext
+        var rendererWaitState: RendererWaitState = .pending
+
+        init(context: WebViewDocumentCallbackContext) {
+            self.context = context
+        }
+    }
+    internal var initialScrollBottomPublication: InitialScrollBottomPublication?
     private var awaitingSnapshotReload = false
     private var snapshotReloadCommitted = false
     private var snapshotReloadDocumentReady = false
@@ -3458,6 +3471,10 @@ public class WebViewCoordinator: NSObject {
         )
         documentCallbackGeneration &+= 1
         documentCallbackContextIsActive = false
+#if os(iOS)
+        initialScrollBottomPublication = nil
+        navigator.scrollViewSuppressingNavigationReveal = nil
+#endif
         trustedUserActionAdmissions.invalidateAll()
         cancelPendingWebViewDocumentCallbackTasks(&pendingDocumentCallbackTasks)
     }
@@ -3770,6 +3787,17 @@ public class WebViewCoordinator: NSObject {
         invalidateContentRulesApplication(on: webView)
     }
 
+#if os(iOS)
+    @MainActor
+    internal func canPublishScrollBottomState(for webView: WKWebView) -> Bool {
+        // Retired documents must wait for the successor's committed layout.
+        guard hasCommittedDocument else { return documentCallbackGeneration == 0 }
+        guard let context = captureDocumentCallbackContext(for: webView),
+              let publication = initialScrollBottomPublication else { return false }
+        return publication.context == context && publication.rendererWaitState == .completed
+    }
+#endif
+
     @MainActor
     private func invalidateWebViewObservations() {
         urlObservation?.invalidate()
@@ -3789,6 +3817,9 @@ public class WebViewCoordinator: NSObject {
         scrollBottomContentInsetObservation = nil
         scrollBottomObservedScrollView = nil
         lastPublishedScrollBottomState = nil
+        // Reinstalling observations can leave the finished document in place.
+        // Retain its context so installation can rearm without another finish.
+        initialScrollBottomPublication?.rendererWaitState = .retired
 #endif
         pendingProgressUpdateTask?.cancel()
         pendingProgressUpdateTask = nil
@@ -5019,6 +5050,10 @@ extension WebViewCoordinator: WKNavigationDelegate {
         
         onNavigationFinished?(newState)
         guard isCurrentCallback() else { return }
+#if os(iOS)
+        publishInitialScrollBottomState(for: webView)
+        guard isCurrentCallback() else { return }
+#endif
 
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
@@ -5152,6 +5187,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             isCurrent: isCurrentCallback
         )
         guard isCurrentCallback() else { return }
+#if os(iOS)
+        if preservesCommittedDocument {
+            publishInitialScrollBottomState(for: webView)
+            guard isCurrentCallback() else { return }
+        }
+#endif
         restoreConfiguredContentRulesAfterBypassIfNeeded(
             on: webView,
             navigation: navigation
@@ -5262,6 +5303,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = true
+#if os(iOS)
+        lastPublishedScrollBottomState = nil
+#endif
         scriptCaller?.removeAllMultiTargetFrames()
         activateDocumentCallbackContext(for: webView)
 #if os(iOS)
@@ -5714,6 +5758,23 @@ extension WebViewCoordinator: WKNavigationDelegate {
 }
 
 public class WebViewNavigator: NSObject, ObservableObject {
+#if os(iOS)
+    @MainActor internal weak var scrollViewSuppressingNavigationReveal: UIScrollView?
+
+    /// A host-driven collapse can suppress native reveal for this drag only.
+    @MainActor
+    public func suppressNavigationRevealForCurrentDrag() {
+        guard let scrollView = webView?.scrollView,
+              scrollView.isTracking || scrollView.isDragging else { return }
+        scrollViewSuppressingNavigationReveal = scrollView
+    }
+
+    @MainActor
+    func allowsScrollDrivenNavigationVisibility(_ hidden: Bool, for scrollView: UIScrollView) -> Bool {
+        hidden || scrollViewSuppressingNavigationReveal !== scrollView
+    }
+#endif
+
     /// Authority for one navigator intent, independent of URL equality. A newer
     /// intent invalidates an older asynchronous resolver before it can dispatch.
     public struct NavigationIntent: Equatable, Sendable {
@@ -6861,6 +6922,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     weak var webView: WKWebView? {
         didSet {
+#if os(iOS)
+            if oldValue !== webView {
+                scrollViewSuppressingNavigationReveal = nil
+            }
+#endif
             // A queued load keeps its identity on first attachment. Detaching
             // or replacing an existing native host retires that document owner.
             if oldValue != nil, oldValue !== webView {
