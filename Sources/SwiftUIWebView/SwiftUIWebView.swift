@@ -3166,11 +3166,6 @@ public class WebViewCoordinator: NSObject {
     }
     internal var lastContentOffset: CGPoint = .zero
     internal var accumulatedScrollOffset: CGFloat = 0
-    internal var deferDownwardHideUntilScrollSettles = false
-    internal var pendingDeferredDownwardHide = false
-    internal var deferredTouchDragReversed = false
-    internal var deferredTouchDragIsDecelerating = false
-    internal var deferredTouchDragDocumentContext: WebViewDocumentCallbackContext?
     internal var navigationScrollAxis: NavigationScrollAxis = .vertical
     internal var horizontalForwardSign: CGFloat = 1
     public let paginationController = WebViewPaginationController()
@@ -3183,7 +3178,7 @@ public class WebViewCoordinator: NSObject {
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
-    var shouldDeferTouchDownwardNavigationHide: (@MainActor @Sendable () -> Bool)?
+    var shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
@@ -3502,7 +3497,7 @@ public class WebViewCoordinator: NSObject {
         onURLChanged: ((WebViewState) -> Void)? = nil,
         onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
         onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
-        shouldDeferTouchDownwardNavigationHide: (@MainActor @Sendable () -> Bool)? = nil,
+        shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)? = nil,
         hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
@@ -3519,7 +3514,7 @@ public class WebViewCoordinator: NSObject {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
-        self.shouldDeferTouchDownwardNavigationHide = shouldDeferTouchDownwardNavigationHide
+        self.shouldSuppressNativeDownwardNavigationHide = shouldSuppressNativeDownwardNavigationHide
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.mirroredHideNavigationDueToScroll = hideNavigationDueToScroll.wrappedValue
         self.textSelection = textSelection
@@ -5917,6 +5912,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
 public class WebViewNavigator: NSObject, ObservableObject {
 #if os(iOS)
     @MainActor weak var scrollViewSuppressingNavigationReveal: UIScrollView?
+
+    @MainActor
+    public var isNativeScrollInProgress: Bool {
+        guard let scrollView = webView?.scrollView else { return false }
+        return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
+    }
 
     /// Keeps a host-requested collapse from being undone by the native
     /// reveal threshold during the same drag.
@@ -11189,7 +11190,7 @@ public struct WebView {
     let onURLChanged: ((WebViewState) -> Void)?
     let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     let onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
-    let shouldDeferTouchDownwardNavigationHide: (@MainActor @Sendable () -> Bool)?
+    let shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)?
     let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
@@ -11225,7 +11226,7 @@ public struct WebView {
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
                 onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
-                shouldDeferTouchDownwardNavigationHide: (@MainActor @Sendable () -> Bool)? = nil,
+                shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)? = nil,
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
@@ -11253,7 +11254,7 @@ public struct WebView {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
-        self.shouldDeferTouchDownwardNavigationHide = shouldDeferTouchDownwardNavigationHide
+        self.shouldSuppressNativeDownwardNavigationHide = shouldSuppressNativeDownwardNavigationHide
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
@@ -11294,7 +11295,7 @@ public struct WebView {
             onURLChanged: onURLChanged,
             onNavigationAction: onNavigationAction,
             onScrollBottomStateChanged: onScrollBottomStateChanged,
-            shouldDeferTouchDownwardNavigationHide: shouldDeferTouchDownwardNavigationHide,
+            shouldSuppressNativeDownwardNavigationHide: shouldSuppressNativeDownwardNavigationHide,
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
@@ -12397,7 +12398,7 @@ extension WebView {
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
         context.coordinator.onScrollBottomStateChanged = onScrollBottomStateChanged
-        context.coordinator.shouldDeferTouchDownwardNavigationHide = shouldDeferTouchDownwardNavigationHide
+        context.coordinator.shouldSuppressNativeDownwardNavigationHide = shouldSuppressNativeDownwardNavigationHide
 #if os(iOS)
         if let webView = context.coordinator.navigator.webView {
             context.coordinator.installScrollBottomStateObservations(for: webView.scrollView)
