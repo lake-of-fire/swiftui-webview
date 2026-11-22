@@ -3166,6 +3166,11 @@ public class WebViewCoordinator: NSObject {
     }
     internal var lastContentOffset: CGPoint = .zero
     internal var accumulatedScrollOffset: CGFloat = 0
+    internal var deferDownwardHideUntilScrollSettles = false
+    internal var pendingDeferredDownwardHide = false
+    internal var deferredTouchDragReversed = false
+    internal var deferredTouchDragDocumentContext: WebViewDocumentCallbackContext?
+    internal var deferredTouchDragIdentifier: UInt64?
     internal var navigationScrollAxis: NavigationScrollAxis = .vertical
     internal var horizontalForwardSign: CGFloat = 1
     public let paginationController = WebViewPaginationController()
@@ -3178,6 +3183,8 @@ public class WebViewCoordinator: NSObject {
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
+    var onTouchScrollWillBeginDragging: (@MainActor @Sendable () -> UInt64?)?
+    var onTouchScrollDidSettle: (@MainActor @Sendable (UInt64, Bool) -> Void)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
@@ -3496,6 +3503,8 @@ public class WebViewCoordinator: NSObject {
         onURLChanged: ((WebViewState) -> Void)? = nil,
         onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
         onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
+        onTouchScrollWillBeginDragging: (@MainActor @Sendable () -> UInt64?)? = nil,
+        onTouchScrollDidSettle: (@MainActor @Sendable (UInt64, Bool) -> Void)? = nil,
         hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
@@ -3512,6 +3521,8 @@ public class WebViewCoordinator: NSObject {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
+        self.onTouchScrollWillBeginDragging = onTouchScrollWillBeginDragging
+        self.onTouchScrollDidSettle = onTouchScrollDidSettle
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.mirroredHideNavigationDueToScroll = hideNavigationDueToScroll.wrappedValue
         self.textSelection = textSelection
@@ -11181,6 +11192,8 @@ public struct WebView {
     let onURLChanged: ((WebViewState) -> Void)?
     let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     let onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
+    let onTouchScrollWillBeginDragging: (@MainActor @Sendable () -> UInt64?)?
+    let onTouchScrollDidSettle: (@MainActor @Sendable (UInt64, Bool) -> Void)?
     let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
@@ -11216,6 +11229,8 @@ public struct WebView {
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
                 onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
+                onTouchScrollWillBeginDragging: (@MainActor @Sendable () -> UInt64?)? = nil,
+                onTouchScrollDidSettle: (@MainActor @Sendable (UInt64, Bool) -> Void)? = nil,
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
@@ -11243,6 +11258,8 @@ public struct WebView {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
+        self.onTouchScrollWillBeginDragging = onTouchScrollWillBeginDragging
+        self.onTouchScrollDidSettle = onTouchScrollDidSettle
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
@@ -11283,6 +11300,8 @@ public struct WebView {
             onURLChanged: onURLChanged,
             onNavigationAction: onNavigationAction,
             onScrollBottomStateChanged: onScrollBottomStateChanged,
+            onTouchScrollWillBeginDragging: onTouchScrollWillBeginDragging,
+            onTouchScrollDidSettle: onTouchScrollDidSettle,
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
@@ -12385,6 +12404,8 @@ extension WebView {
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
         context.coordinator.onScrollBottomStateChanged = onScrollBottomStateChanged
+        context.coordinator.onTouchScrollWillBeginDragging = onTouchScrollWillBeginDragging
+        context.coordinator.onTouchScrollDidSettle = onTouchScrollDidSettle
 #if os(iOS)
         if let webView = context.coordinator.navigator.webView {
             context.coordinator.installScrollBottomStateObservations(for: webView.scrollView)
