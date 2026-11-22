@@ -5911,6 +5911,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     private var pendingRequestNavigation: WKNavigation?
     private var pendingRequestIdentity = UUID()
     @MainActor private var pendingRequestNativeCallIdentity: UUID?
+    @MainActor private var unkeyedNativeCallIdentity: UUID?
     fileprivate var pendingHTML: (html: String, baseURL: URL?)?
     fileprivate var pendingHTMLContentID: WebViewPoolContentID?
     fileprivate var pendingDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
@@ -6478,11 +6479,19 @@ public class WebViewNavigator: NSObject, ObservableObject {
         retireIssuedNavigation()
         let issuedIdentity = tracksIssuedNavigation ? recordIssuedNavigation(isPreparedData: false) : nil
         let generation = pendingRequestLoadGeneration
+        let nativeCallIdentity = UUID()
+        unkeyedNativeCallIdentity = nativeCallIdentity
+        defer {
+            if unkeyedNativeCallIdentity == nativeCallIdentity { unkeyedNativeCallIdentity = nil }
+        }
         let navigation = start()
-        guard issuedNavigationIdentity == issuedIdentity,
+        // A nested untracked call can return nil without changing either the
+        // issued identity or pending generation. It still supersedes this call.
+        guard unkeyedNativeCallIdentity == nativeCallIdentity,
+              issuedNavigationIdentity == issuedIdentity,
               pendingRequestLoadGeneration == generation,
               ownsBoundWebView(sourceWebView) else {
-            if tracksIssuedNavigation { rememberDisplacedIssuedNavigation(navigation, in: sourceWebView) }
+            rememberDisplacedIssuedNavigation(navigation, in: sourceWebView)
             return nil
         }
         if let issuedIdentity {

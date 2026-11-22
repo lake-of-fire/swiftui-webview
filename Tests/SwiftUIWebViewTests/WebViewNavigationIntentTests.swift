@@ -112,19 +112,30 @@ final class WebViewNavigationIntentTests: XCTestCase {
         _ = await coordinator.webView(view, decidePolicyFor: oldPolicy, preferences: WKWebpagePreferences())
         XCTAssertTrue(navigator.isCurrent(reload), "An older failed navigation or policy cannot retire the successor")
 
+        XCTAssertFalse(view.canGoForward)
+        var displacedReload: WKNavigation?
+        view.afterReloadStarts = { navigation in
+            displacedReload = navigation
+            navigator.goForward()
+        }
+        navigator.reloadWithoutContentRules()
+        XCTAssertEqual(view.navigationCallbackDisposition(try XCTUnwrap(displacedReload)), .stale)
+        XCTAssertFalse(navigator.peekContentRulesBypass(for: view))
+
         let replacementURL = URL(string: "fixture://local/reentrant-replacement")!
         let replacementFinished = expectation(description: "replacement issued during native reload finished")
         probe.finished = { source in
             if source.url == replacementURL { replacementFinished.fulfill() }
         }
         var replacement: WebViewNavigator.IssuedNavigationIdentity?
-        view.afterReloadStarts = {
+        view.afterReloadStarts = { _ in
             navigator.load(URLRequest(url: replacementURL))
             replacement = navigator.issuedNavigationIdentity
         }
-        navigator.reload()
+        navigator.reloadWithoutContentRules()
         let replacementIdentity = try XCTUnwrap(replacement)
         XCTAssertTrue(navigator.isCurrent(replacementIdentity))
+        XCTAssertFalse(navigator.peekContentRulesBypass(for: view))
         await fulfillment(of: [replacementFinished], timeout: 10)
         XCTAssertTrue(navigator.isCurrent(replacementIdentity), "A reentrant reload return cannot replace its successor's native handle")
 
@@ -260,7 +271,7 @@ final class WebViewNavigationIntentTests: XCTestCase {
 @MainActor
 private final class IssuedRequestProbeWebView: EnhancedWKWebView {
     var refusedRequestURL: URL?
-    var afterReloadStarts: (() -> Void)?
+    var afterReloadStarts: ((WKNavigation?) -> Void)?
     private(set) var refusedRequests = 0
 
     override func load(_ request: URLRequest) -> WKNavigation? {
@@ -276,7 +287,7 @@ private final class IssuedRequestProbeWebView: EnhancedWKWebView {
         let navigation = super.reload()
         let action = afterReloadStarts
         afterReloadStarts = nil
-        action?()
+        action?(navigation)
         return navigation
     }
 }
