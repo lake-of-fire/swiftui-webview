@@ -98,6 +98,14 @@ private let readerLoadVerboseUIViewControllerLoggingEnabled: Bool = {
 #endif
 }()
 
+private let readerLoadUITestTraceEnabled: Bool = {
+#if DEBUG
+    ProcessInfo.processInfo.arguments.contains("--reader-load-trace")
+#else
+    false
+#endif
+}()
+
 /// Tracks reader loads between issuance and WebKit's provisional-navigation callback.
 ///
 /// `ReaderContent` uses this narrow signal to ignore transient `about:blank` loads
@@ -5415,6 +5423,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+#if DEBUG
+        navigator.recordUITestMainFrameCommit(url: webView.url)
+#endif
         guard !navigator.isRetiredIssuedStagingNavigation(navigation, in: webView) else { return }
         // A replacement binding remains pending until its first committed
         // document. The commit callback is that ownership boundary; claim it
@@ -5559,6 +5570,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+#if DEBUG
+        navigator.recordUITestMainFrameStart(requestedURL: navigator.readerLoadRequestedURL)
+#endif
         guard ownsWebView(webView),
               !navigator.isRetiredIssuedStagingNavigation(navigation, in: webView) else { return }
         if let enhancedWebView = webView as? EnhancedWKWebView,
@@ -6074,6 +6088,40 @@ public class WebViewNavigator: NSObject, ObservableObject {
     fileprivate var lastLoadedHTML: (html: String, baseURL: URL?)?
     fileprivate var lastLoadedDataLoad: (data: Data, mimeType: String, characterEncodingName: String, baseURL: URL)?
     @Published public private(set) var hasAttachedWebView = false
+#if DEBUG
+    /// Counts real main-frame navigation events for the focused startup reload UI test.
+    @MainActor @Published public private(set) var uiTestReaderLoadTraceRevision = 0
+    @MainActor private var uiTestHTMLDispatchCounts: [String: Int] = [:]
+    @MainActor private var uiTestMainFrameStartCounts: [String: Int] = [:]
+    @MainActor private var uiTestMainFrameCommitCounts: [String: Int] = [:]
+
+    @MainActor
+    public func uiTestReaderLoadTraceSummary(for url: URL) -> String {
+        let key = url.absoluteString
+        return "htmlDispatches=\(uiTestHTMLDispatchCounts[key, default: 0]);mainFrameStarts=\(uiTestMainFrameStartCounts[key, default: 0]);mainFrameCommits=\(uiTestMainFrameCommitCounts[key, default: 0])"
+    }
+
+    @MainActor
+    fileprivate func recordUITestHTMLDispatch(baseURL: URL?) {
+        guard readerLoadUITestTraceEnabled, let baseURL else { return }
+        uiTestHTMLDispatchCounts[baseURL.absoluteString, default: 0] += 1
+        uiTestReaderLoadTraceRevision &+= 1
+    }
+
+    @MainActor
+    fileprivate func recordUITestMainFrameStart(requestedURL: URL?) {
+        guard readerLoadUITestTraceEnabled, let requestedURL else { return }
+        uiTestMainFrameStartCounts[requestedURL.absoluteString, default: 0] += 1
+        uiTestReaderLoadTraceRevision &+= 1
+    }
+
+    @MainActor
+    fileprivate func recordUITestMainFrameCommit(url: URL?) {
+        guard readerLoadUITestTraceEnabled, let url else { return }
+        uiTestMainFrameCommitCounts[url.absoluteString, default: 0] += 1
+        uiTestReaderLoadTraceRevision &+= 1
+    }
+#endif
     public var debugIdentifier: String?
     public var debugObjectID: String {
         String(describing: ObjectIdentifier(self))
@@ -7425,6 +7473,9 @@ public class WebViewNavigator: NSObject, ObservableObject {
     ) -> WKNavigation? {
         let enhancedWebView = webView as? EnhancedWKWebView
         let navigation = webView.loadHTMLString(html, baseURL: baseURL)
+#if DEBUG
+        recordUITestHTMLDispatch(baseURL: baseURL)
+#endif
         if let enhancedWebView, let navigation {
             if let contentID {
                 enhancedWebView.beginKeyedNavigation(
