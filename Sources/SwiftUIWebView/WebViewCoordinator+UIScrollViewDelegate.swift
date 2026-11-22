@@ -6,6 +6,7 @@ import WebKit
 extension WebViewCoordinator: UIScrollViewDelegate {
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
+        navigator.scrollViewSuppressingNavigationReveal = nil
         let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
@@ -16,6 +17,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
     public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         guard let webView = navigator.webView, webView.scrollView === scrollView else { return }
+        navigator.scrollViewSuppressingNavigationReveal = nil
         let ownsCallback = beginScrollCallback(for: webView)
         publishScrollBottomState(for: scrollView)
         guard ownsCallback() else { return }
@@ -59,7 +61,8 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
         if abs(accumulatedScrollOffset) >= threshold {
             let newValue = accumulatedScrollOffset > 0
-            if newValue != currentHideNavigationDueToScroll {
+            if newValue != currentHideNavigationDueToScroll,
+               navigator.allowsScrollDrivenNavigationVisibility(newValue, for: scrollView) {
 #if DEBUG
                 debugPrint(
                     "# TABBAR webScrollHideNav",
@@ -111,12 +114,14 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             scrollBottomContentInsetObservation = nil
             scrollBottomObservedScrollView = nil
             lastPublishedScrollBottomState = nil
+            initialScrollBottomPublication?.rendererWaitState = .retired
             return
         }
         guard scrollBottomObservedScrollView !== scrollView else { return }
 
         scrollBottomObservedScrollView = scrollView
         lastPublishedScrollBottomState = nil
+        initialScrollBottomPublication?.rendererWaitState = .retired
         scrollBottomContentSizeObservation = scrollView.observe(\.contentSize, options: [.initial, .new]) { [weak self, weak scrollView] _, _ in
             Task { @MainActor in
                 guard let scrollView else { return }
@@ -135,14 +140,63 @@ extension WebViewCoordinator: UIScrollViewDelegate {
                 self?.publishScrollBottomState(for: scrollView)
             }
         }
+        // A finished document will not send another finish when observers are reinstalled.
+        if let webView = navigator.webView, webView.scrollView === scrollView,
+           let publication = initialScrollBottomPublication,
+           publication.context == captureDocumentCallbackContext(for: webView) {
+            publishInitialScrollBottomState(for: webView)
+        }
+    }
+
+    @MainActor
+    internal func publishInitialScrollBottomState(for webView: WKWebView) {
+        guard let context = captureDocumentCallbackContext(for: webView),
+              initialScrollBottomPublication?.context != context
+                || initialScrollBottomPublication?.rendererWaitState == .retired else { return }
+        // Reserve a distinct attempt even when reinstalling observers for the same document.
+        let publication = InitialScrollBottomPublication(context: context)
+        initialScrollBottomPublication = publication
+        let binding = javaScriptBindingToken(for: webView)
+        let callerGeneration = scriptCallerReplacementGeneration
+        // didFinish can precede delivery of the successor's native scroll geometry.
+        webView.__callAsyncJavaScript(
+            "await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); return true;",
+            arguments: [:], inFrame: nil, in: .defaultClient
+        ) { [weak self, weak webView] _, error in
+            guard let self, let webView,
+                  self.initialScrollBottomPublication === publication,
+                  publication.rendererWaitState == .pending,
+                  self.ownsDocumentCallbackContext(context) else { return }
+            guard self.scriptCallerReplacementGeneration == callerGeneration,
+                  self.javaScriptBindingToken(for: webView) == binding else {
+                self.initialScrollBottomPublication = nil
+                self.publishInitialScrollBottomState(for: webView)
+                return
+            }
+            // A failed renderer wait does not sample geometry or retry. A later native
+            // geometry event can still recover after resolving the document's axis.
+            guard error == nil else {
+                publication.rendererWaitState = .needsScrollSemantics
+                return
+            }
+            publication.rendererWaitState = .resolvingScrollSemantics
+            self.refreshNavigationScrollSemantics(webView.scrollView, completing: publication)
+        }
     }
 
     @MainActor
     internal func publishScrollBottomState(for scrollView: UIScrollView) {
-        guard navigator.webView?.scrollView === scrollView,
-              let onScrollBottomStateChanged else {
+        guard let webView = navigator.webView,
+              webView.scrollView === scrollView,
+              let onScrollBottomStateChanged else { return }
+        if let publication = initialScrollBottomPublication,
+           publication.rendererWaitState == .needsScrollSemantics,
+           publication.context == captureDocumentCallbackContext(for: webView) {
+            publication.rendererWaitState = .resolvingScrollSemantics
+            refreshNavigationScrollSemantics(scrollView, completing: publication)
             return
         }
+        guard canPublishScrollBottomState(for: webView) else { return }
 
         let isAtEnd: Bool
         switch navigationScrollAxis {
@@ -189,80 +243,51 @@ extension WebViewCoordinator: UIScrollViewDelegate {
         }
     }
 
-    private func refreshNavigationScrollSemantics(_ scrollView: UIScrollView) {
+    private func refreshNavigationScrollSemantics(
+        _ scrollView: UIScrollView, completing publication: InitialScrollBottomPublication? = nil
+    ) {
         guard let webView = navigator.webView,
               webView.scrollView === scrollView,
               let documentContext = captureDocumentCallbackContext(for: webView) else { return }
+        // The initial sample must establish this document's axis before native
+        // geometry can promote a sheet. A simultaneous drag can use that read.
+        if publication == nil,
+           initialScrollBottomPublication?.rendererWaitState == .resolvingScrollSemantics {
+            return
+        }
         navigationScrollSemanticsGeneration &+= 1
         let semanticsGeneration = navigationScrollSemanticsGeneration
         let bindingToken = javaScriptBindingToken(for: webView)
-        let script = """
-        (() => {
-          // A page may explicitly override both reader and ordinary document inference.
-          try {
-            const supplied = window.__swiftUIWebViewNavigationScrollSemantics;
-            const value = typeof supplied === 'function' ? supplied() : supplied;
-            if (value && (value.axis === 'horizontal' || value.axis === 'vertical')) {
-              return {
-                axis: value.axis,
-                horizontalForwardSign: typeof value.horizontalForwardSign === 'number'
-                  && Number.isFinite(value.horizontalForwardSign)
-                  && value.horizontalForwardSign < 0 ? -1 : 1
-              };
-            }
-          } catch (_) {
-            // A broken optional provider must not suppress document inference.
-          }
-          const body = document.body;
-          const content = document.getElementById('reader-content') || body;
-          const computed = content ? getComputedStyle(content) : null;
-          const writingMode = String(computed?.writingMode || '').toLowerCase();
-          let resolved = null;
-          try {
-            if (typeof window.manabiResolveReaderWritingDirection === 'function') {
-              resolved = window.manabiResolveReaderWritingDirection();
-            }
-          } catch (_) {
-            // Preserve computed-style inference when the optional reader helper fails.
-          }
-          const isReaderMode = Boolean(body?.classList.contains('readability-mode'));
-          const vertical = Boolean(resolved?.vertical) || writingMode.startsWith('vertical');
-          const verticalRTL = Boolean(resolved?.verticalRTL) || writingMode.startsWith('vertical-rl');
-          if (isReaderMode && vertical) {
-            return {
-              axis: 'horizontal',
-              horizontalForwardSign: verticalRTL ? -1 : 1
-            };
-          }
-          const roots = [document.scrollingElement, body, document.documentElement];
-          for (const root of roots) {
-            if (!root) continue;
-            const mode = String(getComputedStyle(root)?.writingMode || '').toLowerCase();
-            if (!mode.startsWith('vertical')) continue;
-            return {
-              axis: 'horizontal',
-              horizontalForwardSign: mode.startsWith('vertical-rl') ? -1 : 1
-            };
-          }
-          return {
-            axis: 'vertical',
-            horizontalForwardSign: 1
-          };
-        })();
-        """
-        webView.evaluateJavaScript(script) { [weak self, weak webView, weak scrollView] value, _ in
+        let callerGeneration = scriptCallerReplacementGeneration
+        webView.evaluateJavaScript(WebViewNavigationScrollSemantics.javaScript) { [weak self, weak webView, weak scrollView] value, _ in
             guard let self,
                   let webView,
                   let scrollView,
                   self.navigationScrollSemanticsGeneration == semanticsGeneration,
                   self.ownsDocumentCallbackContext(documentContext),
-                  self.javaScriptBindingToken(for: webView) == bindingToken,
                   self.navigator.webView === webView,
-                  webView.scrollView === scrollView,
-                  let payload = value as? [String: Any] else {
+                  webView.scrollView === scrollView else {
                 return
             }
-            if let axisRaw = payload["axis"] as? String, axisRaw == "horizontal" {
+            if let publication {
+                guard self.initialScrollBottomPublication === publication,
+                      publication.rendererWaitState == .resolvingScrollSemantics else { return }
+                guard self.javaScriptBindingToken(for: webView) == bindingToken,
+                      self.scriptCallerReplacementGeneration == callerGeneration else {
+                    self.initialScrollBottomPublication = nil
+                    self.publishInitialScrollBottomState(for: webView)
+                    return
+                }
+            } else {
+                guard self.javaScriptBindingToken(for: webView) == bindingToken else { return }
+            }
+            guard let payload = value as? [String: Any],
+                  let axis = payload["axis"] as? String,
+                  axis == "horizontal" || axis == "vertical" else {
+                publication?.rendererWaitState = .needsScrollSemantics
+                return
+            }
+            if axis == "horizontal" {
                 self.navigationScrollAxis = .horizontal
             } else {
                 self.navigationScrollAxis = .vertical
@@ -271,6 +296,11 @@ extension WebViewCoordinator: UIScrollViewDelegate {
                 self.horizontalForwardSign = -1
             } else {
                 self.horizontalForwardSign = 1
+            }
+            if let publication {
+                publication.rendererWaitState = .completed
+                self.lastPublishedScrollBottomState = nil
+                self.publishScrollBottomState(for: scrollView)
             }
         }
     }

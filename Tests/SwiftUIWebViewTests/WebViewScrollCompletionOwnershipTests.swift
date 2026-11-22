@@ -9,6 +9,23 @@ import XCTest
 /// replacement can be exercised deterministically between dispatch and completion.
 @MainActor
 private final class ScrollCompletionHeldWebView: EnhancedWKWebView {
+    var completeNextRendererWait = false
+    var completeNextScrollSemantics = false
+
+    override func __callAsyncJavaScript(
+        _ functionBody: String, arguments: [String: Any]?, inFrame frame: WKFrameInfo?,
+        in contentWorld: WKContentWorld,
+        completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)? = nil
+    ) {
+        guard completeNextRendererWait else {
+            super.__callAsyncJavaScript(functionBody, arguments: arguments, inFrame: frame,
+                                      in: contentWorld, completionHandler: completionHandler)
+            return
+        }
+        completeNextRendererWait = false
+        completionHandler?(true, nil)
+    }
+
     var holdNextEvaluation = false
     var evaluationFinished: XCTestExpectation?
     var heldDelivery: (() -> Void)?
@@ -18,6 +35,11 @@ private final class ScrollCompletionHeldWebView: EnhancedWKWebView {
         _ javaScriptString: String,
         completionHandler: (@MainActor @Sendable (Any?, Error?) -> Void)? = nil
     ) {
+        if completeNextScrollSemantics {
+            completeNextScrollSemantics = false
+            completionHandler?(["axis": "vertical", "horizontalForwardSign": 1], nil)
+            return
+        }
         guard holdNextEvaluation else {
             super.evaluateJavaScript(javaScriptString, completionHandler: completionHandler)
             return
@@ -187,6 +209,10 @@ final class WebViewScrollCompletionOwnershipTests: XCTestCase {
             coordinator.tearDownBindingsForDetachedWebView(view)
         }
         coordinator.webView(view, didCommit: nil)
+        view.completeNextRendererWait = true
+        view.completeNextScrollSemantics = true
+        coordinator.webView(view, didFinish: nil)
+        XCTAssertTrue(coordinator.canPublishScrollBottomState(for: view))
         let reason = coordinator.paginationController.lastApplyReason
         coordinator.accumulatedScrollOffset = 37
         coordinator.lastContentOffset = CGPoint(x: 11, y: 29)
@@ -198,6 +224,37 @@ final class WebViewScrollCompletionOwnershipTests: XCTestCase {
         XCTAssertEqual(coordinator.paginationController.lastApplyReason, reason)
         XCTAssertEqual(coordinator.accumulatedScrollOffset, 37)
         XCTAssertEqual(coordinator.lastContentOffset, CGPoint(x: 11, y: 29))
+    }
+
+    func testInitialBottomSampleUsesCurrentVerticalWritingDirection() async throws {
+        for (writingMode, startX, bottomX) in [("vertical-lr", CGFloat(0), CGFloat(640)),
+                                                ("vertical-rl", CGFloat(640), CGFloat(0))] {
+            let (coordinator, view) = fixture()
+            defer { coordinator.tearDownBindingsForDetachedWebView(view) }
+            try await load("""
+                <body style='margin:0;writing-mode:\(writingMode)'>
+                <div style='width:960px;height:240px'>Horizontal scroll content</div>
+                """, in: view)
+            coordinator.webView(view, didCommit: nil)
+            view.scrollView.bounds = view.bounds
+            view.scrollView.contentSize = CGSize(width: 960, height: 240)
+            view.scrollView.contentOffset = CGPoint(x: startX, y: 0)
+            let sampled = expectation(description: "First horizontal bottom sample for \(writingMode)")
+            var publications: [Bool] = []
+            coordinator.onScrollBottomStateChanged = {
+                publications.append($0)
+                if publications.count == 1 { sampled.fulfill() }
+            }
+            view.completeNextRendererWait = true
+            coordinator.webView(view, didFinish: nil)
+            await fulfillment(of: [sampled], timeout: 5)
+            XCTAssertEqual(coordinator.navigationScrollAxis, .horizontal)
+            XCTAssertEqual(publications, [false])
+
+            view.scrollView.contentOffset.x = bottomX
+            coordinator.scrollViewDidScroll(view.scrollView)
+            XCTAssertEqual(publications, [false, true])
+        }
     }
 
     func testRuntimeProvidersReaderInferenceAndOrdinaryWritingModes() async throws {
