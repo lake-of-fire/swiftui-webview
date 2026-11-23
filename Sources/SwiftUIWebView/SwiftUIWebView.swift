@@ -1376,6 +1376,9 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var forwardList: [WKBackForwardListItem]
     public internal(set) var paginationState: WebViewPaginationState?
     public internal(set) var urlTransitionIntent: WebViewURLTransitionIntent? = nil
+    /// Exact issued progress identity attached only to a full native commit.
+    /// Same-document and KVO publications leave this nil.
+    public internal(set) var committedNavigationProgressID: UUID?
 
     public mutating func markReaderRenderReady() {
         hasReaderRenderReady = true
@@ -1397,7 +1400,8 @@ public struct WebViewState: Equatable, Sendable {
         canGoForward: false,
         backList: [],
         forwardList: [],
-        paginationState: nil)
+        paginationState: nil,
+        committedNavigationProgressID: nil)
     
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
@@ -1417,6 +1421,7 @@ public struct WebViewState: Equatable, Sendable {
         && lhs.forwardList == rhs.forwardList
         && lhs.paginationState == rhs.paginationState
         && lhs.urlTransitionIntent?.id == rhs.urlTransitionIntent?.id
+        && lhs.committedNavigationProgressID == rhs.committedNavigationProgressID
     }
 }
 
@@ -4355,7 +4360,7 @@ public class WebViewCoordinator: NSObject {
 
         estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let progress = change.newValue else { return }
+            guard change.newValue != nil else { return }
             Task { @MainActor [weak self, weak webView] in
                 guard let self,
                       let webView,
@@ -4363,13 +4368,19 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
-                self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+                // KVO notifications can be queued behind a same-view retry.
+                // Read the mounted WebView after the actor hop so an old
+                // notification cannot publish its stale high-water sample.
+                self.updateLoadingProgress(
+                    isLoading: webView.isLoading,
+                    estimatedProgress: webView.estimatedProgress
+                )
             }
         }
 
         isLoadingObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let isLoading = change.newValue else { return }
+            guard change.newValue != nil else { return }
             Task { @MainActor [weak self, weak webView] in
                 guard let self,
                       let webView,
@@ -4377,7 +4388,12 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
-                self.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
+                // Sample both properties together for the current navigation;
+                // the captured KVO value may belong to a retired request.
+                self.updateLoadingProgress(
+                    isLoading: webView.isLoading,
+                    estimatedProgress: webView.estimatedProgress
+                )
             }
         }
 
@@ -4556,6 +4572,7 @@ public class WebViewCoordinator: NSObject {
         _ isLoading: Bool,
         pageURL: URL? = nil,
         isProvisionallyNavigating: Bool? = nil,
+        committedNavigationProgressID: UUID? = nil,
         canGoBack: Bool? = nil,
         canGoForward: Bool? = nil,
         backList: [WKBackForwardListItem]? = nil,
@@ -4569,6 +4586,7 @@ public class WebViewCoordinator: NSObject {
         let publicationCallerGeneration = scriptCallerReplacementGeneration
         var newState = webView.state
         newState.isLoading = isLoading
+        newState.committedNavigationProgressID = committedNavigationProgressID
         var pageURLChanged = false
         if let pageURL {
             if pageURL != webView.state.pageURL {
@@ -5557,7 +5575,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         var newState = setLoading(
             true,
             pageURL: webView.url,
-            isProvisionallyNavigating: false
+            isProvisionallyNavigating: false,
+            committedNavigationProgressID: navigator.progressIdentity(
+                forCommittedNavigation: navigation,
+                in: webView
+            )
         )
         guard isCurrentCallback() else { return }
         newState.pageImageURL = nil
@@ -5762,7 +5784,9 @@ extension WebViewCoordinator: WKNavigationDelegate {
             // Observe native main-frame navigation before an app policy callback
             // can suspend. This also acknowledges our own issued request; a
             // dispatch receipt is checked synchronously before that later policy.
-            navigator.beginNavigationIntent()
+            navigator.beginNavigationIntent(
+                preservingPreparedDataSourceFor: navigationAction.request.url
+            )
             navigationPolicyGeneration &+= 1
         }
         let policyGeneration = navigationPolicyGeneration
@@ -5986,7 +6010,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     @discardableResult
-    public func beginNavigationIntent() -> NavigationIntent {
+    public func beginNavigationIntent(
+        preservingPreparedDataSourceFor url: URL? = nil
+    ) -> NavigationIntent {
+        let isCurrentPreparedDataPolicy = issuedNavigationIsPreparedData
+            && issuedNavigationProgressSourceID != nil
+            && issuedNavigationProgressURL?.absoluteString == url?.absoluteString
+        if !isCurrentPreparedDataPolicy {
+            issuedNavigationProgressSourceID = nil
+        }
         navigationIntentID = UUID()
         return navigationIntent
     }
@@ -6018,6 +6050,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor @Published public private(set) var issuedNavigationProgressID: UUID?
     @MainActor @Published public private(set) var issuedNavigationProgressURL: URL?
     @MainActor @Published public private(set) var issuedNavigationProgressHasStarted = false
+    @MainActor @Published public private(set) var issuedNavigationProgressSourceID: UUID?
     @MainActor private var issuedNavigationIsPreparedData = false
     @MainActor private weak var progressNavigationWebView: WKWebView?
     @MainActor private weak var progressNativeNavigation: WKNavigation?
@@ -6030,11 +6063,16 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private weak var issuedNavigationWebView: WKWebView?
 
     @MainActor
-    private func recordIssuedNavigation(isPreparedData: Bool, destinationURL: URL?) {
+    private func recordIssuedNavigation(
+        isPreparedData: Bool,
+        destinationURL: URL?,
+        progressSourceID: UUID? = nil
+    ) {
         issuedNativeNavigation = nil
         issuedStagingNavigation = nil
         issuedNavigationWebView = nil
         issuedNavigationIsPreparedData = isPreparedData
+        issuedNavigationProgressSourceID = isPreparedData ? progressSourceID : nil
         let id = UUID()
         issuedNavigationIdentity = IssuedNavigationIdentity(owner: issuedNavigationOwner, id: id)
         issuedNavigationProgressURL = destinationURL
@@ -6044,6 +6082,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func beginUnkeyedNavigationProgress(destinationURL: URL?) {
+        issuedNavigationProgressSourceID = nil
         issuedNavigationProgressURL = destinationURL
         issuedNavigationProgressID = UUID()
         issuedNavigationProgressHasStarted = false
@@ -6056,6 +6095,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         issuedNavigationProgressURL = nil
         issuedNavigationProgressHasStarted = false
         issuedNavigationIsPreparedData = false
+        issuedNavigationProgressSourceID = nil
         issuedNativeNavigation = nil
         issuedStagingNavigation = nil
         issuedNavigationWebView = nil
@@ -6109,6 +6149,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             issuedNavigationProgressID = nil
             issuedNavigationProgressURL = nil
             issuedNavigationProgressHasStarted = false
+            issuedNavigationProgressSourceID = nil
             progressNativeNavigation = nil
             progressNavigationWebView = nil
         }
@@ -6123,6 +6164,15 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
+    fileprivate func progressIdentity(forCommittedNavigation navigation: WKNavigation?, in webView: WKWebView) -> UUID? {
+        guard let navigation,
+              progressNavigationWebView === webView,
+              progressNativeNavigation === navigation,
+              issuedNavigationProgressHasStarted else { return nil }
+        return issuedNavigationProgressID
+    }
+
+    @MainActor
     fileprivate func observeFinishedNavigationProgress(_ navigation: WKNavigation?, in webView: WKWebView) {
         guard let navigation,
               progressNavigationWebView === webView,
@@ -6130,8 +6180,34 @@ public class WebViewNavigator: NSObject, ObservableObject {
         issuedNavigationProgressID = nil
         issuedNavigationProgressURL = nil
         issuedNavigationProgressHasStarted = false
+        if issuedNavigationIsPreparedData {
+            issuedNavigationProgressSourceID = nil
+        }
         progressNativeNavigation = nil
         progressNavigationWebView = nil
+    }
+
+    @MainActor
+    public func captureReaderModeProgressSource(
+        progressID: UUID?,
+        forCommittedURL url: URL
+    ) -> UUID? {
+        guard let progressID,
+              issuedNavigationProgressID == progressID,
+              issuedNavigationIdentity != nil,
+              issuedNavigationProgressHasStarted,
+              !issuedNavigationIsPreparedData,
+              issuedNavigationProgressURL?.absoluteString == url.absoluteString else {
+            return nil
+        }
+        issuedNavigationProgressSourceID = progressID
+        return progressID
+    }
+
+    @MainActor
+    public func retireReaderModeProgressSource(_ progressSourceID: UUID) {
+        guard issuedNavigationProgressSourceID == progressSourceID else { return }
+        issuedNavigationProgressSourceID = nil
     }
 
     @MainActor
@@ -7419,9 +7495,28 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     @MainActor
-    public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
+    @discardableResult
+    public func load(
+        _ data: Data,
+        mimeType: String,
+        characterEncodingName: String,
+        baseURL: URL,
+        progressSourceID: UUID? = nil
+    ) -> Bool {
+        // Eligibility is checked synchronously immediately before this data
+        // load creates its new native intent. A retired same-URL source cannot
+        // be reattached by a delayed render callback.
+        if let progressSourceID,
+           issuedNavigationProgressSourceID != progressSourceID {
+            return false
+        }
+        let eligibleProgressSourceID = progressSourceID
         beginNavigationIntent()
-        recordIssuedNavigation(isPreparedData: true, destinationURL: baseURL)
+        recordIssuedNavigation(
+            isPreparedData: true,
+            destinationURL: baseURL,
+            progressSourceID: eligibleProgressSourceID
+        )
         lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedHTML = nil
@@ -7456,7 +7551,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         )
         guard let webView else {
             pendingDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
-            return
+            return true
         }
         clearPoolContentState(on: webView)
 #if DEBUG
@@ -7488,6 +7583,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         }
 #endif
         rememberIssuedNavigation(navigation, in: webView)
+        guard navigation != nil else { return false }
         beginPooledContentUnkeyedNavigation(
             webView,
             navigation: navigation
@@ -7500,6 +7596,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "elapsedSinceDataLoadIssued": readerLoadElapsedString(since: readerLoadIssuedAt, now: readerLoadDirectDataReturnedAt ?? Date())
             ]
         )
+        return true
     }
 
     @MainActor
