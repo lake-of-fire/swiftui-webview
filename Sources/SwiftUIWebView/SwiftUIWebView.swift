@@ -10994,6 +10994,7 @@ extension WebView: UIViewControllerRepresentable {
                 preferredContentID: poolContentID,
                 createIfNeeded: createWebView
             )
+            Self.applyDarkModeSetting(config.darkModeSetting, to: web)
         } else {
             web = createWebView()
         }
@@ -11083,7 +11084,6 @@ extension WebView: UIViewControllerRepresentable {
             nativeLookupHitTestingEnabled,
             reason: "configureWebView"
         )
-        refreshDarkModeSetting(webView: webView)
         applyVisualConfiguration(
             webView: webView,
             containerView: controller.view,
@@ -11693,6 +11693,7 @@ extension WebView: NSViewRepresentable {
                 preferredContentID: poolContentID,
                 createIfNeeded: createWebView
             )
+            refreshDarkModeSetting(webView: webView)
         } else {
             webView = createWebView()
         }
@@ -11721,8 +11722,6 @@ extension WebView: NSViewRepresentable {
             webView.isInspectable = true
         }
         
-        refreshDarkModeSetting(webView: webView)
-
         let hostView = WebViewHostNSView(webView: webView)
         navigator.nativeLookupHitTesting.isEnabled = config.nativeLookupHitTestingEnabled
         hostView.setNativeLookupHitTestStore(navigator.nativeLookupHitTesting)
