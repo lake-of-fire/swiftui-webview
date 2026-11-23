@@ -733,6 +733,73 @@ final class WebViewHotfixControllerBehaviorTests: XCTestCase {
         XCTAssertEqual(touchStarts, 0, "UIKit hit testing alone does not deliver a touch stream")
     }
 
+    func testQueuedInitialKVOUsesCurrentNativeLoadingProgress() async throws {
+        let navigator = WebViewNavigator()
+        navigator.shouldLoadFallbackOnAttach = false
+        let web = EnhancedWKWebView(frame: .zero, configuration: .init())
+        var state = WebViewState.empty
+        state.loadingProgress = 0.42
+
+        let currentProgress = expectation(description: "the held native load publishes positive progress")
+        let staleProgress = expectation(description: "stale KVO cannot replace current native progress")
+        staleProgress.isInverted = true
+        var currentPublication: XCTestExpectation? = currentProgress
+        var stalePublication: XCTestExpectation? = staleProgress
+        var idlePublication: XCTestExpectation?
+        let model = WebView(navigator: navigator, state: Binding(
+            get: { state },
+            set: { newState in
+                let oldProgress = state.loadingProgress
+                state = newState
+                guard newState.loadingProgress != oldProgress else { return }
+                if web.isLoading {
+                    guard let progress = newState.loadingProgress, progress == web.estimatedProgress else {
+                        stalePublication?.fulfill()
+                        stalePublication = nil
+                        return
+                    }
+                    if progress > 0 {
+                        currentPublication?.fulfill()
+                        currentPublication = nil
+                    }
+                } else if newState.loadingProgress == nil {
+                    idlePublication?.fulfill()
+                    idlePublication = nil
+                }
+            }
+        ))
+
+        let coordinator = model.makeCoordinatorForTesting()
+        let reachedPolicy = expectation(description: "WebKit holds the load at its native policy boundary")
+        let delegate = HotfixPendingNavigationDelegate(reachedPolicy)
+        web.navigationDelegate = delegate
+        defer {
+            delegate.cancel()
+            coordinator.tearDownBindingsForDetachedWebView(web)
+            web.navigationDelegate = nil
+        }
+
+        XCTAssertFalse(web.isLoading)
+        XCTAssertEqual(web.estimatedProgress, 0)
+        coordinator.setWebView(web)
+        // Starting the real load in the same actor turn leaves the idle initial
+        // receipts queued while the same WebView already reports a pending load.
+        let pageURL = try XCTUnwrap(URL(string: "https://controller.example/progress"))
+        XCTAssertNotNil(web.loadHTMLString("<main>Current native load</main>", baseURL: pageURL))
+        XCTAssertTrue(web.isLoading, "Native loading must change before the queued KVO handlers run")
+        await fulfillment(of: [reachedPolicy, currentProgress], timeout: 10)
+        await fulfillment(of: [staleProgress], timeout: 0.2)
+        stalePublication = nil
+        XCTAssertEqual(state.loadingProgress, web.estimatedProgress)
+
+        let cleared = expectation(description: "native cancellation publishes idle progress")
+        idlePublication = cleared
+        delegate.cancel()
+        await fulfillment(of: [cleared], timeout: 10)
+        XCTAssertFalse(web.isLoading)
+        XCTAssertNil(state.loadingProgress)
+    }
+
     func testPendingInternalLoaderSuppressesActualInitialKVOPublicationsUntilSuperseded() async {
         let navigator = WebViewNavigator()
         navigator.shouldLoadFallbackOnAttach = false
