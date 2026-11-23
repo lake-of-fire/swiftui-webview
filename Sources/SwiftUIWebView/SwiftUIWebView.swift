@@ -4194,7 +4194,7 @@ public class WebViewCoordinator: NSObject {
 
         estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let progress = change.newValue else { return }
+            guard change.newValue != nil else { return }
             Task { @MainActor [weak self, weak webView] in
                 guard let self,
                       let webView,
@@ -4202,13 +4202,17 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
-                self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+                // The native load can change on the same WebView before this task runs.
+                self.updateLoadingProgress(
+                    isLoading: webView.isLoading,
+                    estimatedProgress: webView.estimatedProgress
+                )
             }
         }
 
         isLoadingObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let isLoading = change.newValue else { return }
+            guard change.newValue != nil else { return }
             Task { @MainActor [weak self, weak webView] in
                 guard let self,
                       let webView,
@@ -4216,7 +4220,10 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
-                self.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
+                self.updateLoadingProgress(
+                    isLoading: webView.isLoading,
+                    estimatedProgress: webView.estimatedProgress
+                )
             }
         }
 
