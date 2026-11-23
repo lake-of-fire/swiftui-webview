@@ -5745,6 +5745,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
+        guard isCurrentCallback() else { return }
+        navigator.observeStartedNavigationProgress(navigation, in: webView)
     }
     
     @MainActor
