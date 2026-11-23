@@ -5459,9 +5459,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-#if DEBUG
-        navigator.recordUITestMainFrameCommit(url: webView.url)
-#endif
         guard !navigator.isRetiredIssuedStagingNavigation(navigation, in: webView) else { return }
         // A replacement binding remains pending until its first committed
         // document. The commit callback is that ownership boundary; claim it
@@ -5482,6 +5479,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         }
         navigator.observeStartedIssuedNavigation(navigation, in: webView)
         navigator.observeStartedNavigationProgress(navigation, in: webView)
+#if DEBUG
+        navigator.recordUITestMainFrameCommit(
+            progressID: navigator.progressIdentity(forCommittedNavigation: navigation, in: webView)
+        )
+#endif
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = true
@@ -5611,9 +5613,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-#if DEBUG
-        navigator.recordUITestMainFrameStart(requestedURL: navigator.readerLoadRequestedURL)
-#endif
         guard ownsWebView(webView),
               !navigator.isRetiredIssuedStagingNavigation(navigation, in: webView) else { return }
         if let enhancedWebView = webView as? EnhancedWKWebView,
@@ -5621,6 +5620,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         navigator.observeStartedIssuedNavigation(navigation, in: webView)
+        navigator.observeStartedNavigationProgress(navigation, in: webView)
+#if DEBUG
+        navigator.recordUITestMainFrameStart(
+            progressID: navigator.progressIdentity(forCommittedNavigation: navigation, in: webView)
+        )
+#endif
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
@@ -6277,6 +6282,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var uiTestHTMLDispatchCounts: [String: Int] = [:]
     @MainActor private var uiTestMainFrameStartCounts: [String: Int] = [:]
     @MainActor private var uiTestMainFrameCommitCounts: [String: Int] = [:]
+    @MainActor private var uiTestNavigationIdentityByProgressID: [UUID: String] = [:]
 
     @MainActor
     public func uiTestReaderLoadTraceSummary(for url: URL) -> String {
@@ -6285,23 +6291,27 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    fileprivate func recordUITestHTMLDispatch(baseURL: URL?) {
+    fileprivate func recordUITestHTMLDispatch(baseURL: URL?, progressID: UUID?) {
         guard readerLoadUITestTraceEnabled, let baseURL else { return }
-        uiTestHTMLDispatchCounts[baseURL.absoluteString, default: 0] += 1
+        let key = baseURL.absoluteString
+        uiTestHTMLDispatchCounts[key, default: 0] += 1
+        if let progressID { uiTestNavigationIdentityByProgressID[progressID] = key }
         uiTestReaderLoadTraceRevision &+= 1
     }
 
     @MainActor
-    fileprivate func recordUITestMainFrameStart(requestedURL: URL?) {
-        guard readerLoadUITestTraceEnabled, let requestedURL else { return }
-        uiTestMainFrameStartCounts[requestedURL.absoluteString, default: 0] += 1
+    fileprivate func recordUITestMainFrameStart(progressID: UUID?) {
+        guard readerLoadUITestTraceEnabled, let progressID,
+              let key = uiTestNavigationIdentityByProgressID[progressID] else { return }
+        uiTestMainFrameStartCounts[key, default: 0] += 1
         uiTestReaderLoadTraceRevision &+= 1
     }
 
     @MainActor
-    fileprivate func recordUITestMainFrameCommit(url: URL?) {
-        guard readerLoadUITestTraceEnabled, let url else { return }
-        uiTestMainFrameCommitCounts[url.absoluteString, default: 0] += 1
+    fileprivate func recordUITestMainFrameCommit(progressID: UUID?) {
+        guard readerLoadUITestTraceEnabled, let progressID,
+              let key = uiTestNavigationIdentityByProgressID[progressID] else { return }
+        uiTestMainFrameCommitCounts[key, default: 0] += 1
         uiTestReaderLoadTraceRevision &+= 1
     }
 #endif
@@ -7441,12 +7451,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     characterEncodingName: pendingDataLoad.characterEncodingName,
                     baseURL: pendingDataLoad.baseURL
                 )
-#if DEBUG
-                if pendingDataLoad.mimeType.caseInsensitiveCompare("text/html") == .orderedSame {
-                    recordUITestHTMLDispatch(baseURL: pendingDataLoad.baseURL)
-                }
-#endif
                 rememberIssuedNavigation(navigation, in: webView)
+                if navigation != nil {
+#if DEBUG
+                    if pendingDataLoad.mimeType.caseInsensitiveCompare("text/html") == .orderedSame {
+                        recordUITestHTMLDispatch(baseURL: pendingDataLoad.baseURL, progressID: issuedNavigationProgressID)
+                    }
+#endif
+                }
                 beginPooledContentUnkeyedNavigation(
                     webView,
                     navigation: navigation
@@ -7607,14 +7619,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
             characterEncodingName: characterEncodingName,
             baseURL: baseURL
         )
-#if DEBUG
-        if mimeType.caseInsensitiveCompare("text/html") == .orderedSame {
-            recordUITestHTMLDispatch(baseURL: baseURL)
-        }
-#endif
         guard issuedNavigationIdentity == issuedIdentity, ownsBoundWebView(webView) else { return false }
         rememberIssuedNavigation(navigation, in: webView)
         guard navigation != nil else { return false }
+#if DEBUG
+        if mimeType.caseInsensitiveCompare("text/html") == .orderedSame {
+            recordUITestHTMLDispatch(baseURL: baseURL, progressID: issuedNavigationProgressID)
+        }
+#endif
         beginPooledContentUnkeyedNavigation(
             webView,
             navigation: navigation
@@ -7703,9 +7715,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     ) -> WKNavigation? {
         let enhancedWebView = webView as? EnhancedWKWebView
         let navigation = webView.loadHTMLString(html, baseURL: baseURL)
+        if navigation != nil {
 #if DEBUG
-        recordUITestHTMLDispatch(baseURL: baseURL)
+            recordUITestHTMLDispatch(baseURL: baseURL, progressID: issuedNavigationProgressID)
 #endif
+        }
         if let enhancedWebView, let navigation {
             if let contentID {
                 enhancedWebView.beginKeyedNavigation(
