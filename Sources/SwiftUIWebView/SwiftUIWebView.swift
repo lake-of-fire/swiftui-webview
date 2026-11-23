@@ -12275,11 +12275,10 @@ extension WebView {
     @MainActor
     func updateUserScripts(webView sourceWebView: WKWebView, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebViewConfig) {
         let userContentController = sourceWebView.configuration.userContentController
-        var scripts = config.userScripts
-        if let domain = domain?.domainURL.host {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
-        } else {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty }
+        // Check the full host alongside the legacy alias without changing saved domains.
+        let destinationHosts = Set([domain?.host, domain?.domainURL.host].compactMap { $0 })
+        let scripts = config.userScripts.filter {
+            $0.allowedDomains.isEmpty || !$0.allowedDomains.isDisjoint(with: destinationHosts)
         }
         let allScripts = Self.systemScripts + scripts
         let installedScriptsSignature = allScripts

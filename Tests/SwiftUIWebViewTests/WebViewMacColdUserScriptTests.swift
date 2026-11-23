@@ -118,6 +118,105 @@ final class WebViewMacColdUserScriptTests: XCTestCase {
         withExtendedLifetime(coordinator) {}
     }
 
+    func testInstalledScriptsMatchExactHostsAndKeepExistingAliases() throws {
+        let unrestricted = domainScript(source: "window.unrestrictedProbe = true", allowedDomains: [])
+        let www = domainScript(source: "window.wwwProbe = true", allowedDomains: ["www.example.com"])
+        let mobile = domainScript(source: "window.mobileProbe = true", allowedDomains: ["mobile.example.com"])
+        let shortMobile = domainScript(source: "window.shortMobileProbe = true", allowedDomains: ["m.example.com"])
+        let apex = domainScript(source: "window.apexProbe = true", allowedDomains: ["example.com"])
+        let config = WebViewConfig(userScripts: [unrestricted, www, mobile, shortMobile, apex])
+        let view = WebView(config: config, navigator: WebViewNavigator(), state: .constant(.empty))
+        let coordinator = view.makeCoordinatorForTesting()
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+
+        view.updateUserScripts(webView: webView, coordinator: coordinator, forDomain: nil, config: .default)
+        let systemSources = webView.configuration.userContentController.userScripts.map(\.source)
+        let cases: [(String?, [WebViewUserScript])] = [
+            ("https://www.example.com/article", [unrestricted, www, apex]),
+            ("https://mobile.example.com/article", [unrestricted, mobile, apex]),
+            ("https://m.example.com/article", [unrestricted, shortMobile, apex]),
+            ("https://example.com/article", [unrestricted, apex]),
+            ("https://reader.example.com/article", [unrestricted]),
+            ("https://www.example.com.other.test/article", [unrestricted]),
+            ("about:blank", [unrestricted]),
+            (nil, [unrestricted]),
+        ]
+        for (urlString, expected) in cases {
+            let url = try urlString.map { try XCTUnwrap(URL(string: $0)) }
+            view.updateUserScripts(webView: webView, coordinator: coordinator, forDomain: url, config: config)
+            XCTAssertEqual(
+                webView.configuration.userContentController.userScripts.map(\.source),
+                systemSources + expected.map(\.source),
+                urlString ?? "No destination URL"
+            )
+        }
+    }
+
+    func testChangingOnlyTheAllowedHostReplacesTheInstalledScript() throws {
+        let source = "window.restrictedProbe = true"
+        let apex = WebViewConfig(userScripts: [
+            domainScript(source: source, allowedDomains: ["example.com"]),
+        ])
+        let exactWWW = WebViewConfig(userScripts: [
+            domainScript(source: source, allowedDomains: ["www.example.com"]),
+        ])
+        let view = WebView(config: apex, navigator: WebViewNavigator(), state: .constant(.empty))
+        let coordinator = view.makeCoordinatorForTesting()
+        let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let controller = webView.configuration.userContentController
+        let www = try XCTUnwrap(URL(string: "https://www.example.com/article"))
+        let bare = try XCTUnwrap(URL(string: "https://example.com/article"))
+
+        view.updateUserScripts(webView: webView, coordinator: coordinator, forDomain: www, config: apex)
+        let first = try XCTUnwrap(controller.userScripts.first { $0.source == source })
+        view.updateUserScripts(webView: webView, coordinator: coordinator, forDomain: www, config: exactWWW)
+        let replacement = try XCTUnwrap(controller.userScripts.first { $0.source == source })
+        XCTAssertFalse(first === replacement)
+
+        view.updateUserScripts(webView: webView, coordinator: coordinator, forDomain: www, config: exactWWW)
+        XCTAssertTrue(controller.userScripts.first { $0.source == source } === replacement)
+
+        view.updateUserScripts(webView: webView, coordinator: coordinator, forDomain: bare, config: exactWWW)
+        XCTAssertFalse(controller.userScripts.contains { $0.source == source })
+    }
+
+    func testColdMountUsesFullHostOfQueuedHTMLOrReaderLoaderSource() throws {
+        let source = "window.coldScopedProbe = true"
+        let scoped = domainScript(source: source, allowedDomains: ["www.example.com"])
+        let config = WebViewConfig(userScripts: [scoped])
+        let destination = try XCTUnwrap(URL(string: "https://www.example.com/article"))
+        var loader = URLComponents()
+        loader.scheme = "internal"
+        loader.host = "local"
+        loader.path = "/load/reader"
+        loader.queryItems = [URLQueryItem(name: "reader-url", value: destination.absoluteString)]
+        let loaderURL = try XCTUnwrap(loader.url)
+
+        for baseURL in [destination, loaderURL] {
+            let navigator = WebViewNavigator()
+            navigator.loadHTML("<html><body>Queued first document</body></html>", baseURL: baseURL)
+            let view = WebView(config: config, navigator: navigator, state: .constant(.empty))
+            let webView = EnhancedWKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+
+            view.installInitialMacUserScripts(on: webView, coordinator: view.makeCoordinatorForTesting())
+
+            XCTAssertTrue(
+                webView.configuration.userContentController.userScripts.contains { $0.source == source },
+                baseURL.absoluteString
+            )
+        }
+    }
+
+    private func domainScript(source: String, allowedDomains: Set<String>) -> WebViewUserScript {
+        WebViewUserScript(
+            source: source,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true,
+            in: .page,
+            allowedDomains: allowedDomains
+        )
+    }
+
     func testMountingPooledWebViewKeepsMatchingInstalledScripts() {
         let script = WebViewUserScript(
             source: "window.initialScriptProbe = true",
