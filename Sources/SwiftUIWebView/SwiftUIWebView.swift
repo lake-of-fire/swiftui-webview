@@ -1376,6 +1376,9 @@ public struct WebViewState: Equatable, Sendable {
     public internal(set) var forwardList: [WKBackForwardListItem]
     public internal(set) var paginationState: WebViewPaginationState?
     public internal(set) var urlTransitionIntent: WebViewURLTransitionIntent? = nil
+    /// Exact issued progress identity attached only to a full native commit.
+    /// Same-document and KVO publications leave this nil.
+    public internal(set) var committedNavigationProgressID: UUID?
 
     public mutating func markReaderRenderReady() {
         hasReaderRenderReady = true
@@ -1397,7 +1400,8 @@ public struct WebViewState: Equatable, Sendable {
         canGoForward: false,
         backList: [],
         forwardList: [],
-        paginationState: nil)
+        paginationState: nil,
+        committedNavigationProgressID: nil)
     
     public static func == (lhs: WebViewState, rhs: WebViewState) -> Bool {
         lhs.isLoading == rhs.isLoading
@@ -1417,6 +1421,7 @@ public struct WebViewState: Equatable, Sendable {
         && lhs.forwardList == rhs.forwardList
         && lhs.paginationState == rhs.paginationState
         && lhs.urlTransitionIntent?.id == rhs.urlTransitionIntent?.id
+        && lhs.committedNavigationProgressID == rhs.committedNavigationProgressID
     }
 }
 
@@ -3178,6 +3183,7 @@ public class WebViewCoordinator: NSObject {
     var onURLChanged: ((WebViewState) -> Void)?
     var onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     var onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
+    var shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)?
     var messageHandlers: WebViewMessageHandlers
     var messageHandlerNames: [String] {
         messageHandlers.handlers.keys.map { $0 }
@@ -3496,6 +3502,7 @@ public class WebViewCoordinator: NSObject {
         onURLChanged: ((WebViewState) -> Void)? = nil,
         onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
         onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
+        shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)? = nil,
         hideNavigationDueToScroll: Binding<Bool>,
         textSelection: Binding<String?>
     ) {
@@ -3512,6 +3519,7 @@ public class WebViewCoordinator: NSObject {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
+        self.shouldSuppressNativeDownwardNavigationHide = shouldSuppressNativeDownwardNavigationHide
         self.hideNavigationDueToScroll = hideNavigationDueToScroll
         self.mirroredHideNavigationDueToScroll = hideNavigationDueToScroll.wrappedValue
         self.textSelection = textSelection
@@ -4352,7 +4360,7 @@ public class WebViewCoordinator: NSObject {
 
         estimatedProgressObservation = webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let progress = change.newValue else { return }
+            guard change.newValue != nil else { return }
             Task { @MainActor [weak self, weak webView] in
                 guard let self,
                       let webView,
@@ -4360,13 +4368,19 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
-                self.updateLoadingProgress(isLoading: nil, estimatedProgress: progress)
+                // KVO notifications can be queued behind a same-view retry.
+                // Read the mounted WebView after the actor hop so an old
+                // notification cannot publish its stale high-water sample.
+                self.updateLoadingProgress(
+                    isLoading: webView.isLoading,
+                    estimatedProgress: webView.estimatedProgress
+                )
             }
         }
 
         isLoadingObservation = webView.observe(\.isLoading, options: [.initial, .new]) { [weak self] webView, change in
             guard let self else { return }
-            guard let isLoading = change.newValue else { return }
+            guard change.newValue != nil else { return }
             Task { @MainActor [weak self, weak webView] in
                 guard let self,
                       let webView,
@@ -4374,7 +4388,12 @@ public class WebViewCoordinator: NSObject {
                     return
                 }
                 guard !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
-                self.updateLoadingProgress(isLoading: isLoading, estimatedProgress: nil)
+                // Sample both properties together for the current navigation;
+                // the captured KVO value may belong to a retired request.
+                self.updateLoadingProgress(
+                    isLoading: webView.isLoading,
+                    estimatedProgress: webView.estimatedProgress
+                )
             }
         }
 
@@ -4553,6 +4572,7 @@ public class WebViewCoordinator: NSObject {
         _ isLoading: Bool,
         pageURL: URL? = nil,
         isProvisionallyNavigating: Bool? = nil,
+        committedNavigationProgressID: UUID? = nil,
         canGoBack: Bool? = nil,
         canGoForward: Bool? = nil,
         backList: [WKBackForwardListItem]? = nil,
@@ -4566,6 +4586,7 @@ public class WebViewCoordinator: NSObject {
         let publicationCallerGeneration = scriptCallerReplacementGeneration
         var newState = webView.state
         newState.isLoading = isLoading
+        newState.committedNavigationProgressID = committedNavigationProgressID
         var pageURLChanged = false
         if let pageURL {
             if pageURL != webView.state.pageURL {
@@ -4664,6 +4685,8 @@ public class WebViewCoordinator: NSObject {
             return
         }
 
+        let progressID = navigator.issuedNavigationProgressID
+        let callbackGeneration = documentCallbackGeneration
         pendingProgressUpdateTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -4671,6 +4694,8 @@ public class WebViewCoordinator: NSObject {
                 return
             }
             guard let self,
+                  self.documentCallbackGeneration == callbackGeneration,
+                  self.navigator.issuedNavigationProgressID == progressID,
                   !self.navigator.hasPendingInternalReaderLoadBeforeProvisionalStart else { return }
             switch self.loadingProgressPublicationState.resolve(generation: generation) {
             case .stale:
@@ -4789,8 +4814,17 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             webView.state = newState
         } else if message.name == "swiftUIWebViewUnhandledTap" {
             let hasActiveLookup = navigator.nativeLookupHitTesting.activeLookupElementID?() != nil
-            let requestedHideNavigation = (message.body as? [String: Any])?["hideNavigationDueToScroll"] as? Bool
+            let navigationPayload = message.body as? [String: Any]
+            let requestedHideNavigation = navigationPayload?["hideNavigationDueToScroll"] as? Bool
             let isNavigationStateMessage = requestedHideNavigation != nil
+#if os(iOS)
+            if requestedHideNavigation == true,
+               navigationPayload?["reason"] as? String == "documentScrollDown",
+               navigationPayload?["inputType"] as? String == "touch",
+               shouldSuppressNativeDownwardNavigationHide?() == true {
+                return
+            }
+#endif
             if isNavigationStateMessage {
                 lastScrollHideNavigationMessageAt = Date.timeIntervalSinceReferenceDate
             }
@@ -5031,7 +5065,8 @@ extension WebViewCoordinator: WKUIDelegate {
         }
         navigator.performUnkeyedNavigation(
             on: webView,
-            reason: "targetBlankNavigation"
+            reason: "targetBlankNavigation",
+            destinationURL: navigationAction.request.url
         ) {
             webView.load(navigationAction.request)
         }
@@ -5139,6 +5174,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
             return
         }
+        navigator.observeFinishedNavigationProgress(navigation, in: webView)
 #if os(iOS)
         if hostLayoutController?.webView === webView {
             hostLayoutController?.reapplyObscuredInsets(reason: "navigationFinish")
@@ -5423,9 +5459,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-#if DEBUG
-        navigator.recordUITestMainFrameCommit(url: webView.url)
-#endif
         guard !navigator.isRetiredIssuedStagingNavigation(navigation, in: webView) else { return }
         // A replacement binding remains pending until its first committed
         // document. The commit callback is that ownership boundary; claim it
@@ -5445,6 +5478,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         navigator.observeStartedIssuedNavigation(navigation, in: webView)
+        navigator.observeStartedNavigationProgress(navigation, in: webView)
+#if DEBUG
+        navigator.recordUITestMainFrameCommit(
+            progressID: navigator.progressIdentity(forCommittedNavigation: navigation, in: webView)
+        )
+#endif
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         hasCommittedDocument = true
@@ -5542,7 +5581,11 @@ extension WebViewCoordinator: WKNavigationDelegate {
         var newState = setLoading(
             true,
             pageURL: webView.url,
-            isProvisionallyNavigating: false
+            isProvisionallyNavigating: false,
+            committedNavigationProgressID: navigator.progressIdentity(
+                forCommittedNavigation: navigation,
+                in: webView
+            )
         )
         guard isCurrentCallback() else { return }
         newState.pageImageURL = nil
@@ -5570,9 +5613,6 @@ extension WebViewCoordinator: WKNavigationDelegate {
     
     @MainActor
     public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-#if DEBUG
-        navigator.recordUITestMainFrameStart(requestedURL: navigator.readerLoadRequestedURL)
-#endif
         guard ownsWebView(webView),
               !navigator.isRetiredIssuedStagingNavigation(navigation, in: webView) else { return }
         if let enhancedWebView = webView as? EnhancedWKWebView,
@@ -5580,6 +5620,12 @@ extension WebViewCoordinator: WKNavigationDelegate {
             return
         }
         navigator.observeStartedIssuedNavigation(navigation, in: webView)
+        navigator.observeStartedNavigationProgress(navigation, in: webView)
+#if DEBUG
+        navigator.recordUITestMainFrameStart(
+            progressID: navigator.progressIdentity(forCommittedNavigation: navigation, in: webView)
+        )
+#endif
         invalidatePageStateExtraction()
         invalidateDocumentCallbackContext()
         navigator.nativeLookupHitTesting.removeAllTargets()
@@ -5730,6 +5776,8 @@ extension WebViewCoordinator: WKNavigationDelegate {
             canGoForward: webView.canGoForward,
             backList: webView.backForwardList.backList,
             forwardList: webView.backForwardList.forwardList)
+        guard isCurrentCallback() else { return }
+        navigator.observeStartedNavigationProgress(navigation, in: webView)
     }
     
     @MainActor
@@ -5741,11 +5789,16 @@ extension WebViewCoordinator: WKNavigationDelegate {
                    "mainFrame=\(navigationAction.targetFrame?.isMainFrame ?? false)")
 #endif
         let isMainDocumentNavigation = navigationAction.targetFrame?.isMainFrame == true
-        if isMainDocumentNavigation {
+        let requestedURL = navigationAction.request.url
+        let loaderRequestedURL = navigator.readerLoadRequestedURL
+        let isLateCanonicalRedirect = isMainDocumentNavigation
+            && navigationAction.navigationType == .other
+            && requestedURL.map { canonicalContentURLForReaderLoader(loaderRequestedURL) == $0 } == true
+        if isMainDocumentNavigation && !isLateCanonicalRedirect {
             // Observe native main-frame navigation before an app policy callback
             // can suspend. This also acknowledges our own issued request; a
             // dispatch receipt is checked synchronously before that later policy.
-            navigator.beginNavigationIntent()
+            navigator.beginNavigationIntent(preservingPreparedDataProgress: true)
             navigationPolicyGeneration &+= 1
         }
         let policyGeneration = navigationPolicyGeneration
@@ -5767,12 +5820,7 @@ extension WebViewCoordinator: WKNavigationDelegate {
             )
             return (.cancel, preferences)
         }
-        if isMainDocumentNavigation,
-           let requestedURL = navigationAction.request.url,
-           let loaderRequestedURL = navigator.readerLoadRequestedURL,
-           let canonicalLoaderURL = canonicalContentURLForReaderLoader(loaderRequestedURL),
-           requestedURL == canonicalLoaderURL,
-           navigationAction.navigationType == .other {
+        if isLateCanonicalRedirect, let requestedURL, let loaderRequestedURL {
             readerLoadLog(
                 "webView.nav.cancelLateCanonicalRedirect",
                 [
@@ -5910,6 +5958,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
 #if os(iOS)
     @MainActor weak var scrollViewSuppressingNavigationReveal: UIScrollView?
 
+    @MainActor
+    public var isNativeScrollInProgress: Bool {
+        guard let scrollView = webView?.scrollView else { return false }
+        return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
+    }
+
     /// Keeps a host-requested collapse from being undone by the native
     /// reveal threshold during the same drag.
     @MainActor
@@ -5964,8 +6018,21 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor
     @discardableResult
     public func beginNavigationIntent() -> NavigationIntent {
+        beginNavigationIntent(preservingPreparedDataProgress: false)
+    }
+
+    @MainActor
+    @discardableResult
+    fileprivate func beginNavigationIntent(preservingPreparedDataProgress: Bool) -> NavigationIntent {
         navigationIntentID = UUID()
-        return navigationIntent
+        let intent = navigationIntent
+        // Policy does not expose a WKNavigation. Acknowledging a policy event
+        // revokes any pending HTML dispatch, but leaves accepted data progress
+        // until the native callback identifies the next navigation.
+        if !preservingPreparedDataProgress || !issuedNavigationIsPreparedData {
+            issuedNavigationProgressSourceID = nil
+        }
+        return intent
     }
 
     @MainActor
@@ -5992,7 +6059,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     private let issuedNavigationOwner = UUID()
     @MainActor public private(set) var issuedNavigationIdentity: IssuedNavigationIdentity?
+    @MainActor @Published public private(set) var issuedNavigationProgressID: UUID?
+    @MainActor @Published public private(set) var issuedNavigationProgressURL: URL?
+    @MainActor @Published public private(set) var issuedNavigationProgressHasStarted = false
+    @MainActor @Published public private(set) var issuedNavigationProgressSourceID: UUID?
     @MainActor private var issuedNavigationIsPreparedData = false
+    @MainActor private var readerModeProgressIsComplete = false
+    @MainActor private weak var progressNavigationWebView: WKWebView?
+    @MainActor private weak var progressNativeNavigation: WKNavigation?
     /// Compatibility projection: ordinary requests/reloads never become data loads.
     @MainActor public var issuedDataNavigationIdentity: IssuedDataNavigationIdentity? {
         issuedNavigationIsPreparedData ? issuedNavigationIdentity : nil
@@ -6002,31 +6076,60 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private weak var issuedNavigationWebView: WKWebView?
 
     @MainActor
-    private func recordIssuedNavigation(isPreparedData: Bool) {
+    private func recordIssuedNavigation(
+        isPreparedData: Bool,
+        destinationURL: URL?,
+        progressSourceID: UUID? = nil
+    ) {
         issuedNativeNavigation = nil
         issuedStagingNavigation = nil
         issuedNavigationWebView = nil
+        progressNativeNavigation = nil
+        progressNavigationWebView = nil
         issuedNavigationIsPreparedData = isPreparedData
-        issuedNavigationIdentity = IssuedNavigationIdentity(owner: issuedNavigationOwner, id: UUID())
+        readerModeProgressIsComplete = false
+        issuedNavigationProgressSourceID = progressSourceID
+        let id = UUID()
+        issuedNavigationIdentity = IssuedNavigationIdentity(owner: issuedNavigationOwner, id: id)
+        issuedNavigationProgressURL = destinationURL
+        issuedNavigationProgressID = id
+        issuedNavigationProgressHasStarted = false
+    }
+
+    @MainActor
+    private func beginUnkeyedNavigationProgress(destinationURL: URL?) {
+        issuedNavigationProgressSourceID = nil
+        issuedNavigationProgressURL = destinationURL
+        issuedNavigationProgressID = UUID()
+        issuedNavigationProgressHasStarted = false
     }
 
     @MainActor
     private func retireIssuedNavigation() {
         issuedNavigationIdentity = nil
+        issuedNavigationProgressID = nil
+        issuedNavigationProgressURL = nil
+        issuedNavigationProgressHasStarted = false
         issuedNavigationIsPreparedData = false
+        readerModeProgressIsComplete = false
+        issuedNavigationProgressSourceID = nil
         issuedNativeNavigation = nil
         issuedStagingNavigation = nil
         issuedNavigationWebView = nil
+        progressNativeNavigation = nil
+        progressNavigationWebView = nil
     }
 
     @MainActor
     private func rememberIssuedNavigation(_ navigation: WKNavigation?, in webView: WKWebView, isStaging: Bool = false) {
         guard issuedNavigationIdentity != nil else { return }
         guard let navigation else {
-            retireIssuedNavigation()
+            if !isStaging { retireIssuedNavigation() }
             return
         }
         issuedNativeNavigation = navigation
+        progressNativeNavigation = navigation
+        progressNavigationWebView = webView
         if isStaging { issuedStagingNavigation = navigation }
         issuedNavigationWebView = webView
     }
@@ -6052,9 +6155,94 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     fileprivate func observeFailedIssuedNavigation(_ navigation: WKNavigation?, in webView: WKWebView) {
-        guard let navigation, issuedNavigationWebView === webView,
-              issuedNativeNavigation === navigation else { return }
-        retireIssuedNavigation()
+        guard let navigation, issuedStagingNavigation !== navigation,
+              progressNavigationWebView === webView,
+              progressNativeNavigation === navigation else { return }
+        if issuedNavigationWebView === webView,
+           issuedNativeNavigation === navigation,
+           issuedNavigationIdentity != nil {
+            retireIssuedNavigation()
+        } else {
+            issuedNavigationProgressID = nil
+            issuedNavigationProgressURL = nil
+            issuedNavigationProgressHasStarted = false
+            issuedNavigationProgressSourceID = nil
+            progressNativeNavigation = nil
+            progressNavigationWebView = nil
+        }
+    }
+
+    @MainActor
+    fileprivate func observeStartedNavigationProgress(_ navigation: WKNavigation?, in webView: WKWebView) {
+        guard let navigation, issuedStagingNavigation !== navigation,
+              progressNavigationWebView === webView,
+              progressNativeNavigation === navigation else { return }
+        issuedNavigationProgressHasStarted = true
+    }
+
+    @MainActor
+    fileprivate func progressIdentity(forCommittedNavigation navigation: WKNavigation?, in webView: WKWebView) -> UUID? {
+        guard let navigation,
+              progressNavigationWebView === webView,
+              progressNativeNavigation === navigation,
+              issuedNavigationProgressHasStarted else { return nil }
+        return issuedNavigationProgressID
+    }
+
+    @MainActor
+    fileprivate func observeFinishedNavigationProgress(_ navigation: WKNavigation?, in webView: WKWebView) {
+        guard let navigation, issuedStagingNavigation !== navigation,
+              progressNavigationWebView === webView,
+              progressNativeNavigation === navigation else { return }
+        progressNativeNavigation = nil
+        progressNavigationWebView = nil
+        issuedNavigationProgressID = nil
+        issuedNavigationProgressURL = nil
+        issuedNavigationProgressHasStarted = false
+        if readerModeProgressIsComplete {
+            issuedNavigationProgressSourceID = nil
+        }
+    }
+
+    @MainActor
+    public func captureReaderModeProgressSource(
+        progressID: UUID?,
+        forCommittedURL url: URL
+    ) -> UUID? {
+        guard let progressID,
+              issuedNavigationProgressID == progressID,
+              issuedNavigationIdentity != nil,
+              issuedNavigationProgressHasStarted,
+              !issuedNavigationIsPreparedData,
+              issuedNavigationProgressURL?.absoluteString == url.absoluteString else {
+            return nil
+        }
+        issuedNavigationProgressSourceID = progressID
+        return progressID
+    }
+
+    /// The address bar keeps its owner until both the prepared navigation
+    /// and the Reader document have finished.
+    @MainActor
+    public func completeReaderModeProgressSource(_ progressSourceID: UUID) {
+        guard issuedNavigationProgressSourceID == progressSourceID else { return }
+        readerModeProgressIsComplete = true
+        if issuedNavigationProgressID == nil {
+            issuedNavigationProgressSourceID = nil
+        }
+    }
+
+    @MainActor
+    public func canContinueReaderModeNavigation(from sourceID: UUID) -> Bool {
+        issuedNavigationProgressSourceID == sourceID
+            && !issuedNavigationIsPreparedData
+            && !readerModeProgressIsComplete
+    }
+
+    @MainActor
+    public func retireReaderModeProgressSource(_ progressSourceID: UUID) {
+        guard issuedNavigationProgressSourceID == progressSourceID else { return }
+        issuedNavigationProgressSourceID = nil
     }
 
     @MainActor
@@ -6094,6 +6282,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
     @MainActor private var uiTestHTMLDispatchCounts: [String: Int] = [:]
     @MainActor private var uiTestMainFrameStartCounts: [String: Int] = [:]
     @MainActor private var uiTestMainFrameCommitCounts: [String: Int] = [:]
+    @MainActor private var uiTestNavigationIdentityByProgressID: [UUID: String] = [:]
 
     @MainActor
     public func uiTestReaderLoadTraceSummary(for url: URL) -> String {
@@ -6102,23 +6291,27 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
 
     @MainActor
-    fileprivate func recordUITestHTMLDispatch(baseURL: URL?) {
+    fileprivate func recordUITestHTMLDispatch(baseURL: URL?, progressID: UUID?) {
         guard readerLoadUITestTraceEnabled, let baseURL else { return }
-        uiTestHTMLDispatchCounts[baseURL.absoluteString, default: 0] += 1
+        let key = baseURL.absoluteString
+        uiTestHTMLDispatchCounts[key, default: 0] += 1
+        if let progressID { uiTestNavigationIdentityByProgressID[progressID] = key }
         uiTestReaderLoadTraceRevision &+= 1
     }
 
     @MainActor
-    fileprivate func recordUITestMainFrameStart(requestedURL: URL?) {
-        guard readerLoadUITestTraceEnabled, let requestedURL else { return }
-        uiTestMainFrameStartCounts[requestedURL.absoluteString, default: 0] += 1
+    fileprivate func recordUITestMainFrameStart(progressID: UUID?) {
+        guard readerLoadUITestTraceEnabled, let progressID,
+              let key = uiTestNavigationIdentityByProgressID[progressID] else { return }
+        uiTestMainFrameStartCounts[key, default: 0] += 1
         uiTestReaderLoadTraceRevision &+= 1
     }
 
     @MainActor
-    fileprivate func recordUITestMainFrameCommit(url: URL?) {
-        guard readerLoadUITestTraceEnabled, let url else { return }
-        uiTestMainFrameCommitCounts[url.absoluteString, default: 0] += 1
+    fileprivate func recordUITestMainFrameCommit(progressID: UUID?) {
+        guard readerLoadUITestTraceEnabled, let progressID,
+              let key = uiTestNavigationIdentityByProgressID[progressID] else { return }
+        uiTestMainFrameCommitCounts[key, default: 0] += 1
         uiTestReaderLoadTraceRevision &+= 1
     }
 #endif
@@ -6674,21 +6867,31 @@ public class WebViewNavigator: NSObject, ObservableObject {
     fileprivate func performUnkeyedNavigation(
         on sourceWebView: WKWebView,
         reason: String,
+        destinationURL: URL? = nil,
         tracksIssuedNavigation: Bool = false,
         _ start: () -> WKNavigation?
     ) -> WKNavigation? {
         guard ownsBoundWebView(sourceWebView) else { return nil }
         beginNavigationIntent()
         retireIssuedNavigation()
-        if tracksIssuedNavigation { recordIssuedNavigation(isPreparedData: false) }
+        if tracksIssuedNavigation { recordIssuedNavigation(isPreparedData: false, destinationURL: destinationURL) }
+        else { beginUnkeyedNavigationProgress(destinationURL: destinationURL) }
+        let progressID = issuedNavigationProgressID
         let issuedIdentity = issuedNavigationIdentity
         guard let navigation = start() else {
             if tracksIssuedNavigation, issuedNavigationIdentity == issuedIdentity { retireIssuedNavigation() }
+            else if !tracksIssuedNavigation, issuedNavigationProgressID == progressID {
+                issuedNavigationProgressID = nil
+                issuedNavigationProgressURL = nil
+            }
             return nil
         }
         if tracksIssuedNavigation {
             guard issuedNavigationIdentity == issuedIdentity else { return navigation }
             rememberIssuedNavigation(navigation, in: sourceWebView)
+        } else {
+            progressNativeNavigation = navigation
+            progressNavigationWebView = sourceWebView
         }
         beginPooledContentUnkeyedNavigation(
             sourceWebView,
@@ -7249,6 +7452,13 @@ public class WebViewNavigator: NSObject, ObservableObject {
                     baseURL: pendingDataLoad.baseURL
                 )
                 rememberIssuedNavigation(navigation, in: webView)
+                if navigation != nil {
+#if DEBUG
+                    if pendingDataLoad.mimeType.caseInsensitiveCompare("text/html") == .orderedSame {
+                        recordUITestHTMLDispatch(baseURL: pendingDataLoad.baseURL, progressID: issuedNavigationProgressID)
+                    }
+#endif
+                }
                 beginPooledContentUnkeyedNavigation(
                     webView,
                     navigation: navigation
@@ -7262,6 +7472,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                    enhancedWebView.poolReadyContentID == pendingHTMLContentID {
                     self.pendingHTML = nil
                     self.pendingHTMLContentID = nil
+                    retireIssuedNavigation()
                     return
                 }
                 cancelAttachFallbackLoadTask(reason: "pendingHTMLFlushedOnAttach")
@@ -7276,12 +7487,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
                         ] as [String : Any]
                     )
                 }
-                loadHTMLContent(
+                let navigation = loadHTMLContent(
                     pendingHTML.html,
                     baseURL: pendingHTML.baseURL,
                     contentID: pendingHTMLContentID,
                     on: webView
                 )
+                progressNativeNavigation = navigation
+                progressNavigationWebView = webView
                 self.pendingHTML = nil
                 pendingHTMLContentID = nil
                 return
@@ -7306,7 +7519,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
 
     @MainActor
     private func loadRequest(_ request: URLRequest) {
-        recordIssuedNavigation(isPreparedData: false)
+        recordIssuedNavigation(isPreparedData: false, destinationURL: request.url)
         lastLoadedRequest = request
         lastLoadedHTML = nil
         lastLoadedDataLoad = nil
@@ -7325,9 +7538,27 @@ public class WebViewNavigator: NSObject, ObservableObject {
     }
     
     @MainActor
-    public func load(_ data: Data, mimeType: String, characterEncodingName: String, baseURL: URL) {
+    @discardableResult
+    public func load(
+        _ data: Data,
+        mimeType: String,
+        characterEncodingName: String,
+        baseURL: URL,
+        progressSourceID: UUID? = nil
+    ) -> Bool {
+        // Eligibility is checked synchronously immediately before this data
+        // load creates its new native intent. A retired same-URL source cannot
+        // be reattached by a delayed render callback.
+        if let progressSourceID, !canContinueReaderModeNavigation(from: progressSourceID) {
+            return false
+        }
         beginNavigationIntent()
-        recordIssuedNavigation(isPreparedData: true)
+        recordIssuedNavigation(
+            isPreparedData: true,
+            destinationURL: baseURL,
+            progressSourceID: progressSourceID
+        )
+        let issuedIdentity = issuedNavigationIdentity
         lastLoadedDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
         lastLoadedRequest = nil
         lastLoadedHTML = nil
@@ -7362,7 +7593,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         )
         guard let webView else {
             pendingDataLoad = (data: data, mimeType: mimeType, characterEncodingName: characterEncodingName, baseURL: baseURL)
-            return
+            return true
         }
         clearPoolContentState(on: webView)
 #if DEBUG
@@ -7388,7 +7619,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
             characterEncodingName: characterEncodingName,
             baseURL: baseURL
         )
+        guard issuedNavigationIdentity == issuedIdentity, ownsBoundWebView(webView) else { return false }
         rememberIssuedNavigation(navigation, in: webView)
+        guard navigation != nil else { return false }
+#if DEBUG
+        if mimeType.caseInsensitiveCompare("text/html") == .orderedSame {
+            recordUITestHTMLDispatch(baseURL: baseURL, progressID: issuedNavigationProgressID)
+        }
+#endif
         beginPooledContentUnkeyedNavigation(
             webView,
             navigation: navigation
@@ -7401,6 +7639,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
                 "elapsedSinceDataLoadIssued": readerLoadElapsedString(since: readerLoadIssuedAt, now: readerLoadDirectDataReturnedAt ?? Date())
             ]
         )
+        return true
     }
 
     @MainActor
@@ -7423,6 +7662,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingHTMLContentID = nil
             return
         }
+        beginUnkeyedNavigationProgress(destinationURL: baseURL)
         cancelReaderLoadHeartbeat(reason: "explicitHTMLLoad")
         cancelContentProcessPrewarm(reason: "explicitHTMLLoad")
         cancelPreProvisionalWarningTask()
@@ -7455,12 +7695,14 @@ public class WebViewNavigator: NSObject, ObservableObject {
             pendingHTMLContentID = contentID
             return
         }
-        loadHTMLContent(
+        let navigation = loadHTMLContent(
             html,
             baseURL: baseURL,
             contentID: contentID,
             on: webView
         )
+        progressNativeNavigation = navigation
+        progressNavigationWebView = webView
     }
 
     @MainActor
@@ -7473,9 +7715,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
     ) -> WKNavigation? {
         let enhancedWebView = webView as? EnhancedWKWebView
         let navigation = webView.loadHTMLString(html, baseURL: baseURL)
+        if navigation != nil {
 #if DEBUG
-        recordUITestHTMLDispatch(baseURL: baseURL)
+            recordUITestHTMLDispatch(baseURL: baseURL, progressID: issuedNavigationProgressID)
 #endif
+        }
         if let enhancedWebView, let navigation {
             if let contentID {
                 enhancedWebView.beginKeyedNavigation(
@@ -7504,7 +7748,12 @@ public class WebViewNavigator: NSObject, ObservableObject {
         retireIssuedNavigation()
         logCompetingOperationIfNeeded("reload", metadata: [:])
         guard let webView else { return }
-        performUnkeyedNavigation(on: webView, reason: "reload", tracksIssuedNavigation: true) {
+        performUnkeyedNavigation(
+            on: webView,
+            reason: "reload",
+            destinationURL: webView.url,
+            tracksIssuedNavigation: true
+        ) {
             webView.reload()
         }
     }
@@ -7552,7 +7801,8 @@ public class WebViewNavigator: NSObject, ObservableObject {
         guard let webView else { return }
         let navigation = performUnkeyedNavigation(
             on: webView,
-            reason: "reloadWithoutContentRules"
+            reason: "reloadWithoutContentRules",
+            destinationURL: webView.url
         ) {
             webView.reload()
         }
@@ -7612,7 +7862,7 @@ public class WebViewNavigator: NSObject, ObservableObject {
         beginNavigationIntent()
         retireIssuedNavigation()
         guard let webView else { return }
-        performUnkeyedNavigation(on: webView, reason: "goToHistoryItem") {
+        performUnkeyedNavigation(on: webView, reason: "goToHistoryItem", destinationURL: item.url) {
             webView.go(to: item)
         }
     }
@@ -7622,7 +7872,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
         beginNavigationIntent()
         retireIssuedNavigation()
         guard let webView else { return }
-        performUnkeyedNavigation(on: webView, reason: "goBack") {
+        performUnkeyedNavigation(
+            on: webView,
+            reason: "goBack",
+            destinationURL: webView.backForwardList.backItem?.url
+        ) {
             webView.goBack()
         }
     }
@@ -7632,7 +7886,11 @@ public class WebViewNavigator: NSObject, ObservableObject {
         beginNavigationIntent()
         retireIssuedNavigation()
         guard let webView else { return }
-        performUnkeyedNavigation(on: webView, reason: "goForward") {
+        performUnkeyedNavigation(
+            on: webView,
+            reason: "goForward",
+            destinationURL: webView.backForwardList.forwardItem?.url
+        ) {
             webView.goForward()
         }
     }
@@ -11181,6 +11439,7 @@ public struct WebView {
     let onURLChanged: ((WebViewState) -> Void)?
     let onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)?
     let onScrollBottomStateChanged: (@MainActor (Bool) -> Void)?
+    let shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)?
     let buildMenu: BuildMenuType?
     @Binding var hideNavigationDueToScroll: Bool
     @Binding var textSelection: String?
@@ -11216,6 +11475,7 @@ public struct WebView {
                 onURLChanged: ((WebViewState) -> Void)? = nil,
                 onNavigationAction: ((WKNavigationAction) async -> WKNavigationActionPolicy?)? = nil,
                 onScrollBottomStateChanged: (@MainActor (Bool) -> Void)? = nil,
+                shouldSuppressNativeDownwardNavigationHide: (@MainActor @Sendable () -> Bool)? = nil,
                 buildMenu: BuildMenuType? = nil,
                 hideNavigationDueToScroll: Binding<Bool> = .constant(false),
                 textSelection: Binding<String?>? = nil,
@@ -11243,6 +11503,7 @@ public struct WebView {
         self.onURLChanged = onURLChanged
         self.onNavigationAction = onNavigationAction
         self.onScrollBottomStateChanged = onScrollBottomStateChanged
+        self.shouldSuppressNativeDownwardNavigationHide = shouldSuppressNativeDownwardNavigationHide
         self.buildMenu = buildMenu
         _hideNavigationDueToScroll = hideNavigationDueToScroll
         _textSelection = textSelection ?? .constant(nil)
@@ -11283,6 +11544,7 @@ public struct WebView {
             onURLChanged: onURLChanged,
             onNavigationAction: onNavigationAction,
             onScrollBottomStateChanged: onScrollBottomStateChanged,
+            shouldSuppressNativeDownwardNavigationHide: shouldSuppressNativeDownwardNavigationHide,
             hideNavigationDueToScroll: $hideNavigationDueToScroll,
             textSelection: $textSelection
         )
@@ -12385,6 +12647,7 @@ extension WebView {
         context.coordinator.onURLChanged = onURLChanged
         context.coordinator.onNavigationAction = onNavigationAction
         context.coordinator.onScrollBottomStateChanged = onScrollBottomStateChanged
+        context.coordinator.shouldSuppressNativeDownwardNavigationHide = shouldSuppressNativeDownwardNavigationHide
 #if os(iOS)
         if let webView = context.coordinator.navigator.webView {
             context.coordinator.installScrollBottomStateObservations(for: webView.scrollView)

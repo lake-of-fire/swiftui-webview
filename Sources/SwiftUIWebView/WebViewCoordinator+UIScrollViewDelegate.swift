@@ -61,7 +61,12 @@ extension WebViewCoordinator: UIScrollViewDelegate {
 
         if abs(accumulatedScrollOffset) >= threshold {
             let newValue = accumulatedScrollOffset > 0
-            if newValue != currentHideNavigationDueToScroll,
+            let isVerticalScroll = navigationScrollAxis == .vertical || abs(deltaY) >= abs(deltaX)
+            let suppressesHide = newValue && isVerticalScroll
+                && shouldSuppressNativeDownwardNavigationHide?() == true
+            guard ownsCallback() else { return }
+            if !suppressesHide,
+               newValue != currentHideNavigationDueToScroll,
                navigator.allowsScrollDrivenNavigationVisibility(newValue, for: scrollView) {
 #if DEBUG
                 debugPrint(
@@ -200,6 +205,13 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             return
         }
 
+        let isAtEnd = scrollOffsetIsAtEnd(scrollView.contentOffset, in: scrollView)
+        guard lastPublishedScrollBottomState != isAtEnd else { return }
+        lastPublishedScrollBottomState = isAtEnd
+        onScrollBottomStateChanged(isAtEnd)
+    }
+
+    private func scrollOffsetIsAtEnd(_ offset: CGPoint, in scrollView: UIScrollView) -> Bool {
         let isAtEnd: Bool
         switch navigationScrollAxis {
         case .vertical:
@@ -209,7 +221,7 @@ extension WebViewCoordinator: UIScrollViewDelegate {
                 scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
             )
             isAtEnd = maximumOffset - minimumOffset <= 1
-                || scrollView.contentOffset.y >= maximumOffset - 2
+                || offset.y >= maximumOffset - 2
         case .horizontal:
             let minimumOffset = -scrollView.adjustedContentInset.left
             let maximumOffset = max(
@@ -219,15 +231,13 @@ extension WebViewCoordinator: UIScrollViewDelegate {
             if maximumOffset - minimumOffset <= 1 {
                 isAtEnd = true
             } else if horizontalForwardSign < 0 {
-                isAtEnd = scrollView.contentOffset.x <= minimumOffset + 2
+                isAtEnd = offset.x <= minimumOffset + 2
             } else {
-                isAtEnd = scrollView.contentOffset.x >= maximumOffset - 2
+                isAtEnd = offset.x >= maximumOffset - 2
             }
         }
 
-        guard lastPublishedScrollBottomState != isAtEnd else { return }
-        lastPublishedScrollBottomState = isAtEnd
-        onScrollBottomStateChanged(isAtEnd)
+        return isAtEnd
     }
 
     private func resolvedScrollDifference(deltaX: CGFloat, deltaY: CGFloat) -> CGFloat {
