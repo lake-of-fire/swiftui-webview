@@ -238,6 +238,64 @@ final class WebViewPoolTests: XCTestCase {
         )
     }
 
+    func testDetachedFactoryUsesItsCapturedAppearanceBeforeMounting() {
+        let source = WebView(navigator: WebViewNavigator(), state: .constant(.empty))
+        let dark = WebViewConfig(darkModeSetting: .darkModeOverride)
+        let webView = source.makeDetachedWebViewFactory(config: dark)()
+
+        XCTAssertNil(webView.superview)
+#if os(iOS)
+        XCTAssertEqual(webView.overrideUserInterfaceStyle, .dark)
+#elseif os(macOS)
+        XCTAssertEqual(webView.appearance?.name, .darkAqua)
+#endif
+    }
+
+    func testRefreshingPooledWebViewSwitchesAppearanceAndRestoresSystemDefault() {
+        let system = WebView(navigator: WebViewNavigator(), state: .constant(.empty))
+        let dark = WebViewConfig(darkModeSetting: .darkModeOverride)
+        let makeDarkWebView = system.makeDetachedWebViewFactory(config: dark)
+        let pool = WebViewPool(warmUpCount: 1)
+        defer { pool.invalidate() }
+
+        var warmedWebView: EnhancedWKWebView?
+        pool.setCreationClosureIfNeeded {
+            let webView = makeDarkWebView()
+            warmedWebView = webView
+            return webView
+        }
+        let reused = pool.dequeue {
+            XCTFail("Expected the warmed native WebView")
+            return makeDarkWebView()
+        }
+        XCTAssertTrue(reused === warmedWebView)
+#if os(iOS)
+        XCTAssertEqual(reused.overrideUserInterfaceStyle, .dark)
+#elseif os(macOS)
+        XCTAssertEqual(reused.appearance?.name, .darkAqua)
+#endif
+
+        let light = WebView(
+            config: WebViewConfig(darkModeSetting: .alwaysLightMode),
+            navigator: WebViewNavigator(),
+            state: .constant(.empty)
+        )
+        light.refreshDarkModeSetting(webView: reused)
+#if os(iOS)
+        XCTAssertEqual(reused.overrideUserInterfaceStyle, .light)
+#elseif os(macOS)
+        XCTAssertEqual(reused.appearance?.name, .aqua)
+#endif
+
+        system.refreshDarkModeSetting(webView: reused)
+#if os(iOS)
+        XCTAssertEqual(reused.overrideUserInterfaceStyle, .unspecified)
+#elseif os(macOS)
+        XCTAssertNil(reused.appearance)
+#endif
+        pool.enqueue(reused)
+    }
+
     func testDetachedProductionFactoryDoesNotRetainSourceNavigatorOrPrewarmer() {
         weak var weakNavigator: WebViewNavigator?
         weak var weakPrewarmer: WebViewPrewarmer?
